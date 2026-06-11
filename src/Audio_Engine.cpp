@@ -559,7 +559,7 @@ struct SynthVoice {
         if (phase2 >= 2.0f * 3.14159265f) phase2 -= 2.0f * 3.14159265f;
 
         // --- 8. PROCESS WHITE NOISE TRANSIENT ---
-        float rawNoise = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
+        float rawNoise = FastRandFloat(randomSeed) * 2.0f - 1.0f;
         float scaledNoise = rawNoise * noiseEnvLevel * (GetParam(sp.noiseVolume, trk.noiseVolume) / 99.0f);
 
         // Mix noise with synthesized waves BEFORE filter stage
@@ -1160,6 +1160,8 @@ void InitAudioEngine() {
     deviceConfig.playback.channels = 2; // Stereo
     deviceConfig.sampleRate        = (ma_uint32)g_sampleRate;
     deviceConfig.dataCallback      = ma_audio_callback;
+    
+    deviceConfig.periodSizeInMilliseconds = 30;
 
     // Initialize delay lines with device sample rate on launch [2]
     g_masterDelay.init((float)g_sampleRate);
