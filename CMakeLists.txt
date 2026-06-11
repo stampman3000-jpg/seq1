@@ -25,6 +25,8 @@ if(NOT raylib_FOUND)
     set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
     
+set(GRAPHICS "GRAPHICS_API_OPENGL_21" CACHE STRING "" FORCE)
+
     FetchContent_MakeAvailable(raylib)
 endif()
 
