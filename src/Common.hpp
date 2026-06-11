@@ -2,6 +2,9 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <cmath>        // <--- ADD THIS (Fixes powf and tanf)
+#include <cstdint>      // <--- ADD THIS (Fixes uint8_t, uint32_t, int16_t)
+#include <algorithm>    // <--- ADD THIS (Fixes std::clamp, std::min, std::max)
 #include "raylib.h"
 #include "Tape_Buffer_FX.hpp"
 
