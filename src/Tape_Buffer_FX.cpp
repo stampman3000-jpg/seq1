@@ -82,10 +82,12 @@ float TapeBufferFX::process(float input,
     if (memSamples > 88200.0f) memSamples = 88200.0f;
     if (memSamples < 2205.0f)  memSamples = 2205.0f;
 
-    // Quick background bypass recording if mix is zero
     if (mixParam <= 0.0f) {
         delayBuf[(int)writePos] = saturate(input);
-        writePos = std::fmod(writePos + 1.0f, memSamples);
+        writePos += 1.0f;
+        if (writePos >= memSamples) {
+            writePos = 0.0f;
+        }
         return input;
     }
 
@@ -229,7 +231,10 @@ float TapeBufferFX::process(float input,
     delayBuf[(int)writePos] = writeSignal;
 
     // Increment write head
-    writePos = std::fmod(writePos + 1.0f, memSamples);
+    writePos += 1.0f;
+    if (writePos >= memSamples) {
+        writePos = 0.0f;
+    }
 
     // Dry/Wet Mix
     return (1.0f - mixParam) * input + mixParam * (totalReadSignal * 1.40f);

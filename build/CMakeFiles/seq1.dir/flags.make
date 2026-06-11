@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -D__MACOSX_CORE__
 
-CXX_INCLUDES = -isystem /opt/homebrew/include
+CXX_INCLUDES = -I/Users/johnny/Desktop/seq1 -I/Users/johnny/Desktop/seq1/src -isystem /opt/homebrew/include
 
 CXX_FLAGSarm64 = -g -std=gnu++17 -arch arm64 -I/opt/homebrew/Cellar/raylib/5.5/include
 

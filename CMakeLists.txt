@@ -67,6 +67,9 @@ elseif(UNIX AND NOT APPLE)
     # Linux (Raspberry Pi) uses ALSA
     target_compile_definitions(seq1 PRIVATE __LINUX_ALSA__)
     target_link_libraries(seq1 PRIVATE asound pthread)
+    
+    # --- ADD THIS LINE (Enables NEON vectorization and aggressive ARM math optimization) ---
+    target_compile_options(seq1 PRIVATE -O3 -ffast-math -march=native)
 endif()
 
 # -----------------------------------------------------------------
