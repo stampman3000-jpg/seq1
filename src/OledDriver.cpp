@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <cstring> // Required for std::memset
 
 #if defined(__linux__)
 // --- RASPBERRY PI / LINUX HEADERS ---
@@ -54,10 +55,24 @@ static void gpioWrite(int pin, int val) {
     f << val;
 }
 
-// --- SPI TRANSMISSION HELPERS ---
+// --- STANDARD LINUX IOCTL SPI TRANSMISSION (Enforces CS and Speed) ---
 static void spiWrite(const uint8_t* data, size_t len) {
-    if (g_spiFd < 0) return;
-    write(g_spiFd, data, len);
+    if (g_spiFd < 0 || len == 0) return;
+
+    struct spi_ioc_transfer tr;
+    std::memset(&tr, 0, sizeof(tr));
+    
+    tr.tx_buf = (unsigned long)data;
+    tr.rx_buf = 0;
+    tr.len = len;
+    tr.speed_hz = 2000000;      // Explicitly enforce 2 MHz SPI Speed
+    tr.bits_per_word = 8;       // Enforce 8-bit words
+    tr.delay_usecs = 0;
+
+    // Execute synchronous, hardware-bounded SPI transfer (toggles CS automaticamente)
+    if (ioctl(g_spiFd, SPI_IOC_MESSAGE(1), &tr) < 0) {
+        std::cerr << "[OLED] SPI Error: SPI_IOC_MESSAGE transaction failed" << std::endl;
+    }
 }
 
 static void writeCommand(uint8_t cmd) {
