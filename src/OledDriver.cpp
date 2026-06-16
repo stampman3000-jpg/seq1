@@ -79,9 +79,9 @@ void InitOled() {
     }
 
     // 3. Configure SPI speed, word bits, and mode
-    uint8_t mode = SPI_MODE_3; // Mode 3 or Mode 0 is standard for SSD1322
-    uint8_t bits = 8;
-    uint32_t speed = 10000000; // 10 MHz SPI Clock
+        uint8_t mode = SPI_MODE_0; // <--- CHANGED from SPI_MODE_3 to SPI_MODE_0 (matches luma.oled)
+        uint8_t bits = 8;
+        uint32_t speed = 2000000; // <--- REDUCED from 10 MHz to 2 MHz for clean, noise-free signals
 
     if (ioctl(g_spiFd, SPI_IOC_WR_MODE, &mode) < 0) std::cerr << "[OLED] SPI mode failed" << std::endl;
     if (ioctl(g_spiFd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) std::cerr << "[OLED] SPI bits failed" << std::endl;
