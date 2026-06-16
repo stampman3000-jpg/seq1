@@ -234,10 +234,11 @@ void UpdateOled(RenderTexture2D oledScreen) {
     // Because texture coordinates are vertically inverted in OpenGL,
     // we read rows from bottom to top to draw right-side-up!
     int outIndex = 0;
-    for (int y = 63; y >= 0; --y) {
-        for (int x = 0; x < 256; x += 2) {
-            Color p1 = pixels[y * 256 + x];
-            Color p2 = pixels[y * 256 + x + 1];
+        for (int y = 63; y >= 0; --y) {
+            for (int x = 0; x < 256; x += 2) {
+                // Read backward (right to left) to mirror the screen horizontally!
+                Color p1 = pixels[y * 256 + (255 - x)];
+                Color p2 = pixels[y * 256 + (254 - x)];
 
             // Convert to 4-bit grayscale (0 to 15)
             // If any channel is active, we turn the pixel fully white
