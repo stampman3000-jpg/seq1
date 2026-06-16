@@ -11,6 +11,7 @@
 #include "UI_Screens.hpp"
 #include "Audio_Engine.hpp"
 #include "Midi_Manager.hpp"
+#include "OledDriver.hpp"
 
 int main() {
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "8-Track Sequencer - Premium UI");
@@ -22,7 +23,8 @@ int main() {
     InitializeTracks();
     InitAudioEngine();
     InitMidi(); // Spin up the RtMidi background ports
-
+    InitOled();
+    
     // --- STARTUP BOOT ANIMATION STAGE ---
         bool playBootAnimation = true;
         int bootFrame = 0;
@@ -37,6 +39,14 @@ int main() {
                 bootFrame++;
                 if (bootFrame >= BOOT_FRAME_COUNT) {
                     playBootAnimation = false; // Transition to sequencer
+                    // Draw current animation frame to the virtual OLED target texture
+                                BeginTextureMode(oledScreen);
+                                    // ... (drawing logic)
+                                EndTextureMode();
+                                UpdateOled(oledScreen); // <--- ADD THIS LINE
+
+                                // Render scaled up virtual texture to the physical window
+                                BeginDrawing();
                 }
             }
 
@@ -1618,7 +1628,7 @@ int main() {
                     }
 
                 EndTextureMode();
-
+        UpdateOled(oledScreen);
                 // --- RENDER SCALED-UP CANVAS TO WINDOW ---
                 BeginDrawing();
                     ClearBackground(DARKGRAY);
@@ -1634,7 +1644,8 @@ int main() {
 
             ShutdownAudioEngine();
             ShutdownMidi(); // Safely unbind and delete RtMidi ports
-            UnloadRenderTexture(oledScreen);
+    ShutdownOled();
+    UnloadRenderTexture(oledScreen);
             CloseWindow();
 
             return 0;
