@@ -14,9 +14,9 @@
 // Global handles (only compiled on Linux)
 static int g_spiFd = -1;
 
-// --- GPIO PIN CONFIGURATION (Matches your wiring) ---
-static const int PIN_DC  = 25;  // GPIO 25 (Pin 22)
-static const int PIN_RES = 24;  // GPIO 24 (Pin 18)
+// --- GPIO PIN CONFIGURATION (Includes modern 512 kernel offset) ---
+static const int PIN_DC  = 512 + 25;  // GPIO 25 (Pin 22) -> 537
+static const int PIN_RES = 512 + 24;  // GPIO 24 (Pin 18) -> 536
 
 // --- DIRECT SYSFS GPIO HELPERS ---
 static void gpioExport(int pin) {
@@ -63,7 +63,7 @@ void InitOled() {
 #if defined(__linux__)
     std::cout << "[OLED] Initializing SPI on Raspberry Pi..." << std::endl;
 
-    // 1. Export GPIO Pins for DC and RST
+    // 1. Export GPIO Pins for DC and RST (using 512 offset)
     gpioExport(PIN_DC);
     gpioExport(PIN_RES);
     usleep(50000); // 50ms safety delay
@@ -139,9 +139,9 @@ void InitOled() {
     
     writeCommand(0xA6); // Normal Display mode
     
-    // Clear screen initially by writing zero bytes
+    // Clear screen initially by writing zero bytes (Using 128 offset range: 0x20 to 0x5F)
     std::vector<uint8_t> clearBuf(8192, 0);
-    uint8_t colData[] = {0x1C, 0x5B};
+    uint8_t colData[] = {0x20, 0x5F};
     writeCommandWithData(0x15, colData, 2);
     uint8_t rowData[] = {0x00, 0x3F};
     writeCommandWithData(0x75, rowData, 2);
@@ -161,8 +161,8 @@ void UpdateOled(RenderTexture2D oledScreen) {
 #if defined(__linux__)
     if (g_spiFd < 0) return;
 
-    // Set Column Address (0x1C to 0x5B is the centered 256 pixels of SSD1322 RAM)
-    uint8_t colData[] = {0x1C, 0x5B};
+    // Set Column Address (0x20 to 0x5F matches Python's 128 offset!)
+    uint8_t colData[] = {0x20, 0x5F};
     writeCommandWithData(0x15, colData, 2);
 
     // Set Row Address (0x00 to 0x3F)
