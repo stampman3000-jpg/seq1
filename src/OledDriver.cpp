@@ -4,23 +4,25 @@
 #include <cstdint>
 #include <cstring> // Required for std::memset and std::strerror
 #include <cerrno>  // Required for errno
+#include <fstream> // Required for std::ofstream
 
 #if defined(__linux__)
 // --- RASPBERRY PI / LINUX HEADERS ---
 #include <fcntl.h>
 #include <unistd.h>
-#include <fstream>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
 
 // Global handles (only compiled on Linux)
 static int g_spiFd = -1;
+static std::ofstream g_dcFile;  // Persistent stream for DC pin
+static std::ofstream g_resFile; // Persistent stream for RES pin
 
 // --- GPIO PIN CONFIGURATION (Includes modern 512 kernel offset) ---
 static const int PIN_DC  = 512 + 25;  // GPIO 25 (Pin 22) -> 537
 static const int PIN_RES = 512 + 24;  // GPIO 24 (Pin 18) -> 536
 
-// --- DIRECT SYSFS GPIO HELPERS WITH ERROR CHECKING ---
+// --- DIRECT SYSFS GPIO HELPERS (Exporting is done once on boot) ---
 static void gpioExport(int pin) {
     std::ofstream f("/sys/class/gpio/export");
     if (!f.is_open()) {
@@ -46,14 +48,15 @@ static void gpioSetDir(int pin, const std::string& dir) {
     f << dir;
 }
 
+// High-speed, persistent stream writer (No file open/close overhead!)
 static void gpioWrite(int pin, int val) {
-    std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/value";
-    std::ofstream f(path);
-    if (!f.is_open()) {
-        std::cerr << "[OLED] GPIO Error: Failed to write to " << path << std::endl;
-        return;
+    if (pin == PIN_DC && g_dcFile.is_open()) {
+        g_dcFile << val;
+        g_dcFile.flush(); // Instantly push the state to the physical Pi pin
+    } else if (pin == PIN_RES && g_resFile.is_open()) {
+        g_resFile << val;
+        g_resFile.flush();
     }
-    f << val;
 }
 
 // --- STANDARD LINUX IOCTL SPI TRANSMISSION (Chunks transfers to 4KB limit) ---
@@ -61,7 +64,6 @@ static void spiWrite(const uint8_t* data, size_t len) {
     if (g_spiFd < 0 || len == 0) return;
 
     // Standard Linux spidev limits individual transactions to 4096 bytes.
-    // We split our 8KB frame buffer into safe 4KB chunks.
     const size_t max_chunk = 4096;
     size_t bytes_sent = 0;
 
@@ -118,14 +120,21 @@ void InitOled() {
     gpioSetDir(PIN_DC, "out");
     gpioSetDir(PIN_RES, "out");
 
-    // 2. Open SPI Device (SPI0.0)
+    // 2. Open persistent file streams for write operations
+    g_dcFile.open("/sys/class/gpio/gpio" + std::to_string(PIN_DC) + "/value");
+    g_resFile.open("/sys/class/gpio/gpio" + std::to_string(PIN_RES) + "/value");
+
+    if (!g_dcFile.is_open()) std::cerr << "[OLED] GPIO Error: Failed to open DC persistent stream" << std::endl;
+    if (!g_resFile.is_open()) std::cerr << "[OLED] GPIO Error: Failed to open RES persistent stream" << std::endl;
+
+    // 3. Open SPI Device (SPI0.0)
     g_spiFd = open("/dev/spidev0.0", O_RDWR);
     if (g_spiFd < 0) {
         std::cerr << "[OLED] Error: Could not open SPI device /dev/spidev0.0" << std::endl;
         return;
     }
 
-    // 3. Configure SPI speed, word bits, and mode
+    // 4. Configure SPI speed, word bits, and mode
     uint8_t mode = SPI_MODE_0; // Mode 0 (matches luma.oled)
     uint8_t bits = 8;
     uint32_t speed = 2000000; // 2 MHz for clean, noise-free signals
@@ -134,13 +143,13 @@ void InitOled() {
     if (ioctl(g_spiFd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) std::cerr << "[OLED] SPI bits failed" << std::endl;
     if (ioctl(g_spiFd, SPI_IOC_WR_MAX_SPEED_HZ, &speed) < 0) std::cerr << "[OLED] SPI speed failed" << std::endl;
 
-    // 4. Hard Reset the OLED Display via RST pin
+    // 5. Hard Reset the OLED Display via RST pin
     gpioWrite(PIN_RES, 0); // RST Low
     usleep(150000);   // 150ms delay
     gpioWrite(PIN_RES, 1); // RST High
     usleep(150000);   // 150ms delay
 
-    // 5. Send SSD1322 Init Commands (Aligned 100% with luma.oled Python library)
+    // 6. Send SSD1322 Init Commands (Aligned 100% with luma.oled Python library)
     uint8_t dataVal;
     
     dataVal = 0x12;
@@ -234,11 +243,10 @@ void UpdateOled(RenderTexture2D oledScreen) {
     // Because texture coordinates are vertically inverted in OpenGL,
     // we read rows from bottom to top to draw right-side-up!
     int outIndex = 0;
-        for (int y = 63; y >= 0; --y) {
-            for (int x = 0; x < 256; x += 2) {
-                // Read backward (right to left) to mirror the screen horizontally!
-                Color p1 = pixels[y * 256 + (255 - x)];
-                Color p2 = pixels[y * 256 + (254 - x)];
+    for (int y = 63; y >= 0; --y) {
+        for (int x = 0; x < 256; x += 2) {
+            Color p1 = pixels[y * 256 + (255 - x)];
+            Color p2 = pixels[y * 256 + (254 - x)];
 
             // Convert to 4-bit grayscale (0 to 15)
             // If any channel is active, we turn the pixel fully white
@@ -260,6 +268,9 @@ void UpdateOled(RenderTexture2D oledScreen) {
 
 void ShutdownOled() {
 #if defined(__linux__)
+    if (g_dcFile.is_open()) g_dcFile.close();
+    if (g_resFile.is_open()) g_resFile.close();
+
     if (g_spiFd >= 0) {
         close(g_spiFd);
         g_spiFd = -1;
