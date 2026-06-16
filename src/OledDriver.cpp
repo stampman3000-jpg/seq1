@@ -1,6 +1,7 @@
 #include "OledDriver.hpp"
 #include <iostream>
 #include <vector>
+#include <cstdint>
 
 #if defined(__linux__)
 // --- RASPBERRY PI / LINUX HEADERS ---
