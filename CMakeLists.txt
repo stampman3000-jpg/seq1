@@ -44,6 +44,7 @@ add_executable(seq1
     src/Tape_Buffer_FX.cpp 
     src/RtMidi.cpp
     src/Midi_Manager.cpp
+    src/OledDriver.cpp
 )
 
 # -----------------------------------------------------------------
