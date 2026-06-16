@@ -79,9 +79,9 @@ void InitOled() {
     }
 
     // 3. Configure SPI speed, word bits, and mode
-        uint8_t mode = SPI_MODE_0; // <--- CHANGED from SPI_MODE_3 to SPI_MODE_0 (matches luma.oled)
-        uint8_t bits = 8;
-        uint32_t speed = 2000000; // <--- REDUCED from 10 MHz to 2 MHz for clean, noise-free signals
+    uint8_t mode = SPI_MODE_0; // Mode 0 (matches luma.oled)
+    uint8_t bits = 8;
+    uint32_t speed = 2000000; // 2 MHz for clean, noise-free signals
 
     if (ioctl(g_spiFd, SPI_IOC_WR_MODE, &mode) < 0) std::cerr << "[OLED] SPI mode failed" << std::endl;
     if (ioctl(g_spiFd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) std::cerr << "[OLED] SPI bits failed" << std::endl;
@@ -93,7 +93,7 @@ void InitOled() {
     gpioWrite(PIN_RES, 1); // RST High
     usleep(150000);   // 150ms delay
 
-    // 5. Send SSD1322 Init Commands (C++ Standard compliant)
+    // 5. Send SSD1322 Init Commands (Aligned 100% with luma.oled Python library)
     uint8_t dataVal;
     
     dataVal = 0x12;
@@ -102,42 +102,46 @@ void InitOled() {
     writeCommand(0xAE); // Display OFF
     
     dataVal = 0x91;
-    writeCommandWithData(0xB3, &dataVal, 1); // Display Clock
+    writeCommandWithData(0xB3, &dataVal, 1); // Set Front Clock Divider / Oscillator Frequency
     
     dataVal = 0x3F;
-    writeCommandWithData(0xCA, &dataVal, 1); // MUX Ratio (64)
+    writeCommandWithData(0xCA, &dataVal, 1); // Set MUX Ratio
     
     dataVal = 0x00;
-    writeCommandWithData(0xA2, &dataVal, 1); // Display Offset (0)
+    writeCommandWithData(0xA2, &dataVal, 1); // Set Display Offset
     
     dataVal = 0x00;
-    writeCommandWithData(0xA1, &dataVal, 1); // Start Line (0)
+    writeCommandWithData(0xA1, &dataVal, 1); // Set Display Start Line
     
     uint8_t remapData[] = {0x14, 0x11};
-    writeCommandWithData(0xA0, remapData, 2); // Set Re-map
+    writeCommandWithData(0xA0, remapData, 2); // Set Re-map and Dual COM Line
+    
+    dataVal = 0x00;
+    writeCommandWithData(0xB5, &dataVal, 1); // Set GPIO
     
     dataVal = 0x01;
     writeCommandWithData(0xAB, &dataVal, 1); // Function Selection (Internal VDD)
     
-    uint8_t enhanceData[] = {0xA0, 0xFD};
-    writeCommandWithData(0xB4, enhanceData, 2); // Display Enhancement A
+    dataVal = 0x32;
+    writeCommandWithData(0xB1, &dataVal, 1); // Pre-charge / Phase Length
     
-    dataVal = 0x7F;
-    writeCommandWithData(0xC1, &dataVal, 1); // Contrast Current
+    uint8_t enhanceData[] = {0xA0, 0xB5, 0x55};
+    writeCommandWithData(0xB4, enhanceData, 3); // Display Enhancement A (SVS)
+    
+    dataVal = 0x05;
+    writeCommandWithData(0xBE, &dataVal, 1); // Set VCOMH Voltage
     
     dataVal = 0x0F;
-    writeCommandWithData(0xC7, &dataVal, 1); // Master Contrast (Max)
+    writeCommandWithData(0xC7, &dataVal, 1); // Contrast Master
     
-    dataVal = 0xE2;
-    writeCommandWithData(0xB1, &dataVal, 1); // Phase Length
+    dataVal = 0x01;
+    writeCommandWithData(0xB6, &dataVal, 1); // Precharge2 / Second Pre-charge Period
     
-    dataVal = 0x1F;
-    writeCommandWithData(0xBB, &dataVal, 1); // Pre-charge Voltage
-    
-    dataVal = 0x07;
-    writeCommandWithData(0xBE, &dataVal, 1); // VCOMH Voltage
-    
-    writeCommand(0xA6); // Normal Display mode
+    writeCommand(0xA6); // Normal Display Mode
+
+    // Set Bipolar Contrast Current across Segments A, B, and C (3 bytes)
+    uint8_t contrastData[] = {0x7F, 0x7F, 0x7F};
+    writeCommandWithData(0xC1, contrastData, 3);
     
     // Clear screen initially by writing zero bytes (Using 128 offset range: 0x20 to 0x5F)
     std::vector<uint8_t> clearBuf(8192, 0);
