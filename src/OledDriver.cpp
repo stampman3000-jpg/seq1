@@ -2,7 +2,8 @@
 #include <iostream>
 #include <vector>
 #include <cstdint>
-#include <cstring> // Required for std::memset
+#include <cstring> // Required for std::memset and std::strerror
+#include <cerrno>  // Required for errno
 
 #if defined(__linux__)
 // --- RASPBERRY PI / LINUX HEADERS ---
@@ -55,23 +56,39 @@ static void gpioWrite(int pin, int val) {
     f << val;
 }
 
-// --- STANDARD LINUX IOCTL SPI TRANSMISSION (Enforces CS and Speed) ---
+// --- STANDARD LINUX IOCTL SPI TRANSMISSION (Chunks transfers to 4KB limit) ---
 static void spiWrite(const uint8_t* data, size_t len) {
     if (g_spiFd < 0 || len == 0) return;
 
-    struct spi_ioc_transfer tr;
-    std::memset(&tr, 0, sizeof(tr));
-    
-    tr.tx_buf = (unsigned long)data;
-    tr.rx_buf = 0;
-    tr.len = len;
-    tr.speed_hz = 2000000;      // Explicitly enforce 2 MHz SPI Speed
-    tr.bits_per_word = 8;       // Enforce 8-bit words
-    tr.delay_usecs = 0;
+    // Standard Linux spidev limits individual transactions to 4096 bytes.
+    // We split our 8KB frame buffer into safe 4KB chunks.
+    const size_t max_chunk = 4096;
+    size_t bytes_sent = 0;
 
-    // Execute synchronous, hardware-bounded SPI transfer (toggles CS automaticamente)
-    if (ioctl(g_spiFd, SPI_IOC_MESSAGE(1), &tr) < 0) {
-        std::cerr << "[OLED] SPI Error: SPI_IOC_MESSAGE transaction failed" << std::endl;
+    while (bytes_sent < len) {
+        size_t chunk_size = len - bytes_sent;
+        if (chunk_size > max_chunk) {
+            chunk_size = max_chunk;
+        }
+
+        struct spi_ioc_transfer tr;
+        std::memset(&tr, 0, sizeof(tr));
+        
+        tr.tx_buf = (uintptr_t)(data + bytes_sent); // Cast pointer safely for 32/64-bit kernel
+        tr.rx_buf = 0;
+        tr.len = chunk_size;
+        tr.speed_hz = 2000000;                      // Explicitly enforce 2 MHz SPI Speed
+        tr.bits_per_word = 8;                       // Enforce 8-bit words
+        tr.delay_usecs = 0;
+
+        // Execute synchronous, hardware-bounded SPI transfer (toggles CS automatically)
+        if (ioctl(g_spiFd, SPI_IOC_MESSAGE(1), &tr) < 0) {
+            std::cerr << "[OLED] SPI Error: SPI_IOC_MESSAGE transaction failed: "
+                      << std::strerror(errno) << " (chunk size: " << chunk_size << ")" << std::endl;
+            return;
+        }
+
+        bytes_sent += chunk_size;
     }
 }
 
