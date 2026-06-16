@@ -18,25 +18,40 @@ static int g_spiFd = -1;
 static const int PIN_DC  = 512 + 25;  // GPIO 25 (Pin 22) -> 537
 static const int PIN_RES = 512 + 24;  // GPIO 24 (Pin 18) -> 536
 
-// --- DIRECT SYSFS GPIO HELPERS ---
+// --- DIRECT SYSFS GPIO HELPERS WITH ERROR CHECKING ---
 static void gpioExport(int pin) {
     std::ofstream f("/sys/class/gpio/export");
-    if (f.is_open()) f << pin;
+    if (!f.is_open()) {
+        std::cerr << "[OLED] GPIO Error: Failed to open /sys/class/gpio/export" << std::endl;
+        return;
+    }
+    f << pin;
 }
 
 static void gpioUnexport(int pin) {
     std::ofstream f("/sys/class/gpio/unexport");
-    if (f.is_open()) f << pin;
+    if (!f.is_open()) return;
+    f << pin;
 }
 
 static void gpioSetDir(int pin, const std::string& dir) {
-    std::ofstream f("/sys/class/gpio/gpio" + std::to_string(pin) + "/direction");
-    if (f.is_open()) f << dir;
+    std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/direction";
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "[OLED] GPIO Error: Failed to open " << path << std::endl;
+        return;
+    }
+    f << dir;
 }
 
 static void gpioWrite(int pin, int val) {
-    std::ofstream f("/sys/class/gpio/gpio" + std::to_string(pin) + "/value");
-    if (f.is_open()) f << val;
+    std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/value";
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "[OLED] GPIO Error: Failed to write to " << path << std::endl;
+        return;
+    }
+    f << val;
 }
 
 // --- SPI TRANSMISSION HELPERS ---
