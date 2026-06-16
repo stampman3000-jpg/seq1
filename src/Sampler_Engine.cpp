@@ -148,51 +148,60 @@ float SamplerVoice::Process(int trackIdx) {
     }
 
     // 1. Process Volume Envelope
-    float atk = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.attack, trk.attack)));
-    float dec = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.decay, trk.decay)));
-    float rel = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.release, trk.release)));
-    float sus = GetParam(sp.sustain, trk.sustain) / 99.0f;
-
-    switch (stage) {
-        case ENV_ATTACK:  envLevel += atk; if (envLevel >= 1.0f) { envLevel = 1.0f; stage = ENV_DECAY; } break;
-        case ENV_DECAY:   envLevel -= dec; if (envLevel <= sus) { envLevel = sus; stage = ENV_SUSTAIN; } break;
-        case ENV_SUSTAIN: envLevel = sus; break;
-        case ENV_RELEASE:
-            envLevel -= rel;
-            if (envLevel <= 0.0f) {
-                envLevel = 0.0f;
-                stage = ENV_IDLE;
-                active = false;
-                // Flush remaining active grains of this voice to prevent global counter drift
-                for (int i = 0; i < MAX_GRAINS; ++i) {
-                    if (grainPool[i].active) {
-                        grainPool[i].active = false;
-                        g_globalActiveGrains--;
+        switch (stage) {
+            case ENV_ATTACK:  envLevel += envAtkRate; if (envLevel >= 1.0f) { envLevel = 1.0f; stage = ENV_DECAY; } break;
+            case ENV_DECAY:   envLevel -= envDecRate; if (envLevel <= envSusLevel) { envLevel = envSusLevel; stage = ENV_SUSTAIN; } break;
+            case ENV_SUSTAIN: envLevel = envSusLevel; break;
+            case ENV_RELEASE:
+                envLevel -= envRelRate;
+                if (envLevel <= 0.0f) {
+                    envLevel = 0.0f;
+                    stage = ENV_IDLE;
+                    active = false;
+                    for (int i = 0; i < MAX_GRAINS; ++i) {
+                        if (grainPool[i].active) {
+                            grainPool[i].active = false;
+                            g_globalActiveGrains--;
+                        }
                     }
                 }
-            }
-            break;
-        default: break;
-    }
+                break;
+            default: break;
+        }
 
     // 2. Process Filter Envelope (ADSR)
-    float fAtk = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack)));
-    float fDec = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay)));
-    float fRel = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease)));
-    float fSus = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
-
-    switch (filterStage) {
-        case FLT_ATTACK:  filterEnvLevel += fAtk; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
-        case FLT_DECAY:   filterEnvLevel -= fDec; if (filterEnvLevel <= fSus) { filterEnvLevel = fSus; filterStage = FLT_SUSTAIN; } break;
-        case FLT_SUSTAIN: filterEnvLevel = fSus; break;
-        case FLT_RELEASE: filterEnvLevel -= fRel; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
-        default: break;
-    }
+        switch (filterStage) {
+            case FLT_ATTACK:  filterEnvLevel += filterAtkRate; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
+            case FLT_DECAY:   filterEnvLevel -= filterDecRate; if (filterEnvLevel <= filterSusLevel) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; } break;
+            case FLT_SUSTAIN: filterEnvLevel = filterSusLevel; break;
+            case FLT_RELEASE: filterEnvLevel -= filterRelRate; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
+            default: break;
+        }
 
     // 3. Block-Rate SVF Coefficients Update (Every 64 Samples)
     filterUpdateCounter++;
     if (filterUpdateCounter >= 64) {
         filterUpdateCounter = 0;
+        
+        // Recalculate granular spawn interval once per block
+        int density = GetParam(sp.grainDensity, trk.grainDensity);
+        float normDensity = density / 99.0f;
+        float spawnIntervalSec = 0.0015f + (1.0f - normDensity) * 0.1485f;
+        cachedSpawnIntervalSamples = (uint32_t)(spawnIntervalSec * g_sampleRate);
+
+            // Recalculate envelope parameters at block rate instead of per sample
+            float invSampleRate = 1.0f / (float)g_sampleRate;
+
+            envAtkRate = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
+            envDecRate = invSampleRate / GetEnvTime(GetParam(sp.decay, trk.decay));
+            envRelRate = invSampleRate / GetEnvTime(GetParam(sp.release, trk.release));
+            envSusLevel = GetParam(sp.sustain, trk.sustain) / 99.0f;
+
+            filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
+            filterDecRate = invSampleRate / GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
+            filterRelRate = invSampleRate / GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
+            filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
+
 
         // Reset mod offsets
         modCutoffOffset = 0.0f;
@@ -339,19 +348,12 @@ float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
 float SamplerVoice::ProcessGranular(const Track& trk, const StepParams& sp) {
     if (sampleBuffer == nullptr || sampleLengthSamples == 0) return 0.0f;
 
-    // 1. Process continuous grain-spawning rate
-    samplesSinceLastGrain++;
-    
-    // Scale density (0..99) to a highly dense interval (from 1.5ms up to 150ms)
-    int density = GetParam(sp.grainDensity, trk.grainDensity);
-    float normDensity = density / 99.0f;
-    float spawnIntervalSec = 0.0015f + (1.0f - normDensity) * 0.1485f;
-    uint32_t spawnIntervalSamples = (uint32_t)(spawnIntervalSec * g_sampleRate);
-
-    if (samplesSinceLastGrain >= spawnIntervalSamples) {
-        samplesSinceLastGrain = 0;
-        SpawnGrain(trk, sp);
-    }
+    // 1. Process continuous grain-spawning rate using pre-cached interval
+        samplesSinceLastGrain++;
+        if (samplesSinceLastGrain >= cachedSpawnIntervalSamples) {
+            samplesSinceLastGrain = 0;
+            SpawnGrain(trk, sp);
+        }
 
     // 2. Process and sum all active grains
     float sumGrains = 0.0f;
@@ -371,9 +373,9 @@ float SamplerVoice::ProcessGranular(const Track& trk, const StepParams& sp) {
 
             float sample = sampleBuffer[currentIdx] / 32768.0f;
 
-            // Scale by cosine window to prevent digital clicks
-            float progress = (float)g.currentOffset / g.durationSamples;
-            float window = sinf(progress * 3.14159265f); // Smooth raise and fade
+            // Scale by parabolic window (highly efficient approximation of sine)
+                                float progress = (float)g.currentOffset / g.durationSamples;
+                                float window = 4.0f * progress * (1.0f - progress);
 
             sumGrains += sample * window;
 

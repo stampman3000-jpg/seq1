@@ -194,6 +194,26 @@ struct SynthVoice {
     float envLevel2 = 0.0f;
     enum EnvStage2 { ENV2_IDLE, ENV2_ATTACK, ENV2_DECAY, ENV2_SUSTAIN, ENV2_RELEASE } stage2 = ENV2_IDLE;
     
+    // Cached envelope increment rates and levels calculated at block rate
+        float envAtkRate1 = 0.0f;
+        float envDecRate1 = 0.0f;
+        float envRelRate1 = 0.0f;
+        float envSusLevel1 = 0.0f;
+
+        float envAtkRate2 = 0.0f;
+        float envDecRate2 = 0.0f;
+        float envRelRate2 = 0.0f;
+        float envSusLevel2 = 0.0f;
+
+        float noiseAtkRate = 0.0f;
+        float noiseDecRate = 0.0f;
+        uint32_t noiseHoldSamples = 0;
+
+        float filterAtkRate = 0.0f;
+        float filterDecRate = 0.0f;
+        float filterRelRate = 0.0f;
+        float filterSusLevel = 0.0f;
+    
     void Choke() {
             choking = true;
             chokeVolume = 1.0f;
@@ -271,35 +291,34 @@ struct SynthVoice {
         if (filterStage != FLT_IDLE) filterStage = FLT_RELEASE;
     }
 
-    // Process a single wave slice dynamically
-    float ProcessWave(float phase, int morph) {
-        float normPhase = phase / (2.0f * 3.14159265f);
-        
-        while (normPhase >= 1.0f) normPhase -= 1.0f;
-        while (normPhase < 0.0f) normPhase += 1.0f;
+    // Process a single wave slice dynamically (expects normalized phase in [0, 1))
+        float ProcessWave(float normPhase, int morph) {
+            // Wrap normalized phase to [0.0, 1.0)
+            while (normPhase >= 1.0f) normPhase -= 1.0f;
+            while (normPhase < 0.0f)  normPhase += 1.0f;
 
-        float sineSample = sinf(normPhase * 2.0f * 3.14159265f);
-        
-        float triSample = 0.0f;
-        if (normPhase < 0.25f)      triSample = normPhase * 4.0f;
-        else if (normPhase < 0.75f) triSample = 2.0f - (normPhase * 4.0f);
-        else                        triSample = (normPhase * 4.0f) - 4.0f;
+            // Scale by 2*PI only at the moment of sine calculation
+            float sineSample = sinf(normPhase * 6.2831853f);
+            
+            float triSample = 0.0f;
+            if (normPhase < 0.25f)      triSample = normPhase * 4.0f;
+            else if (normPhase < 0.75f) triSample = 2.0f - (normPhase * 4.0f);
+            else                        triSample = (normPhase * 4.0f) - 4.0f;
 
-        float sawSample = 1.0f - (normPhase * 2.0f);
-        float sqrSample = (normPhase < 0.5f) ? 0.5f : -0.5f;
+            float sawSample = 1.0f - (normPhase * 2.0f);
+            float sqrSample = (normPhase < 0.5f) ? 0.5f : -0.5f;
 
-        if (morph < 33) {
-            float t = morph / 33.0f;
-            return (1.0f - t) * sineSample + t * triSample;
-        } else if (morph < 66) {
-            float t = (morph - 33) / 33.0f;
-            return (1.0f - t) * triSample + t * sawSample;
-        } else {
-            float t = (morph - 66) / 33.0f;
-            return (1.0f - t) * sawSample + t * sqrSample;
+            if (morph < 33) {
+                float t = morph / 33.0f;
+                return (1.0f - t) * sineSample + t * triSample;
+            } else if (morph < 66) {
+                float t = (morph - 33) / 33.0f;
+                return (1.0f - t) * triSample + t * sawSample;
+            } else {
+                float t = (morph - 66) / 33.0f;
+                return (1.0f - t) * sawSample + t * sqrSample;
+            }
         }
-    }
-
     // Dynamic processing: receives track index to query appropriate variables
     float Process(int trackIdx) {
             if (stage1 == ENV1_IDLE && stage2 == ENV2_IDLE && noiseStage == NOISE_IDLE && filterStage == FLT_IDLE) return 0.0f;
@@ -347,78 +366,57 @@ struct SynthVoice {
         }
 
         // --- 1. PROCESS ENVELOPE 1 (Carrier) ---
-        float atk1 = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.attack, trk.attack)));
-        float dec1 = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.decay, trk.decay)));
-        float rel1 = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.release, trk.release)));
-        float sus1 = GetParam(sp.sustain, trk.sustain) / 99.0f;
-
-        switch (stage1) {
-            case ENV1_ATTACK:  envLevel1 += atk1; if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; } break;
-            case ENV1_DECAY:   envLevel1 -= dec1; if (envLevel1 <= sus1) { envLevel1 = sus1; stage1 = ENV1_SUSTAIN; } break;
-            case ENV1_SUSTAIN: envLevel1 = sus1; break;
-            case ENV1_RELEASE: envLevel1 -= rel1; if (envLevel1 <= 0.0f) { envLevel1 = 0.0f; stage1 = ENV1_IDLE; } break;
-            default: break;
-        }
-
+                switch (stage1) {
+                    case ENV1_ATTACK:  envLevel1 += envAtkRate1; if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; } break;
+                    case ENV1_DECAY:   envLevel1 -= envDecRate1; if (envLevel1 <= envSusLevel1) { envLevel1 = envSusLevel1; stage1 = ENV1_SUSTAIN; } break;
+                    case ENV1_SUSTAIN: envLevel1 = envSusLevel1; break;
+                    case ENV1_RELEASE: envLevel1 -= envRelRate1; if (envLevel1 <= 0.0f) { envLevel1 = 0.0f; stage1 = ENV1_IDLE; } break;
+                    default: break;
+                }
         // --- 2. PROCESS ENVELOPE 2 (Modulator) ---
-        float atk2 = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.attack2, trk.attack2)));
-        float dec2 = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.decay2, trk.decay2)));
-        float rel2 = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.release2, trk.release2)));
-        float sus2 = GetParam(sp.sustain2, trk.sustain2) / 99.0f;
-
-        switch (stage2) {
-            case ENV2_ATTACK:  envLevel2 += atk2; if (envLevel2 >= 1.0f) { envLevel2 = 1.0f; stage2 = ENV2_DECAY; } break;
-            case ENV2_DECAY:   envLevel2 -= dec2; if (envLevel2 <= sus2) { envLevel2 = sus2; stage2 = ENV2_SUSTAIN; } break;
-            case ENV2_SUSTAIN: envLevel2 = sus2; break;
-            case ENV2_RELEASE: envLevel2 -= rel2; if (envLevel2 <= 0.0f) { envLevel2 = 0.0f; stage2 = ENV2_IDLE; } break;
-            default: break;
-        }
+                switch (stage2) {
+                    case ENV2_ATTACK:  envLevel2 += envAtkRate2; if (envLevel2 >= 1.0f) { envLevel2 = 1.0f; stage2 = ENV2_DECAY; } break;
+                    case ENV2_DECAY:   envLevel2 -= envDecRate2; if (envLevel2 <= envSusLevel2) { envLevel2 = envSusLevel2; stage2 = ENV2_SUSTAIN; } break;
+                    case ENV2_SUSTAIN: envLevel2 = envSusLevel2; break;
+                    case ENV2_RELEASE: envLevel2 -= envRelRate2; if (envLevel2 <= 0.0f) { envLevel2 = 0.0f; stage2 = ENV2_IDLE; } break;
+                    default: break;
+                }
 
         // --- 3. PROCESS NOISE GENERATOR AHD ENVELOPE ---
-        float nAtk = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.noiseAttack, trk.noiseAttack)));
-        float nDec = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.noiseDecay, trk.noiseDecay)));
-        float nHoldSec = GetEnvTime(GetParam(sp.noiseHold, trk.noiseHold));
-        uint32_t nHoldSamples = (uint32_t)(nHoldSec * g_sampleRate);
-
-        switch (noiseStage) {
-            case NOISE_ATTACK:
-                noiseEnvLevel += nAtk;
-                if (noiseEnvLevel >= 1.0f) {
-                    noiseEnvLevel = 1.0f;
-                    noiseStage = NOISE_HOLD;
-                    noiseHoldCounter = 0;
+                switch (noiseStage) {
+                    case NOISE_ATTACK:
+                        noiseEnvLevel += noiseAtkRate;
+                        if (noiseEnvLevel >= 1.0f) {
+                            noiseEnvLevel = 1.0f;
+                            noiseStage = NOISE_HOLD;
+                            noiseHoldCounter = 0;
+                        }
+                        break;
+                    case NOISE_HOLD:
+                        noiseHoldCounter++;
+                        if (noiseHoldCounter >= noiseHoldSamples) {
+                            noiseStage = NOISE_DECAY;
+                        }
+                        break;
+                    case NOISE_DECAY:
+                        noiseEnvLevel -= noiseDecRate;
+                        if (noiseEnvLevel <= 0.0f) {
+                            noiseEnvLevel = 0.0f;
+                            noiseStage = NOISE_IDLE;
+                        }
+                        break;
+                    default:
+                        break;
                 }
-                break;
-            case NOISE_HOLD:
-                noiseHoldCounter++;
-                if (noiseHoldCounter >= nHoldSamples) {
-                    noiseStage = NOISE_DECAY;
-                }
-                break;
-            case NOISE_DECAY:
-                noiseEnvLevel -= nDec;
-                if (noiseEnvLevel <= 0.0f) {
-                    noiseEnvLevel = 0.0f;
-                    noiseStage = NOISE_IDLE;
-                }
-                break;
-            default:
-                break;
-        }
 
         // --- 4. PROCESS FILTER ENVELOPE (ADSR) ---
-        float fAtk = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack)));
-        float fDec = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay)));
-        float fRel = 1.0f / (g_sampleRate * GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease)));
-        float fSus = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
-
-        switch (filterStage) {
-            case FLT_ATTACK:  filterEnvLevel += fAtk; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
-            case FLT_DECAY:   filterEnvLevel -= fDec; if (filterEnvLevel <= fSus) { filterEnvLevel = fSus; filterStage = FLT_SUSTAIN; } break;
-            case FLT_SUSTAIN: filterEnvLevel = fSus; break;
-            case FLT_RELEASE: filterEnvLevel -= fRel; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
-            default: break;
-        }
+                switch (filterStage) {
+                    case FLT_ATTACK:  filterEnvLevel += filterAtkRate; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
+                    case FLT_DECAY:   filterEnvLevel -= filterDecRate; if (filterEnvLevel <= filterSusLevel) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; } break;
+                    case FLT_SUSTAIN: filterEnvLevel = filterSusLevel; break;
+                    case FLT_RELEASE: filterEnvLevel -= filterRelRate; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
+                    default: break;
+                }
 
         // --- 5. PROCESS REAL-TIME PITCH DECAY SWEEP ---
         if (pitchModFactor > 1.0f) {
@@ -429,9 +427,30 @@ struct SynthVoice {
 
         // --- 6. BLOCK-RATE SVF COEFFICIENTS UPDATE (Every 64 Samples) ---
         filterUpdateCounter++;
-        if (filterUpdateCounter >= 64) {
-            filterUpdateCounter = 0;
+                if (filterUpdateCounter >= 64) {
+                    filterUpdateCounter = 0;
 
+                    // Recalculate envelope parameters at block rate instead of per sample
+                    float invSampleRate = 1.0f / (float)g_sampleRate;
+
+                    envAtkRate1 = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
+                    envDecRate1 = invSampleRate / GetEnvTime(GetParam(sp.decay, trk.decay));
+                    envRelRate1 = invSampleRate / GetEnvTime(GetParam(sp.release, trk.release));
+                    envSusLevel1 = GetParam(sp.sustain, trk.sustain) / 99.0f;
+
+                    envAtkRate2 = invSampleRate / GetEnvTime(GetParam(sp.attack2, trk.attack2));
+                    envDecRate2 = invSampleRate / GetEnvTime(GetParam(sp.decay2, trk.decay2));
+                    envRelRate2 = invSampleRate / GetEnvTime(GetParam(sp.release2, trk.release2));
+                    envSusLevel2 = GetParam(sp.sustain2, trk.sustain2) / 99.0f;
+
+                    noiseAtkRate = invSampleRate / GetEnvTime(GetParam(sp.noiseAttack, trk.noiseAttack));
+                    noiseDecRate = invSampleRate / GetEnvTime(GetParam(sp.noiseDecay, trk.noiseDecay));
+                    noiseHoldSamples = (uint32_t)(GetEnvTime(GetParam(sp.noiseHold, trk.noiseHold)) * g_sampleRate);
+
+                    filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
+                    filterDecRate = invSampleRate / GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
+                    filterRelRate = invSampleRate / GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
+                    filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
             // Reset mod offsets
             modCutoffOffset = 0.0f;
             modResOffset = 0.0f;
@@ -504,59 +523,62 @@ struct SynthVoice {
         float finalSample = 0.0f;
 
         if (trk.algorithm == ALGO_PARALLEL) {
-            // ==========================================
-            // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
-            // ==========================================
-            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
-            float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f); // Modulated by pitch envelope
+                    // ==========================================
+                    // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
+                    // ==========================================
+                    float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
+                    float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
 
-            float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
-            float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
+                    float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
+                    float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
 
-            float drive = 1.0f + (smoothVol1 / 33.0f);
-            float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
+                    float drive = 1.0f + (smoothVol1 / 33.0f);
+                    float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
 
-            float osc1 = saturatedOsc1 * envLevel1 * (smoothVol1 / 99.0f);
-            float osc2 = rawOsc2 * envLevel2 * (smoothVol2 / 99.0f);
+                    float osc1 = saturatedOsc1 * envLevel1 * (smoothVol1 / 99.0f);
+                    float osc2 = rawOsc2 * envLevel2 * (smoothVol2 / 99.0f);
 
-            finalSample = (osc1 + osc2) * 0.5f;
+                    finalSample = (osc1 + osc2) * 0.5f;
 
-            phase1 += (2.0f * 3.14159265f * freq1) / (float)g_sampleRate;
-            phase2 += (2.0f * 3.14159265f * freq2) / (float)g_sampleRate;
-        }
+                    // Normalized phase increments: no multiplication by 2*PI needed!
+                    phase1 += freq1 / (float)g_sampleRate;
+                    phase2 += freq2 / (float)g_sampleRate;
+                }
         else {
                     // ==========================================
                     // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
                     // ==========================================
-                    // Mixes integer coarse ratio with bipolar fine ratio to achieve fractional values (e.g. 1.5, 2.33, etc.)
                     float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
-                    if (ratio < 0.05f) ratio = 0.05f; // Protects the DSP loop from freezing at 0Hz or negative modulator frequencies
-                    float freq2 = freq1 * ratio; // Carrier modulation follows the pitch envelope dynamically
+                    if (ratio < 0.05f) ratio = 0.05f;
+                    float freq2 = freq1 * ratio;
 
-            // Modulator self-feedback (DX7-style Op-2 self-modulation)
-            float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 3.14159265f;
-            float feedbackPhase = phase2 + lastModOutput * feedbackScale;
+                    // Modulator self-feedback: scaled by 1/(2*PI) so feedback scale simplifies to exactly 0.5!
+                    float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 0.5f;
+                    float feedbackPhase = phase2 + lastModOutput * feedbackScale;
 
-            // Compute Modulator dry shape
-            float modDry = ProcessWave(feedbackPhase, (int)smoothMorph2) * envLevel2;
-            lastModOutput = modDry; // Update the feedback buffer
+                    // Compute Modulator dry shape
+                    float modDry = ProcessWave(feedbackPhase, (int)smoothMorph2) * envLevel2;
+                    lastModOutput = modDry;
 
-            // Quadratic Index Scaling
-            float normIdx = smoothVol2 / 99.0f;
-            float index = normIdx * normIdx * 8.0f;
+                    // Quadratic Index Scaling: folded 1/(2*PI) division directly into the index multiplier!
+                    // 8.0f / (2 * PI) = 1.2732395f
+                    float normIdx = smoothVol2 / 99.0f;
+                    float index = normIdx * normIdx * 1.2732395f;
 
-            // Modulate Carrier (Osc 1) phase
-            float modulatedPhase1 = phase1 + modDry * index;
-            float carrier = ProcessWave(modulatedPhase1, (int)smoothMorph1) * envLevel1 * (smoothVol1 / 99.0f);
+                    // Modulate Carrier phase
+                    float modulatedPhase1 = phase1 + modDry * index;
+                    float carrier = ProcessWave(modulatedPhase1, (int)smoothMorph1) * envLevel1 * (smoothVol1 / 99.0f);
 
-            finalSample = carrier;
+                    finalSample = carrier;
 
-            phase1 += (2.0f * 3.14159265f * freq1) / (float)g_sampleRate;
-            phase2 += (2.0f * 3.14159265f * freq2) / (float)g_sampleRate;
-        }
+                    // Normalized phase increments
+                    phase1 += freq1 / (float)g_sampleRate;
+                    phase2 += freq2 / (float)g_sampleRate;
+                }
 
-        if (phase1 >= 2.0f * 3.14159265f) phase1 -= 2.0f * 3.14159265f;
-        if (phase2 >= 2.0f * 3.14159265f) phase2 -= 2.0f * 3.14159265f;
+        // Wrap normalized phases
+                if (phase1 >= 1.0f) phase1 -= 1.0f;
+                if (phase2 >= 1.0f) phase2 -= 1.0f;
 
         // --- 8. PROCESS WHITE NOISE TRANSIENT ---
         float rawNoise = FastRandFloat(randomSeed) * 2.0f - 1.0f;
@@ -622,6 +644,22 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     auto startTime = std::chrono::high_resolution_clock::now(); // Record start time
     float* pOutputF = (float*)pOutput;
 
+    // --- ADD THESE BLOCK-RATE PARAMETER ARRAYS ---
+    static int s_finalMem[8]  = {50};
+    static int s_finalHds[8]  = {1};
+    static int s_finalSpr[8]  = {0};
+    static int s_finalSpd[8]  = {74};
+    static int s_finalTet[8]  = {99};
+    static int s_finalDrf[8]  = {10};
+    static int s_finalDrt[8]  = {20};
+    static int s_finalFdb[8]  = {30};
+    static int s_finalFsp[8]  = {10};
+    static int s_finalFsc[8]  = {0};
+    static int s_finalFrz[8]  = {0};
+    static int s_finalSmr[8]  = {0};
+    static int s_finalSms[8]  = {40};
+    static int s_finalMix[8]  = {0};
+
     // 1 Tick = 60.0 / (tempo * 24.0) = 2.5 / tempo seconds
     double tickLengthSeconds = 2.5 / tempo;
     ma_uint32 samplesPerTick = (ma_uint32)(tickLengthSeconds * g_sampleRate);
@@ -647,12 +685,100 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
         float mixedSample = 0.0f;
 
         // Block-rate generator interval trigger (every 64 samples)
-        static uint32_t lfoBlockCounter = 9999; // Force update on first sample
-        lfoBlockCounter++;
-        if (lfoBlockCounter >= 64) {
-            lfoBlockCounter = 0;
-            UpdateGlobalLFOs();
-        }
+                static uint32_t lfoBlockCounter = 9999; // Force update on first sample
+                lfoBlockCounter++;
+                if (lfoBlockCounter >= 64) {
+                    lfoBlockCounter = 0;
+                    UpdateGlobalLFOs();
+
+                    // Calculate tape parameters once per 64-sample block for all 8 tracks
+                    for (int t = 0; t < 8; ++t) {
+                        const Track& trk = tracks[t];
+                        
+                        // Helper lambda to safely obtain active step params
+                        int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+                        if (currentStepIdx < 0) currentStepIdx = 0; // Safety guard
+                        const Step& step = trk.steps[currentStepIdx];
+
+                        float modTapeMem = 0.0f;
+                        float modTapeHds = 0.0f;
+                        float modTapeSpr = 0.0f;
+                        float modTapeSpd = 0.0f;
+                        float modTapeTet = 0.0f;
+                        float modTapeDrf = 0.0f;
+                        float modTapeDrt = 0.0f;
+                        float modTapeFdb = 0.0f;
+                        float modTapeFsp = 0.0f;
+                        float modTapeFsc = 0.0f;
+                        float modTapeFrz = 0.0f;
+                        float modTapeSmr = 0.0f;
+                        float modTapeSms = 0.0f;
+                        float modTapeMix = 0.0f;
+
+                        for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
+                            const Track& srcTrk = tracks[srcTrkIdx];
+                            for (int s = 0; s < 3; ++s) {
+                                // LFO 1 Slot Taps
+                                {
+                                    const ModSlot& m = srcTrk.lfo1Slots[s];
+                                    if (m.destType == 1 && m.destTrack == t) {
+                                        float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
+                                        if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
+                                        else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
+                                    }
+                                }
+                                // LFO 2 Slot Taps
+                                {
+                                    const ModSlot& m = srcTrk.lfo2Slots[s];
+                                    if (m.destType == 1 && m.destTrack == t) {
+                                        float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
+                                        if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
+                                        else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
+                                        else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
+                                    }
+                                }
+                            }
+                        }
+
+                        s_finalMem[t]  = std::clamp((int)(GetParam(step.params.tapeMemory,     tracks[t].tapeMemory)    + modTapeMem), 0, 99);
+                        s_finalHds[t]  = std::clamp((int)(GetParam(step.params.tapeHeads,      tracks[t].tapeHeads)     + modTapeHds), 1, 4);
+                        s_finalSpr[t]  = std::clamp((int)(GetParam(step.params.tapeSpread,     tracks[t].tapeSpread)    + modTapeSpr), 0, 99);
+                        s_finalSpd[t]  = std::clamp((int)(GetParam(step.params.tapeSpeed,      tracks[t].tapeSpeed)     + modTapeSpd), 0, 99);
+                        s_finalTet[t]  = std::clamp((int)(GetParam(step.params.tapeTether,     tracks[t].tapeTether)    + modTapeTet), 0, 99);
+                        s_finalDrf[t]  = std::clamp((int)(GetParam(step.params.tapeDrift,      tracks[t].tapeDrift)     + modTapeDrf), 0, 99);
+                        s_finalDrt[t]  = std::clamp((int)(GetParam(step.params.tapeDriftRate,  tracks[t].tapeDriftRate) + modTapeDrt), 0, 99);
+                        s_finalFdb[t]  = std::clamp((int)(GetParam(step.params.tapeFeedback,   tracks[t].tapeFeedback)  + modTapeFdb), 0, 99);
+                        s_finalFsp[t]  = std::clamp((int)(GetParam(step.params.tapeFbSpread,   tracks[t].tapeFbSpread)  + modTapeFsp), 0, 99);
+                        s_finalFsc[t]  = std::clamp((int)(GetParam(step.params.tapeFbSource,   tracks[t].tapeFbSource)  + modTapeFsc), 0, 99);
+                        s_finalFrz[t]  = std::clamp((int)(GetParam(step.params.tapeFreeze,     tracks[t].tapeFreeze)    + modTapeFrz), 0, 99);
+                        s_finalSmr[t]  = std::clamp((int)(GetParam(step.params.tapeSmearRate,  tracks[t].tapeSmearRate) + modTapeSmr), 0, 99);
+                        s_finalSms[t]  = std::clamp((int)(GetParam(step.params.tapeSmearSize,  tracks[t].tapeSmearSize) + modTapeSms), 0, 99);
+                        s_finalMix[t]  = std::clamp((int)(GetParam(step.params.tapeMix,        tracks[t].tapeMix)       + modTapeMix), 0, 99);
+                    }
+                }
 
         // Check for external MIDI Start/Stop triggers inside the sample block
         if (g_externalMidiStartTriggered) {
@@ -918,93 +1044,15 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
             if (currentStepIdx < 0) currentStepIdx = 0; // Safety guard
             const Step& step = tracks[t].steps[currentStepIdx];
 
-            // Evaluate real-time LFO modulations targeting track t's tape buffer parameters
-            float modTapeMem = 0.0f;
-            float modTapeHds = 0.0f;
-            float modTapeSpr = 0.0f;
-            float modTapeSpd = 0.0f;
-            float modTapeTet = 0.0f;
-            float modTapeDrf = 0.0f;
-            float modTapeDrt = 0.0f;
-            float modTapeFdb = 0.0f;
-            float modTapeFsp = 0.0f;
-            float modTapeFsc = 0.0f;
-            float modTapeFrz = 0.0f;
-            float modTapeSmr = 0.0f;
-            float modTapeSms = 0.0f;
-            float modTapeMix = 0.0f;
-
-            for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
-                const Track& srcTrk = tracks[srcTrkIdx];
-                for (int s = 0; s < 3; ++s) {
-                    // LFO 1 Slot Taps
-                    {
-                        const ModSlot& m = srcTrk.lfo1Slots[s];
-                        if (m.destType == 1 && m.destTrack == t) {
-                            float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
-                            if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f; // Range is 1--4
-                            else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
-                        }
-                    }
-                    // LFO 2 Slot Taps
-                    {
-                        const ModSlot& m = srcTrk.lfo2Slots[s];
-                        if (m.destType == 1 && m.destTrack == t) {
-                            float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
-                            if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
-                            else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
-                            else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
-                        }
-                    }
-                }
-            }
-
-            // Clamp modulated parameters to safe integer boundaries
-            int finalMem  = std::clamp((int)(GetParam(step.params.tapeMemory,     tracks[t].tapeMemory)    + modTapeMem), 0, 99);
-            int finalHds  = std::clamp((int)(GetParam(step.params.tapeHeads,      tracks[t].tapeHeads)     + modTapeHds), 1, 4);
-            int finalSpr  = std::clamp((int)(GetParam(step.params.tapeSpread,     tracks[t].tapeSpread)    + modTapeSpr), 0, 99);
-            int finalSpd  = std::clamp((int)(GetParam(step.params.tapeSpeed,      tracks[t].tapeSpeed)     + modTapeSpd), 0, 99);
-            int finalTet  = std::clamp((int)(GetParam(step.params.tapeTether,     tracks[t].tapeTether)    + modTapeTet), 0, 99);
-            int finalDrf  = std::clamp((int)(GetParam(step.params.tapeDrift,      tracks[t].tapeDrift)     + modTapeDrf), 0, 99);
-            int finalDrt  = std::clamp((int)(GetParam(step.params.tapeDriftRate,  tracks[t].tapeDriftRate) + modTapeDrt), 0, 99);
-            int finalFdb  = std::clamp((int)(GetParam(step.params.tapeFeedback,   tracks[t].tapeFeedback)  + modTapeFdb), 0, 99);
-            int finalFsp  = std::clamp((int)(GetParam(step.params.tapeFbSpread,   tracks[t].tapeFbSpread)  + modTapeFsp), 0, 99);
-            int finalFsc  = std::clamp((int)(GetParam(step.params.tapeFbSource,   tracks[t].tapeFbSource)  + modTapeFsc), 0, 99);
-            int finalFrz  = std::clamp((int)(GetParam(step.params.tapeFreeze,     tracks[t].tapeFreeze)    + modTapeFrz), 0, 99);
-            int finalSmr  = std::clamp((int)(GetParam(step.params.tapeSmearRate,  tracks[t].tapeSmearRate) + modTapeSmr), 0, 99);
-            int finalSms  = std::clamp((int)(GetParam(step.params.tapeSmearSize,  tracks[t].tapeSmearSize) + modTapeSms), 0, 99);
-            int finalMix  = std::clamp((int)(GetParam(step.params.tapeMix,        tracks[t].tapeMix)       + modTapeMix), 0, 99);
+            
 
             float processedSum = tracks[t].tapeFX.process(
-                normalTrackSum,
-                finalMem, finalHds, finalSpr, finalSpd, finalTet,
-                finalDrf, finalDrt, finalFdb, finalFsp, finalFsc,
-                finalFrz, finalSmr, finalSms, finalMix,
-                g_sampleRate
-            );
+                            normalTrackSum,
+                            s_finalMem[t], s_finalHds[t], s_finalSpr[t], s_finalSpd[t], s_finalTet[t],
+                            s_finalDrf[t], s_finalDrt[t], s_finalFdb[t], s_finalFsp[t], s_finalFsc[t],
+                            s_finalFrz[t], s_finalSmr[t], s_finalSms[t], s_finalMix[t],
+                            g_sampleRate
+                        );
 
             // 1. Accumulate Dry Master Bus (Using the modulated processed output)
             masterDryMono += processedSum;

@@ -31,12 +31,14 @@ struct StereoReverb {
     std::vector<float> combBufferL[4];
     std::vector<float> combBufferR[4];
     uint32_t combWritePtr[4] = {0};
+    uint32_t combWritePtrR[4] = {0};
     uint32_t combLengths[4] = {1117, 1373, 1409, 1601}; // Prime sample spacing
 
     // 2 Cascaded All-Pass Filters per channel to diffuse reflections
     std::vector<float> allPassBufferL[2];
     std::vector<float> allPassBufferR[2];
     uint32_t allPassWritePtr[2] = {0};
+    uint32_t allPassWritePtrR[2] = {0};
     uint32_t allPassLengths[2] = {223, 443};
 
     void init(float sampleRate);

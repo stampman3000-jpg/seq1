@@ -84,8 +84,8 @@ struct SvfFilter {
         if (cutoffHz > sampleRate * 0.49f) cutoffHz = sampleRate * 0.49f;
 
         // Q factor scaled from 0.5 to 15.0 (exponential curve for smooth resonance sweeps)
-        float Q = 0.5f + powf(resonanceNorm, 2.0f) * 14.5f;
-        k = 1.0f / Q;
+        float Q = 0.5f + (resonanceNorm * resonanceNorm) * 14.5f;
+                k = 1.0f / Q;
 
         // Pre-warp cutoff using tanf
         g = tanf(3.14159265f * cutoffHz / sampleRate);

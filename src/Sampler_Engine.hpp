@@ -20,7 +20,7 @@ struct SamplerVoice {
     // Pointer to the shared crunched sample buffer in memory
     const int16_t* sampleBuffer = nullptr;
     uint32_t sampleLengthSamples = 0;
-
+    uint32_t cachedSpawnIntervalSamples = 500;
     // Standard / Slice Playback state
     float playheadPosition = 0.0f;
     bool active = false;
@@ -38,6 +38,17 @@ struct SamplerVoice {
     
     // Voice-local thread-safe random seed state
     uint32_t randomSeed = 0x12345678;
+    
+    // Cached envelope increment rates and levels calculated at block rate
+        float envAtkRate = 0.0f;
+        float envDecRate = 0.0f;
+        float envRelRate = 0.0f;
+        float envSusLevel = 0.0f;
+
+        float filterAtkRate = 0.0f;
+        float filterDecRate = 0.0f;
+        float filterRelRate = 0.0f;
+        float filterSusLevel = 0.0f;
     
     // Envelope 1 (Volume Envelope matching Page 3)
     float envLevel = 0.0f;

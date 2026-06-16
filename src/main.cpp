@@ -4,7 +4,7 @@
 #include <algorithm>
 #include <iterator>
 #include <cmath>
-
+#include "boot_animation.h"
 #include "Common.hpp"
 #include "Globals.hpp"
 #include "UI_Draw.hpp"
@@ -23,6 +23,56 @@ int main() {
     InitAudioEngine();
     InitMidi(); // Spin up the RtMidi background ports
 
+    // --- STARTUP BOOT ANIMATION STAGE ---
+        bool playBootAnimation = true;
+        int bootFrame = 0;
+        float bootTimer = 0.0f;
+        const float frameDuration = 0.083f; // ~12 FPS (roughly 83ms per frame)
+
+        while (playBootAnimation && !WindowShouldClose()) {
+            // Update frame timing
+            bootTimer += GetFrameTime();
+            if (bootTimer >= frameDuration) {
+                bootTimer = 0.0f;
+                bootFrame++;
+                if (bootFrame >= BOOT_FRAME_COUNT) {
+                    playBootAnimation = false; // Transition to sequencer
+                }
+            }
+
+            // Allow skipping the intro on any key press
+            if (GetKeyPressed() != 0) {
+                playBootAnimation = false;
+            }
+
+            // Draw current animation frame to the virtual OLED target texture
+            BeginTextureMode(oledScreen);
+                ClearBackground(BLACK);
+                
+                // Render the active frame
+                if (bootFrame < BOOT_FRAME_COUNT) {
+                    for (int r = 0; r < BOOT_ROWS; ++r) {
+                        for (int c = 0; c < BOOT_COLS; ++c) {
+                            // To this:
+                            if (bootAnimationData[bootFrame][r][c] != 0) {
+                                // Draws a solid white pixel to match your monochrome OLED display
+                                DrawPixel(c, r, WHITE);
+                            }
+                        }
+                    }
+                }
+            EndTextureMode();
+
+            // Render scaled up virtual texture to the physical window
+            BeginDrawing();
+                ClearBackground(DARKGRAY);
+                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, -(float)oledScreen.texture.height };
+                Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                Vector2 origin = { 0.0f, 0.0f };
+                DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+            EndDrawing();
+        }
+    
     int uiFrameCounter = 0;
     
     // Active Parameter Grid selectors
@@ -552,7 +602,21 @@ int main() {
         if (IsKeyPressed(KEY_SPACE)) {
             isPlaying = !isPlaying;
         }
-
+        // --- SINGLE STEP DELETE (BACKSPACE BY ITSELF) ---
+                if (IsKeyPressed(KEY_BACKSPACE) && !isShiftDown && !isCtrlDown) {
+                    bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8 ||
+                                            currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8);
+                    if (isSequencerPage) {
+                        Step& step = tracks[selectedTrack].steps[cursorStep];
+                        step.note = "";
+                        step.velocity = 0;
+                        step.condition = "";
+                        step.retrigger = 0;
+                        step.microtiming = 0;
+                        step.params.reset();
+                        menuFeedback = "STEP CLEARED";
+                    }
+                }
         // --- GLOBAL KEY COMMAND PROCESSING ---
         if (isShiftDown && !isCtrlDown) {
             if (IsKeyPressed(KEY_E)) {
@@ -625,49 +689,53 @@ int main() {
         }
 
         // --- 1-8 KEYS: TRACK SELECT, MUTE, AND SOLO ---
-                int numKeyTriggered = -1;
-                if (IsKeyPressed(KEY_ONE))   numKeyTriggered = 0;
-                else if (IsKeyPressed(KEY_TWO))   numKeyTriggered = 1;
-                else if (IsKeyPressed(KEY_THREE)) numKeyTriggered = 2;
-                else if (IsKeyPressed(KEY_FOUR))  numKeyTriggered = 3;
-                else if (IsKeyPressed(KEY_FIVE))  numKeyTriggered = 4;
-                else if (IsKeyPressed(KEY_SIX))   numKeyTriggered = 5;
-                else if (IsKeyPressed(KEY_SEVEN)) numKeyTriggered = 6;
-                else if (IsKeyPressed(KEY_EIGHT)) numKeyTriggered = 7;
+        int numKeyTriggered = -1;
+        if (IsKeyPressed(KEY_ONE))        numKeyTriggered = 0;
+        else if (IsKeyPressed(KEY_TWO))   numKeyTriggered = 1;
+        else if (IsKeyPressed(KEY_THREE)) numKeyTriggered = 2;
+        else if (IsKeyPressed(KEY_FOUR))  numKeyTriggered = 3;
+        else if (IsKeyPressed(KEY_FIVE))  numKeyTriggered = 4;
+        else if (IsKeyPressed(KEY_SIX))   numKeyTriggered = 5;
+        else if (IsKeyPressed(KEY_SEVEN)) numKeyTriggered = 6;
+        else if (IsKeyPressed(KEY_EIGHT)) numKeyTriggered = 7;
 
-                if (numKeyTriggered >= 0) {
-                    if (isShiftDown && isCtrlDown) {
-                        // --- SOLO TOGGLE (Cmd/Ctrl + Shift + [1-8]) ---
-                        bool isAnyOtherUnmuted = false;
-                        for (int t = 0; t < 8; ++t) {
-                            if (t != numKeyTriggered && !tracks[t].muted) {
-                                isAnyOtherUnmuted = true;
-                                break;
-                            }
-                        }
-                        if (isAnyOtherUnmuted) {
-                            // Solo this track: mute all others, unmute target
-                            for (int t = 0; t < 8; ++t) {
-                                tracks[t].muted = (t != numKeyTriggered);
-                            }
-                            menuFeedback = "TRACK SOLO ACTIVE";
-                        } else {
-                            // Unsolo: unmute all tracks
-                            for (int t = 0; t < 8; ++t) {
-                                tracks[t].muted = false;
-                            }
-                            menuFeedback = "ALL TRACKS UNMUTED";
-                        }
+        if (numKeyTriggered >= 0) {
+            if (isShiftDown && isCtrlDown) {
+                // --- SOLO TOGGLE (Cmd/Ctrl + Shift + [1-8]) ---
+                bool isAnyOtherUnmuted = false;
+                for (int t = 0; t < 8; ++t) {
+                    if (t != numKeyTriggered && !tracks[t].muted) {
+                        isAnyOtherUnmuted = true;
+                        break;
                     }
-                    else if (isShiftDown) {
-                        // --- MUTE TOGGLE (Shift + [1-8]) ---
-                        tracks[numKeyTriggered].muted = !tracks[numKeyTriggered].muted;
-                        menuFeedback = tracks[numKeyTriggered].muted ? "TRACK MUTED" : "TRACK UNMUTED";
+                }
+                if (isAnyOtherUnmuted) {
+                    for (int t = 0; t < 8; ++t) {
+                        tracks[t].muted = (t != numKeyTriggered);
                     }
-                    else {
-                        // --- SELECT ACTIVE TRACK ([1-8] Keys) ---
-                        selectedTrack = numKeyTriggered;
-                        cursorTrack = numKeyTriggered % 4;
+                    menuFeedback = "TRACK SOLO ACTIVE";
+                } else {
+                    for (int t = 0; t < 8; ++t) {
+                        tracks[t].muted = false;
+                    }
+                    menuFeedback = "ALL TRACKS UNMUTED";
+                }
+            }
+            else if (isCtrlDown) {
+                // --- MUTE TOGGLE (Cmd/Ctrl + [1-8]) ---
+                // Changed from Shift to Ctrl to prevent the pattern-switch clash!
+                tracks[numKeyTriggered].muted = !tracks[numKeyTriggered].muted;
+                menuFeedback = tracks[numKeyTriggered].muted ? "TRACK MUTED" : "TRACK UNMUTED";
+            }
+            else if (isShiftDown) {
+                // Left empty here on purpose!
+                // This allows the Pattern Switch block (Shift + [1-8]) to handle it
+                // without accidentally muting the track.
+            }
+            else {
+                // --- SELECT ACTIVE TRACK ([1-8] Keys) ---
+                selectedTrack = numKeyTriggered;
+                cursorTrack = numKeyTriggered % 4;
 
                         if (numKeyTriggered < 4) {
                             if (currentScreen == SCREEN_SEQ_5_8) {

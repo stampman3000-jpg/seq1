@@ -73,8 +73,15 @@ void GlueCompressor::process(float inL, float inR, float& outL, float& outR, flo
 
     float inputRMS = sqrtf((drivenL * drivenL + drivenR * drivenR) * 0.5f);
     
-    float attackCoef = expf(-1.0f / (0.010f * sampleRate));
-    float releaseCoef = expf(-1.0f / (0.150f * sampleRate));
+    static float lastSampleRate = 0.0f;
+        static float attackCoef = 0.9977f;
+        static float releaseCoef = 0.9998f;
+
+        if (sampleRate != lastSampleRate) {
+            lastSampleRate = sampleRate;
+            attackCoef = expf(-1.0f / (0.010f * sampleRate));
+            releaseCoef = expf(-1.0f / (0.150f * sampleRate));
+        }
     
     if (inputRMS > envelope) {
         envelope = envelope * attackCoef + inputRMS * (1.0f - attackCoef);
@@ -129,6 +136,7 @@ void StereoReverb::init(float sampleRate) {
         combBufferL[i].assign(lLen, 0.0f);
         combBufferR[i].assign(lLen + 23, 0.0f); // Prime offset to widen stereo image [2]
         combWritePtr[i] = 0;
+        combWritePtrR[i] = 0;
     }
 
     // Initialize All-Pass diffusion buffers
@@ -136,6 +144,7 @@ void StereoReverb::init(float sampleRate) {
         allPassBufferL[i].assign(allPassLengths[i], 0.0f);
         allPassBufferR[i].assign(allPassLengths[i] + 13, 0.0f); // Prime offset [2]
         allPassWritePtr[i] = 0;
+        allPassWritePtrR[i] = 0;
     }
 }
 
@@ -174,49 +183,59 @@ void StereoReverb::process(float inL, float inR, float& outL, float& outR, float
     float fbGain = 0.5f + decayNorm * 0.45f;
 
     for (int i = 0; i < 4; ++i) {
-        uint32_t lenL = (uint32_t)combBufferL[i].size();
-        uint32_t lenR = (uint32_t)combBufferR[i].size();
+            uint32_t lenL = (uint32_t)combBufferL[i].size();
+            uint32_t lenR = (uint32_t)combBufferR[i].size();
 
-        float outCombL = combBufferL[i][combWritePtr[i]];
-        float outCombR = combBufferR[i][combWritePtr[i] % lenR];
+            float outCombL = combBufferL[i][combWritePtr[i]];
+            float outCombR = combBufferR[i][combWritePtrR[i]]; // Use right pointer
 
-        // Apply Room Size (modulates comb length dynamically)
-        float combInputL = wetInL + outCombL * fbGain;
-        float combInputR = wetInR + outCombR * fbGain;
+            float combInputL = wetInL + outCombL * fbGain;
+            float combInputR = wetInR + outCombR * fbGain;
 
-        combBufferL[i][combWritePtr[i]] = combInputL;
-        combBufferR[i][combWritePtr[i] % lenR] = combInputR;
+            combBufferL[i][combWritePtr[i]] = combInputL;
+            combBufferR[i][combWritePtrR[i]] = combInputR; // Use right pointer
 
-        combSumL += outCombL;
-        combSumR += outCombR;
+            combSumL += outCombL;
+            combSumR += outCombR;
 
-        combWritePtr[i] = (combWritePtr[i] + 1) % lenL;
-    }
+            // Wrap using branch-predicted increments instead of slow modulo
+            combWritePtr[i]++;
+            if (combWritePtr[i] >= lenL) combWritePtr[i] = 0;
+
+            combWritePtrR[i]++;
+            if (combWritePtrR[i] >= lenR) combWritePtrR[i] = 0;
+        }
 
     // Scale down parallel comb sum
     float diffuseInL = combSumL * 0.25f;
     float diffuseInR = combSumR * 0.25f;
 
+    
     // 3. Diffuse reflections using 2 Cascaded All-Pass filters
-    for (int i = 0; i < 2; ++i) {
-        uint32_t lenL = (uint32_t)allPassBufferL[i].size();
-        uint32_t lenR = (uint32_t)allPassBufferR[i].size();
+        for (int i = 0; i < 2; ++i) {
+            uint32_t lenL = (uint32_t)allPassBufferL[i].size();
+            uint32_t lenR = (uint32_t)allPassBufferR[i].size();
 
-        float apOutL = allPassBufferL[i][allPassWritePtr[i]];
-        float apOutR = allPassBufferR[i][allPassWritePtr[i] % lenR];
+            float apOutL = allPassBufferL[i][allPassWritePtr[i]];
+            float apOutR = allPassBufferR[i][allPassWritePtrR[i]]; // Use right pointer
 
-        // Standard All-pass equations (0.5 feedback gain)
-        float apInputL = diffuseInL + apOutL * 0.5f;
-        float apInputR = diffuseInR + apOutR * 0.5f;
+            // Standard All-pass equations (0.5 feedback gain)
+            float apInputL = diffuseInL + apOutL * 0.5f;
+            float apInputR = diffuseInR + apOutR * 0.5f;
 
-        allPassBufferL[i][allPassWritePtr[i]] = apInputL;
-        allPassBufferR[i][allPassWritePtr[i] % lenR] = apInputR;
+            allPassBufferL[i][allPassWritePtr[i]] = apInputL;
+            allPassBufferR[i][allPassWritePtrR[i]] = apInputR; // Use right pointer
 
-        diffuseInL = -0.5f * apInputL + apOutL;
-        diffuseInR = -0.5f * apInputR + apOutR;
+            diffuseInL = -0.5f * apInputL + apOutL;
+            diffuseInR = -0.5f * apInputR + apOutR;
 
-        allPassWritePtr[i] = (allPassWritePtr[i] + 1) % lenL;
-    }
+            // Wrap using branch-predicted increments instead of slow modulo
+            allPassWritePtr[i]++;
+            if (allPassWritePtr[i] >= lenL) allPassWritePtr[i] = 0;
+
+            allPassWritePtrR[i]++;
+            if (allPassWritePtrR[i] >= lenR) allPassWritePtrR[i] = 0;
+        }
 
     // Parallel Wet/Dry Reverb Mix
     outL = inL * (1.0f - mixNorm) + diffuseInL * mixNorm;
