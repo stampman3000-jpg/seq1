@@ -119,6 +119,19 @@ int main() {
                           
         bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
+        bool isAltDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+        
+        // --- SAFE SYSTEM SHUTDOWN HOTKEY (Ctrl + Alt + §) ---
+               #if defined(__linux__)
+               if (isCtrlDown && isAltDown && IsKeyPressed(KEY_GRAVE)) {
+                   ShutdownOled();
+                   ShutdownAudioEngine();
+                   ShutdownMidi();
+                   std::cout << "[SYSTEM] Safe system shutdown initiated by keyboard..." << std::endl;
+                   system("sudo shutdown -h now");
+               }
+               #endif
+        
         // --- GLOBAL ACTIVE PIANO KEYS STRING DETERMINATION ---
         std::string activeNotesString = "";
         int keysPressedCount = 0;
