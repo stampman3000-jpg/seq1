@@ -306,6 +306,7 @@ void InitializeTracks() {
                 tracks[t].lfo2Slots[0] = ModSlot{1, t, DEST_MORPH2, 20};
 
                 tracks[t].saturationSend = 0;
+        tracks[t].masterVolume = 99;
         tracks[t].autoPanSend = 0;
         tracks[t].muted = false;
     }
@@ -493,6 +494,7 @@ void ResetTrackToDefault(int t) {
 
         tracks[t].saturationSend = 0;
     tracks[t].autoPanSend = 0;
+    tracks[t].masterVolume = 99;
     tracks[t].muted = false;
 }
 
@@ -578,6 +580,7 @@ bool SaveSoundPreset(int trackIdx, int slot, const std::string& filename) {
     file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
     file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
     file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
+    file << trk.masterVolume << "\n";
 
     // Save Tape Buffer parameters
     file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
@@ -630,7 +633,7 @@ bool LoadSoundPreset(int trackIdx, const std::string& filename) {
     file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
     file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
     file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-
+    if (!(file >> trk.masterVolume)) trk.masterVolume = 99; // <--- ADD THIS LINE (Safe fallback)
     // Load Tape Buffer parameters
     file >> trk.tapeMemory >> trk.tapeHeads >> trk.tapeSpread >> trk.tapeSpeed
          >> trk.tapeTether >> trk.tapeDrift >> trk.tapeDriftRate >> trk.tapeFeedback
@@ -696,6 +699,7 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
         file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
         file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
         file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
+        file << trk.masterVolume << "\n";
 
         // Save Tape Buffer track defaults
         file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
@@ -728,7 +732,8 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
             file << sp.lfo2Wave << "\n" << sp.lfo2Speed << "\n" << sp.lfo2Depth << "\n" << sp.lfo2Trigger << "\n" << sp.lfo2Sync << "\n" << sp.lfo2Dest << "\n";
             file << sp.reverbSend << "\n" << sp.delaySend << "\n" << sp.saturationSend << "\n" << sp.autoPanSend << "\n";
             file << sp.sampleSlot << "\n"; // Save step-locked sample slot [2]
-
+            file << sp.masterVolume << "\n";
+            
             // Save step-locked Tape Buffer parameters
             file << sp.tapeMemory << "\n" << sp.tapeHeads << "\n" << sp.tapeSpread << "\n" << sp.tapeSpeed << "\n"
                  << sp.tapeTether << "\n" << sp.tapeDrift << "\n" << sp.tapeDriftRate << "\n" << sp.tapeFeedback << "\n"
@@ -783,7 +788,8 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
         file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
         file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
         file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-
+        if (!(file >> trk.masterVolume)) trk.masterVolume = 99;
+        
         // Load Tape Buffer track defaults
         file >> trk.tapeMemory >> trk.tapeHeads >> trk.tapeSpread >> trk.tapeSpeed
              >> trk.tapeTether >> trk.tapeDrift >> trk.tapeDriftRate >> trk.tapeFeedback
@@ -813,7 +819,8 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
             file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync >> sp.lfo2Dest;
             file >> sp.reverbSend >> sp.delaySend >> sp.saturationSend >> sp.autoPanSend;
             file >> sp.sampleSlot; // Load step-locked sample slot [2]
-
+            if (!(file >> sp.masterVolume)) sp.masterVolume = -1;
+            
             // Load step-locked Tape Buffer parameters
             file >> sp.tapeMemory >> sp.tapeHeads >> sp.tapeSpread >> sp.tapeSpeed
                  >> sp.tapeTether >> sp.tapeDrift >> sp.tapeDriftRate >> sp.tapeFeedback
@@ -909,7 +916,8 @@ bool SaveProject(int slot, const std::string& filename) {
             file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
             file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
             file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
-
+            file << trk.masterVolume << "\n";
+            
             // Save Tape Buffer track defaults
             file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
                  << trk.tapeTether << "\n" << trk.tapeDrift << "\n" << trk.tapeDriftRate << "\n" << trk.tapeFeedback << "\n"
@@ -1016,7 +1024,8 @@ bool LoadProject(const std::string& filename) {
             file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
             file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
             file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-
+            if (!(file >> trk.masterVolume)) trk.masterVolume = 99;
+            
             // Load Tape Buffer track defaults
             file >> trk.tapeMemory >> trk.tapeHeads >> trk.tapeSpread >> trk.tapeSpeed
                  >> trk.tapeTether >> trk.tapeDrift >> trk.tapeDriftRate >> trk.tapeFeedback
@@ -1046,7 +1055,8 @@ bool LoadProject(const std::string& filename) {
                 file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync >> sp.lfo2Dest;
                 file >> sp.reverbSend >> sp.delaySend >> sp.saturationSend >> sp.autoPanSend;
                 file >> sp.sampleSlot; // Load step-locked sample slot [2]
-
+                if (!(file >> sp.masterVolume)) sp.masterVolume = -1;
+                
                 // Load step-locked Tape Buffer parameters
                 file >> sp.tapeMemory >> sp.tapeHeads >> sp.tapeSpread >> sp.tapeSpeed
                      >> sp.tapeTether >> sp.tapeDrift >> sp.tapeDriftRate >> sp.tapeFeedback

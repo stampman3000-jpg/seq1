@@ -873,10 +873,10 @@ void DrawSynthScreen(const UIState& state) {
         bool mvolSelected = (state.synthGridRow == 1 && state.synthGridCol == 11);
 
         bool lPd = false, lPt = false, lFb = false, lMvol = false;
-        int effPd = GetEffectiveVal(sp.pitchSweepDepth, trk.pitchSweepDepth, 184, 27, lPd);
-        int effPt = GetEffectiveVal(sp.pitchSweepTime, trk.pitchSweepTime, 197, 27, lPt);
-        int effFb = GetEffectiveVal(sp.fmFeedback, trk.fmFeedback, 220, 27, lFb);
-        int effMvol = GetEffectiveVal(sp.volume, trk.volume, 239, 27, lMvol);
+                int effPd = GetEffectiveVal(sp.pitchSweepDepth, trk.pitchSweepDepth, 184, 27, lPd);
+                int effPt = GetEffectiveVal(sp.pitchSweepTime, trk.pitchSweepTime, 197, 27, lPt);
+                int effFb = GetEffectiveVal(sp.fmFeedback, trk.fmFeedback, 220, 27, lFb);
+                int effMvol = GetEffectiveVal(sp.masterVolume, trk.masterVolume, 239, 27, lMvol); // <--- Swapped to masterVolume
 
         DrawPitchCurve(effPd, effPt, 184, 11, 23, 14, (pdSelected || ptSelected), WHITE);
         DrawConcentricSquares(effFb, 212, 11, 23, 14, fbSelected, WHITE);

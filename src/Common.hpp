@@ -232,7 +232,8 @@ struct StepParams {
     int delaySend = -1;
     int saturationSend = -1;
     int autoPanSend = -1;
-
+    int masterVolume = -1;
+    
     // Tape Buffer Parameters (Page 4)
     int tapeMemory = -1;
     int tapeHeads = -1;
@@ -260,7 +261,7 @@ struct StepParams {
         filterAttack = -1; filterDecay = -1; filterSustain = -1; filterRelease = -1;
         lfo1Wave = -1; lfo1Speed = -1; lfo1Depth = -1; lfo1Trigger = -1; lfo1Sync = -1; lfo1Dest = -1;
         lfo2Wave = -1; lfo2Speed = -1; lfo2Depth = -1; lfo2Trigger = -1; lfo2Sync = -1; lfo2Dest = -1;
-        reverbSend = -1; delaySend = -1; saturationSend = -1; autoPanSend = -1;
+        reverbSend = -1; delaySend = -1; saturationSend = -1; autoPanSend = -1; masterVolume = -1;
         tapeMemory = -1; tapeHeads = -1; tapeSpread = -1; tapeSpeed = -1; tapeTether = -1;
         tapeDrift = -1; tapeDriftRate = -1; tapeFeedback = -1; tapeFbSpread = -1; tapeFbSource = -1;
         tapeFreeze = -1; tapeSmearRate = -1; tapeSmearSize = -1; tapeMix = -1;
@@ -380,6 +381,7 @@ struct Track {
 
     int saturationSend = 0;     // Saturation/Compression Send (Sun Icon)
     int autoPanSend = 0;        // Chorus/Auto-Pan Send (Tornado Icon)
+    int masterVolume = 99;
     
     // Tape Buffer Parameter Defaults (Page 4)
         int tapeMemory = 50;       // ~1000ms delay length
