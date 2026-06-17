@@ -211,7 +211,7 @@ void DrawSequencerScreen(const UIState& state) {
 
     // Draw Microtiming Popup overlay when editing on this page
     bool isShiftHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool isAltHeld = IsKeyDown(KEY_X);
     if (isShiftHeld && isAltHeld) {
         DrawMicrotimingPopup(state);
     }
@@ -319,7 +319,7 @@ void DrawTriggersScreen(const UIState& state) {
 
     // Draw Microtiming Popup overlay when editing on this page
     bool isShiftHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool isAltHeld = IsKeyDown(KEY_X);
     if (isShiftHeld && isAltHeld) {
         DrawMicrotimingPopup(state);
     }
@@ -338,7 +338,7 @@ void DrawSynthScreen(const UIState& state) {
     const Track& trk = tracks[state.selectedTrack];
     const StepParams& sp = trk.steps[state.cursorStep].params; // Read overrides from active step
 
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool isAltHeld = IsKeyDown(KEY_X);
     auto GetEffectiveVal = [&](int stepVal, int trackVal, int drawX, int drawY, bool& isLocked) {
         if (!isAltHeld) {
             isLocked = false;
@@ -969,7 +969,7 @@ void DrawFilterLfoPage(const UIState& state) {
     const StepParams& sp = trk.steps[state.cursorStep].params; // Overrides on active editing step
 
     // Local helper: gets effective value & renders dot next to label if locked
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool isAltHeld = IsKeyDown(KEY_X);
     auto GetEffectiveVal = [&](int stepVal, int trackVal, int drawX, int drawY, bool& isLocked) {
         if (!isAltHeld) {
             isLocked = false;
@@ -1216,7 +1216,7 @@ void DrawPlaceholderPage(const UIState& state) {
 
     const Track& trk = tracks[state.selectedTrack];
     const StepParams& sp = trk.steps[state.cursorStep].params;
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool isAltHeld = IsKeyDown(KEY_X);
 
     auto GetEffectiveVal = [&](int stepVal, int trackVal, int drawX, int drawY, bool& isLocked) {
         if (!isAltHeld) {
