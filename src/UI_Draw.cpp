@@ -358,7 +358,7 @@ void DrawLevelBars(int val, int x, int y, int w, int h, bool isSelected, Color c
         int bh = 3 + i * 4;
         int by = y + h - bh;
         if (i < activeBars) DrawRectangle(bx, by, barWidth, bh, color);
-        else                DrawRectangleLines(bx, by, barWidth, bh, color);
+        else               {}
     }
     if (isSelected) {
         DrawPixel(x - 2, y + h / 2, color);

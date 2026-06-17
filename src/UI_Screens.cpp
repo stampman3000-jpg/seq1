@@ -756,7 +756,7 @@ void DrawSynthScreen(const UIState& state) {
         int effCrs1 = GetEffectiveVal(sp.coarse, trk.coarse, 31, row1Y + 19, lCrs1);
         int effFine1 = GetEffectiveVal(sp.fine, trk.fine, 56, row1Y + 19, lFine1);
         int effVol1 = GetEffectiveVal(sp.volume, trk.volume, 82, row1Y + 19, lVol1);
-
+     
         DrawSourceWaveform(effMorph1, 2, row1Y + 3, 23, 14, (state.synthGridRow == 1 && state.synthGridCol == 0), WHITE);
         DrawSlider(effCrs1, -24, 24, 31, row1Y + 9, 21, (state.synthGridRow == 1 && state.synthGridCol == 1), true, WHITE);
         DrawSlider(effFine1, -99, 99, 58, row1Y + 9, 21, (state.synthGridRow == 1 && state.synthGridCol == 2), true, WHITE);
