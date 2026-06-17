@@ -12,6 +12,7 @@
 #include "Audio_Engine.hpp"
 #include "Midi_Manager.hpp"
 #include "OledDriver.hpp"
+#include <unistd.h>
 
 int main() {
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "8-Track Sequencer - Premium UI");
