@@ -672,7 +672,8 @@ void DrawSynthScreen(const UIState& state) {
         int effPd = GetEffectiveVal(sp.pitchSweepDepth, trk.pitchSweepDepth, 184, 27, lPd);
         int effPt = GetEffectiveVal(sp.pitchSweepTime, trk.pitchSweepTime, 197, 27, lPt);
         int effBc = GetEffectiveVal(sp.bitRed, trk.bitRed, 220, 27, lBc);
-        int effMvol = GetEffectiveVal(sp.masterVolume, trk.masterVolume, 239, 27, lMvol);
+        int effMvol = GetEffectiveVal(sp.volume, trk.volume, 239, 27, lMvol);
+        
         DrawPitchCurve(effPd, effPt, 184, 11, 23, 14, (pdSelected || ptSelected), WHITE);
         DrawConcentricSquares(effBc, 212, 11, 23, 14, bcSelected, WHITE);
         DrawLevelBars(effMvol, 240, 11, 13, 14, mvolSelected, WHITE);

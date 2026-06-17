@@ -589,9 +589,9 @@ struct SynthVoice {
         int fType = GetParam(sp.filterType, trk.filterType);
 
         // --- 9. RUN THROUGH SILKY STATE-VARIABLE FILTER (SVF) ---
-        float targetMasterVol = GetParam(sp.masterVolume, trk.masterVolume) / 99.0f;
-        return filter.process(combinedSignal, fType) * velocityScale * chokeVolume;
-    }
+        float targetMasterVol = GetParam(sp.masterVolume, trk.masterVolume) / 99.0f; // <--- Add this line
+               return filter.process(combinedSignal, fType) * velocityScale * chokeVolume * targetMasterVol; // <--- Multiply here
+           }
 };
 
 // 8 Synth Tracks, each polyphonic by 4 voices
