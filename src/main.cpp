@@ -1147,7 +1147,8 @@ int main() {
                                     else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.pitchSweepDepth, trk.pitchSweepDepth, change, 0, 99); else trk.pitchSweepDepth = std::clamp(trk.pitchSweepDepth + change, 0, 99); }
                                     else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.pitchSweepTime, trk.pitchSweepTime, change, 0, 99); else trk.pitchSweepTime = std::clamp(trk.pitchSweepTime + change, 0, 99); }
                                     else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.fmFeedback, trk.fmFeedback, change, 0, 99); else trk.fmFeedback = std::clamp(trk.fmFeedback + change, 0, 99); }
-                                    else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.volume, trk.volume, change, 0, 99); else trk.volume = std::clamp(trk.volume + change, 0, 99); }
+                                    else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99); else trk.masterVolume = std::clamp(trk.masterVolume + change, 0, 99); }
+
                                 }
                                 else if (synthGridRow == 2) {
                                     if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.morph2, trk.morph2, change, 0, 99); else trk.morph2 = std::clamp(trk.morph2 + change, 0, 99); }
