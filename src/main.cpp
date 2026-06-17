@@ -671,7 +671,7 @@ int main() {
             }
 
             if (IsKeyPressed(KEY_BACKSPACE)) {
-                bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+                bool isAltHeld = IsKeyDown(KEY_X); // <--- Swapped to KEY_X
                 if (isAltHeld) {
                     tracks[selectedTrack].steps[cursorStep].params.reset();
                     menuFeedback = "STEP LOCKS CLEARED";
@@ -935,7 +935,7 @@ int main() {
             int activeTrack = (currentScreen == SCREEN_SEQ_5_8 || currentScreen == SCREEN_TRIG_5_8) ? cursorTrack + 4 : cursorTrack;
                         Step& step = tracks[activeTrack].steps[cursorStep];
 
-                        bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+            bool isAltHeld = IsKeyDown(KEY_X); // <--- Swapped to KEY_X
 
             // --- STEP & TIMING UTILITIES MENU EDITING ---
                         bool isXHeld = IsKeyDown(KEY_X); // <--- ADD THIS
@@ -1474,7 +1474,7 @@ int main() {
                     }
                     else if (currentScreen == SCREEN_SYNTH) {
                         if (triggerNav) {
-                            bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+                            bool isAltHeld = IsKeyDown(KEY_X); // <--- Swapped to KEY_X
                             if (isAltHeld) {
                                 if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                                 if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -1528,7 +1528,7 @@ int main() {
                         }
 
                         if (triggerNav) {
-                            bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+                            bool isAltHeld = IsKeyDown(KEY_X); // <--- Swapped to KEY_X
                             if (isAltHeld) {
                                 if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                                 if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -1556,7 +1556,7 @@ int main() {
                     }
                     else if (currentScreen == SCREEN_PLACEHOLDER) {
                         if (triggerNav) {
-                            bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+                            bool isAltHeld = IsKeyDown(KEY_X); // <--- Swapped to KEY_X
                             if (isAltHeld) {
                                 if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                                 if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -1577,7 +1577,7 @@ int main() {
                     }
                     else if (currentScreen == SCREEN_GLOBAL_FX) {
                         if (triggerNav) {
-                            bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+                            bool isAltHeld = IsKeyDown(KEY_X); // <--- Swapped to KEY_X
                             if (isAltHeld) {
                                 if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                                 if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
