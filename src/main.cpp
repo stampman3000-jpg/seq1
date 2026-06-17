@@ -1105,9 +1105,8 @@ int main() {
                             else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.release, trk.release, change, 0, 99); else trk.release = std::clamp(trk.release + change, 0, 99); }
                             else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.pitchSweepDepth, trk.pitchSweepDepth, change, 0, 99); else trk.pitchSweepDepth = std::clamp(trk.pitchSweepDepth + change, 0, 99); }
                             else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.pitchSweepTime, trk.pitchSweepTime, change, 0, 99); else trk.pitchSweepTime = std::clamp(trk.pitchSweepTime + change, 0, 99); }
-                            else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99); else trk.masterVolume = std::clamp(trk.masterVolume + change, 0, 99); }
-                            else if (synthGridCol == 12){ if (isStepLock) EditParam(sp.volume, trk.volume, change, 0, 99); else trk.volume = std::clamp(trk.volume + change, 0, 99); }
-                                }
+                            else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.bitRed, trk.bitRed, change, 0, 99); else trk.bitRed = std::clamp(trk.bitRed + change, 0, 99); }
+                            else if (synthGridCol == 12){if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99); else trk.masterVolume = std::clamp(trk.masterVolume + change, 0, 99); }
                                 else if (synthGridRow == 2) {
                                     if (synthGridCol == 0) {
                                         if (isStepLock) sp.filterType = (sp.filterType == -1) ? ((trk.filterType == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE) : ((sp.filterType == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE);
