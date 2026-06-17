@@ -328,7 +328,8 @@ int main() {
                 DrawFilterLfoPage(state);
                 DrawModulationPopup(state);
             EndTextureMode();
-
+            UpdateOled(oledScreen);
+            
             BeginDrawing();
                 ClearBackground(DARKGRAY);
                 Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, -(float)oledScreen.texture.height };
