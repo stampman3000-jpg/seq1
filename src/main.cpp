@@ -28,32 +28,15 @@ int main() {
     // --- STARTUP BOOT ANIMATION STAGE ---
         bool playBootAnimation = true;
         int bootFrame = 0;
-        float bootTimer = 0.0f;
-        const float frameDuration = 0.083f; // ~12 FPS (roughly 83ms per frame)
 
         while (playBootAnimation && !WindowShouldClose()) {
-            // Update frame timing
-            bootTimer += GetFrameTime();
-            if (bootTimer >= frameDuration) {
-                bootTimer = 0.0f;
-                bootFrame++;
-                if (bootFrame >= BOOT_FRAME_COUNT) {
-                    playBootAnimation = false; // Transition to sequencer
-                    // Draw current animation frame to the virtual OLED target texture
-                                BeginTextureMode(oledScreen);
-                                    // ... (drawing logic)
-                                EndTextureMode();
-                                UpdateOled(oledScreen); // <--- ADD THIS LINE
-
-                                // Render scaled up virtual texture to the physical window
-                                BeginDrawing();
-                }
+            // Force a stable, locked 12 FPS time-step by sleeping (83ms per frame)
+            usleep(83000);
+            
+            bootFrame++;
+            if (bootFrame >= BOOT_FRAME_COUNT) {
+                playBootAnimation = false; // Transition cleanly to sequencer
             }
-
-            // Allow skipping the intro on any key press
-            //if (GetKeyPressed() != 0) {
-               // playBootAnimation = false;
-           // }
 
             // Draw current animation frame to the virtual OLED target texture
             BeginTextureMode(oledScreen);
@@ -63,15 +46,14 @@ int main() {
                 if (bootFrame < BOOT_FRAME_COUNT) {
                     for (int r = 0; r < BOOT_ROWS; ++r) {
                         for (int c = 0; c < BOOT_COLS; ++c) {
-                            // To this:
                             if (bootAnimationData[bootFrame][r][c] != 0) {
-                                // Draws a solid white pixel to match your monochrome OLED display
                                 DrawPixel(c, r, WHITE);
                             }
                         }
                     }
                 }
             EndTextureMode();
+            UpdateOled(oledScreen);
 
             // Render scaled up virtual texture to the physical window
             BeginDrawing();
