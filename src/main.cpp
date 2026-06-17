@@ -937,12 +937,15 @@ int main() {
 
                         bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
 
-                        // --- STEP & TIMING UTILITIES MENU EDITING ---
-            if (isShiftDown && isAltHeld) {
+            // --- STEP & TIMING UTILITIES MENU EDITING ---
+                        bool isXHeld = IsKeyDown(KEY_X); // <--- ADD THIS
+                        if (isShiftDown && isXHeld) {    // <--- CHANGED from isAltHeld to isXHeld
                             // Up/Down arrows shift the selected row focus inside the popup
                             if (IsKeyPressed(KEY_UP)) {
                                 stepUtilFocus--;
                                 if (stepUtilFocus < 0) stepUtilFocus = 2;
+                            }
+
                             }
                             if (IsKeyPressed(KEY_DOWN)) {
                                 stepUtilFocus++;
@@ -1082,8 +1085,7 @@ int main() {
                 if (change != 0) {
                     Track& trk = tracks[selectedTrack];
                     StepParams& sp = trk.steps[cursorStep].params;
-                    bool isStepLock = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
-
+                    bool isStepLock = IsKeyDown(KEY_X); // <--- CHANGED from Left/Right Alt to KEY_X
                     auto EditParam = [&](int& stepVal, int trackVal, int changeAmt, int minV, int maxV) {
                         int base = (stepVal == -1) ? trackVal : stepVal;
                         stepVal = std::clamp(base + changeAmt, minV, maxV);
