@@ -210,11 +210,11 @@ void DrawSequencerScreen(const UIState& state) {
     }
 
     // Draw Microtiming Popup overlay when editing on this page
-    bool isShiftHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
-    if (isShiftHeld && isAltHeld) {
-        DrawMicrotimingPopup(state);
-    }
+        bool isShiftHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        bool isXHeld = IsKeyDown(KEY_X); // <--- CHANGED to KEY_X
+        if (isShiftHeld && isXHeld) {    // <--- CHANGED to isXHeld
+            DrawMicrotimingPopup(state);
+        }
 }
 // Complete main rendering engine for Page 2: TRIGS
 void DrawTriggersScreen(const UIState& state) {
@@ -319,7 +319,7 @@ void DrawTriggersScreen(const UIState& state) {
 
     // Draw Microtiming Popup overlay when editing on this page
     bool isShiftHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    bool isAltHeld = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    bool isAltHeld = IsKeyDown(KEY_X); 
     if (isShiftHeld && isAltHeld) {
         DrawMicrotimingPopup(state);
     }
