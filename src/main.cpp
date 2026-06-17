@@ -51,9 +51,9 @@ int main() {
             }
 
             // Allow skipping the intro on any key press
-            if (GetKeyPressed() != 0) {
-                playBootAnimation = false;
-            }
+            //if (GetKeyPressed() != 0) {
+               // playBootAnimation = false;
+           // }
 
             // Draw current animation frame to the virtual OLED target texture
             BeginTextureMode(oledScreen);

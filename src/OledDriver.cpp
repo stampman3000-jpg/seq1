@@ -210,12 +210,14 @@ void InitOled() {
     spiWrite(clearBuf.data(), clearBuf.size());
 
     writeCommand(0xAF); // Display ON!
-    std::cout << "[OLED] Display ON! SSD1322 Initialized successfully." << std::endl;
-#else
-    // Mac does nothing
-    std::cout << "[OLED] Running on macOS: Physical OLED simulation active (No-op)." << std::endl;
-#endif
-}
+        std::cout << "[OLED] Display ON! SSD1322 Initialized successfully." << std::endl;
+        sleep(2); // <--- CHANGED: Wait exactly 2 seconds for the physical glass to wake up cleanly
+    #else
+        // Mac does nothing
+        std::cout << "[OLED] Running on macOS: Physical OLED simulation active (No-op)." << std::endl;
+    #endif
+    }
+
 
 void UpdateOled(RenderTexture2D oledScreen) {
 #if defined(__linux__)
