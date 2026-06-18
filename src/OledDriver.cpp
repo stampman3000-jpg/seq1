@@ -196,7 +196,7 @@ void InitOled() {
     writeCommand(0xA6); // Normal Display Mode
 
     // Set Bipolar Contrast Current across Segments A, B, and C (3 bytes)
-    uint8_t contrastData[] = {0x7F, 0x7F, 0x7F};
+    uint8_t contrastData[] = {0x20, 0x20, 0x20};
     writeCommandWithData(0xC1, contrastData, 3);
     
     // Clear screen initially by writing zero bytes (Using 128 offset range: 0x20 to 0x5F)
