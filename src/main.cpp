@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <thread>
 #include <atomic>
+#include <fstream>
 #include <iostream>
 #include <chrono>
 #include <cstdlib>
@@ -29,11 +30,11 @@ std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
 void runEncoderThread() {
-    // Configure internal pull-ups on startup
-    std::system("sudo pinctrl set 18,22,27 ip pu");
+    // 1. Programmatically force physical pull-ups on BCM 17, 22, and 27 on startup
+    std::system("sudo pinctrl set 17,22,27 ip pu");
     usleep(10000);
 
-    // Open gpiomem device
+    // 2. Open gpiomem device
     int fd = open("/dev/gpiomem", O_RDWR | O_SYNC);
     if (fd < 0) {
         std::cerr << "[ENCODER] Failed to open /dev/gpiomem. Thread aborting." << std::endl;
@@ -54,17 +55,17 @@ void runEncoderThread() {
 
     // Read the initial atomic states of all pins at once
     uint32_t levels = gpio[GPLEV0];
-    bool lastCLK = (levels & (1 << 18)) != 0;
+    bool lastCLK = (levels & (1 << 17)) != 0; // Read BCM 17
     
     auto lastTurnTime = std::chrono::steady_clock::now();
 
     while (g_encoderThreadRunning) {
-        // Read the exact microsecond level of all 32 GPIO pins at once
+        // Read the exact microsecond level of all 32 GPIO pins in a single CPU cycle
         uint32_t levels = gpio[GPLEV0];
 
-        bool clkVal = (levels & (1 << 18)) != 0;
-        bool dtVal  = (levels & (1 << 27)) != 0;
-        bool swVal  = (levels & (1 << 22)) == 0; // LOW (0) means pressed
+        bool clkVal = (levels & (1 << 17)) != 0; // BCM 17 (CLK / Pin 11)
+        bool dtVal  = (levels & (1 << 27)) != 0; // BCM 27 (DT / Pin 13)
+        bool swVal  = (levels & (1 << 22)) == 0; // BCM 22 (SW / Pin 15), LOW (0) means pressed
 
         g_encoderButtonState.store(swVal);
 
@@ -73,13 +74,14 @@ void runEncoderThread() {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
 
-            if (elapsed > 25) { // 25ms software debounce lockout
+            if (elapsed > 20) { // 20ms software debounce lockout
                 lastTurnTime = now;
-                // If DT is High when CLK falls: Clockwise. Else Counter-Clockwise
+                
+                // If DT is High when CLK falls: Clockwise. Otherwise Counter-Clockwise
                 if (dtVal) {
-                    g_encoderTurnQueue.fetch_add(1);  // Clockwise increment
+                    g_encoderTurnQueue.fetch_add(1);  // Clockwise (positive increment)
                 } else {
-                    g_encoderTurnQueue.fetch_sub(1);  // Counter-Clockwise decrement
+                    g_encoderTurnQueue.fetch_sub(1);  // Counter-Clockwise (negative decrement)
                 }
             }
         }
@@ -187,7 +189,7 @@ int main() {
                 bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
                                   IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
 
-                // Pull hardware rotary encoder events
+        // Pull hardware rotary encoder events
                 int encoderTurn = 0;
                 bool encoderButton = false;
                 #if defined(__linux__)
@@ -200,9 +202,7 @@ int main() {
 
                 // If the encoder is turned while the button is clicked, it simulates holding X (Step Locking)!
                 bool isAltDown = IsKeyDown(KEY_X) || encoderButton;
-                bool isAltHeld = IsKeyDown(KEY_X) || encoderButton;
-        
-        // --- SAFE SYSTEM SHUTDOWN HOTKEY (Ctrl + Alt + §) ---
+                bool isAltHeld = IsKeyDown(KEY_X) || encoderButton;        // --- SAFE SYSTEM SHUTDOWN HOTKEY (Ctrl + Alt + §) ---
                #if defined(__linux__)
                if (isCtrlDown && isAltDown && IsKeyPressed(KEY_GRAVE)) {
                    ShutdownOled();
