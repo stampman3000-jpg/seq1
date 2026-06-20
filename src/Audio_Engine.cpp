@@ -602,25 +602,29 @@ struct SynthVoice {
                             phase2 += finalFreq2 / (float)g_sampleRate;
                         }
         else {
-                    // ==========================================
-                    // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
-                    // ==========================================
-                    float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
-                    if (ratio < 0.05f) ratio = 0.05f;
-                    float freq2 = freq1 * ratio;
+                            // ==========================================
+                            // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
+                            // ==========================================
+                            // MODULATOR DETUNING: Divided by 2000.0f instead of 100.0f.
+                            // This turns fine2 into a true micro-tuning detune (+/- 0.05 max ratio offset) rather
+                            // than jumping intervals, and prevents startup dissonance from the default fine2=15.
+                            float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 2000.0f);
+                            if (ratio < 0.05f) ratio = 0.05f;
+                            float freq2 = freq1 * ratio;
 
-                    // Modulator self-feedback: scaled by 1/(2*PI) so feedback scale simplifies to exactly 0.5!
-                    float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 0.5f;
-                    float feedbackPhase = phase2 + lastModOutput * feedbackScale;
+                            // Modulator self-feedback: scaled by 1/(2*PI) so feedback scale simplifies to exactly 0.5!
+                            float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 0.5f;
+                            float feedbackPhase = phase2 + lastModOutput * feedbackScale;
 
-                    // Compute Modulator dry shape
-                    float modDry = ProcessWave(feedbackPhase, (int)smoothMorph2) * envLevel2;
-                    lastModOutput = modDry;
+                            // Compute Modulator dry shape
+                            float modDry = ProcessWave(feedbackPhase, (int)smoothMorph2) * envLevel2;
+                            lastModOutput = modDry;
 
-                    // Quadratic Index Scaling: folded 1/(2*PI) division directly into the index multiplier!
-                    // 8.0f / (2 * PI) = 1.2732395f
-                    float normIdx = smoothVol2 / 99.0f;
-                    float index = normIdx * normIdx * 1.2732395f;
+                            // CUBIC INDEX SCALING: Stretches out the lower 50% of the slider.
+                            // This gives high-precision resolution to dial in sweet bells and mellow brass (0.0 to 1.5 radians),
+                            // while still allowing the top of the dial to scream up to the maximum of 8.0 radians.
+                            float normIdx = smoothVol2 / 99.0f;
+                            float index = normIdx * normIdx * normIdx * 1.2732395f;
 
                     // Modulate Carrier phase
                     float modulatedPhase1 = phase1 + modDry * index;
