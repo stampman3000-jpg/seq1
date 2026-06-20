@@ -569,7 +569,7 @@ struct SynthVoice {
 
                                     // As you play further from C4, Osc 1 drifts slightly sharp, and Osc 2 flat.
                                     // At 100% Analog, this creates up to ~0.08% divergence per octave (~1.5 cents).
-                                    float trackingDivergence = octavesFromCenter * analogAmount * 0.0008f;
+                float trackingDivergence = octavesFromCenter * analogAmount * 0.005f;
                                     freq1AnalogScale += trackingDivergence;
                                     freq2AnalogScale -= trackingDivergence;
                                 }
