@@ -27,35 +27,6 @@ std::atomic<int> g_encoderTurnQueue(0);
 std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
-// Ben Buxton's high-reliability rotary encoder state-machine definitions
-#define R_START 0x0
-#define DIR_CW 0x10
-#define DIR_CCW 0x20
-
-#define R_CW_FINAL 0x1
-#define R_CW_BEGIN 0x2
-#define R_CW_NEXT 0x3
-#define R_CCW_BEGIN 0x4
-#define R_CCW_FINAL 0x5
-#define R_CCW_NEXT 0x6
-
-const unsigned char ttable[7][4] = {
-  // R_START (11)
-  {R_START,    R_CW_BEGIN,  R_CCW_BEGIN, R_START},
-  // R_CW_FINAL (11 -> CW)
-  {R_CW_NEXT,  R_START,     R_CW_FINAL,  R_START | DIR_CW},
-  // R_CW_BEGIN
-  {R_CW_NEXT,  R_CW_BEGIN,  R_START,     R_START},
-  // R_CW_NEXT
-  {R_CW_NEXT,  R_CW_BEGIN,  R_CW_FINAL,  R_START},
-  // R_CCW_BEGIN
-  {R_CCW_NEXT, R_START,     R_CCW_BEGIN, R_START},
-  // R_CCW_FINAL (11 -> CCW)
-  {R_CCW_NEXT, R_CCW_FINAL, R_START,     R_START | DIR_CCW},
-  // R_CCW_NEXT
-  {R_CCW_NEXT, R_CCW_FINAL, R_CCW_BEGIN, R_START},
-};
-
 void runEncoderThread() {
     const int OFFSET = 512;
     int pinCLK = OFFSET + 18; // 530 (BCM 18)
@@ -98,7 +69,8 @@ void runEncoderThread() {
     }
 
     char valCLK = '1', valDT = '1', valSW = '1';
-    unsigned char state = R_START;
+    bool lastCLKVal = true;
+    auto lastTurnTime = std::chrono::steady_clock::now();
 
     while (g_encoderThreadRunning) {
         lseek(fdCLK, 0, SEEK_SET);
@@ -110,21 +82,31 @@ void runEncoderThread() {
         lseek(fdSW, 0, SEEK_SET);
         read(fdSW, &valSW, 1);
 
-        g_encoderButtonState.store(valSW == '0');
+        bool clkVal = (valCLK == '1');
+        bool dtVal  = (valDT == '1');
+        bool swVal  = (valSW == '0'); // LOW means pressed
 
-        // Grab current 2-bit state (CLK is Bit 1, DT is Bit 0)
-        unsigned char pinstate = ((valCLK == '1') ? 2 : 0) | ((valDT == '1') ? 1 : 0);
-        
-        // Update Ben Buxton state-machine
-        state = ttable[state & 0xf][pinstate];
-        unsigned char result = state & 0x30;
-        
-        if (result == DIR_CW) {
-            g_encoderTurnQueue.fetch_add(1);
-        } else if (result == DIR_CCW) {
-            g_encoderTurnQueue.fetch_sub(1);
+        g_encoderButtonState.store(swVal);
+
+        // Detect falling edge of CLK (CLK transitions from High to Low)
+        if (lastCLKVal && !clkVal) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
+            
+            // 35ms debouncing lock-out filters out all mechanical contact bounces
+            if (elapsed > 35) {
+                lastTurnTime = now;
+                // If DT is still High on CLK fall, it is Clockwise. Otherwise Counter-Clockwise
+                if (dtVal) {
+                    g_encoderTurnQueue.fetch_add(1);
+                } else {
+                    g_encoderTurnQueue.fetch_sub(1);
+                }
+            }
         }
+        lastCLKVal = clkVal;
 
+        // Poll at 1000Hz (1ms)
         usleep(1000);
     }
 
