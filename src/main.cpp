@@ -638,7 +638,9 @@ int main() {
                         if (lfoPopupOpen) {
                             DrawModulationPopup(state);
                         }
-
+            // --- DRAW SYSTEM MENU OVERLAY (Add this back!) ---
+                        DrawSystemMenu(state);
+            
                         // Sync CPU framebuffer to Raylib GPU texture for simulated window
                         UpdateTexture(oledScreen.texture, g_oledCPUPixels);
                         UpdateOled(oledScreen);
