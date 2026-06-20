@@ -112,13 +112,14 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
             useGateTimer = false;
             gateTimerSamples = 0;
         }
+    } // <--- ADD THIS CLOSING BRACE HERE!
 
-void SamplerVoice::Release() {
-    if (stage != ENV_IDLE) stage = ENV_RELEASE;
-    
-    // Release Filter Envelope
-    if (filterStage != FLT_IDLE) filterStage = FLT_RELEASE;
-}
+    void SamplerVoice::Release() {
+        if (stage != ENV_IDLE) stage = ENV_RELEASE;
+        
+        // Release Filter Envelope
+        if (filterStage != FLT_IDLE) filterStage = FLT_RELEASE;
+    }
 
     float SamplerVoice::Process(int trackIdx) {
         if (stage == ENV_IDLE || !active) return 0.0f;
