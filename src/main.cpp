@@ -27,38 +27,60 @@ std::atomic<int> g_encoderTurnQueue(0);
 std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
+// Ben Buxton's high-reliability rotary encoder state-machine definitions
+#define R_START 0x0
+#define DIR_CW 0x10
+#define DIR_CCW 0x20
+
+#define R_CW_FINAL 0x1
+#define R_CW_BEGIN 0x2
+#define R_CW_NEXT 0x3
+#define R_CCW_BEGIN 0x4
+#define R_CCW_FINAL 0x5
+#define R_CCW_NEXT 0x6
+
+const unsigned char ttable[7][4] = {
+  // R_START (11)
+  {R_START,    R_CW_BEGIN,  R_CCW_BEGIN, R_START},
+  // R_CW_FINAL (11 -> CW)
+  {R_CW_NEXT,  R_START,     R_CW_FINAL,  R_START | DIR_CW},
+  // R_CW_BEGIN
+  {R_CW_NEXT,  R_CW_BEGIN,  R_START,     R_START},
+  // R_CW_NEXT
+  {R_CW_NEXT,  R_CW_BEGIN,  R_CW_FINAL,  R_START},
+  // R_CCW_BEGIN
+  {R_CCW_NEXT, R_START,     R_CCW_BEGIN, R_START},
+  // R_CCW_FINAL (11 -> CCW)
+  {R_CCW_NEXT, R_CCW_FINAL, R_START,     R_START | DIR_CCW},
+  // R_CCW_NEXT
+  {R_CCW_NEXT, R_CCW_FINAL, R_CCW_BEGIN, R_START},
+};
+
 void runEncoderThread() {
-    // 512-offset for Broadcom GPIO pins under Bookworm kernel
     const int OFFSET = 512;
     int pinCLK = OFFSET + 18; // 530 (BCM 18)
     int pinDT  = OFFSET + 27; // 539 (BCM 27)
     int pinSW  = OFFSET + 22; // 534 (BCM 22)
 
-    // Export corrected BCM Offset Pins
     auto exportPin = [](int pin) {
         std::ofstream f("/sys/class/gpio/export");
-        if (f.is_open()) {
-            f << pin;
-        }
+        if (f.is_open()) f << pin;
     };
     auto setInDir = [](int pin) {
         std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/direction";
         std::ofstream f(path);
-        if (f.is_open()) {
-            f << "in";
-        }
+        if (f.is_open()) f << "in";
     };
     
     exportPin(pinCLK);
     exportPin(pinDT);
     exportPin(pinSW);
-    usleep(50000); // 50ms wait for sysfs export binds
+    usleep(50000);
     
     setInDir(pinCLK);
     setInDir(pinDT);
     setInDir(pinSW);
 
-    // Open persistent sysfs file descriptors with the corrected offset paths
     std::string clkPath = "/sys/class/gpio/gpio" + std::to_string(pinCLK) + "/value";
     std::string dtPath  = "/sys/class/gpio/gpio" + std::to_string(pinDT) + "/value";
     std::string swPath  = "/sys/class/gpio/gpio" + std::to_string(pinSW) + "/value";
@@ -68,16 +90,15 @@ void runEncoderThread() {
     int fdSW  = open(swPath.c_str(), O_RDONLY);
 
     if (fdCLK < 0 || fdDT < 0 || fdSW < 0) {
-        std::cerr << "[ENCODER] Failed to open GPIO sysfs descriptors with 512 offset." << std::endl;
+        std::cerr << "[ENCODER] Failed to open GPIO sysfs descriptors." << std::endl;
         if (fdCLK >= 0) close(fdCLK);
         if (fdDT >= 0)  close(fdDT);
         if (fdSW >= 0)  close(fdSW);
         return;
     }
 
-    char lastCLKVal = '1';
     char valCLK = '1', valDT = '1', valSW = '1';
-    auto lastTurnTime = std::chrono::steady_clock::now();
+    unsigned char state = R_START;
 
     while (g_encoderThreadRunning) {
         lseek(fdCLK, 0, SEEK_SET);
@@ -89,26 +110,21 @@ void runEncoderThread() {
         lseek(fdSW, 0, SEEK_SET);
         read(fdSW, &valSW, 1);
 
-        // Switch connects to GND when pressed (normally returns '1', returns '0' when pressed)
         g_encoderButtonState.store(valSW == '0');
 
-        // Check falling edge of CLK signal (A transitions 1 -> 0)
-        if (lastCLKVal == '1' && valCLK == '0') {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
-            if (elapsed > 12) { // 12ms software debounce lock-out
-                lastTurnTime = now;
-                // If B (DT) is High (1), it is Clockwise. Otherwise Counter-Clockwise
-                if (valDT == '1') {
-                    g_encoderTurnQueue.fetch_add(1);
-                } else {
-                    g_encoderTurnQueue.fetch_sub(1);
-                }
-            }
+        // Grab current 2-bit state (CLK is Bit 1, DT is Bit 0)
+        unsigned char pinstate = ((valCLK == '1') ? 2 : 0) | ((valDT == '1') ? 1 : 0);
+        
+        // Update Ben Buxton state-machine
+        state = ttable[state & 0xf][pinstate];
+        unsigned char result = state & 0x30;
+        
+        if (result == DIR_CW) {
+            g_encoderTurnQueue.fetch_add(1);
+        } else if (result == DIR_CCW) {
+            g_encoderTurnQueue.fetch_sub(1);
         }
-        lastCLKVal = valCLK;
 
-        // Poll at 1000Hz (1ms) to eliminate missed turns during rapid scrolls
         usleep(1000);
     }
 
@@ -1137,79 +1153,87 @@ int main() {
                                         }
                                     }
 
-            if (triggerAction && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
-                if (IsKeyDown(KEY_UP)) {
-                    std::string curNote = step.note;
-                    if (curNote.empty()) {
-                        step.note = "C" + std::to_string(currentOctave);
-                        step.velocity = 3;
-                    } else {
-                        step.note = TransposeNote(curNote, 1);
-                    }
-                }
-                if (IsKeyDown(KEY_DOWN)) {
-                    std::string curNote = step.note;
-                    if (curNote.empty()) {
-                        step.note = "C" + std::to_string(currentOctave);
-                        step.velocity = 3;
-                    } else {
-                        step.note = TransposeNote(curNote, -1);
-                    }
-                }
-                if (IsKeyDown(KEY_RIGHT)) {
-                    int v = step.velocity + 1;
-                    if (v > 3) v = 3;
-                    step.velocity = v;
-                    if (v > 0 && step.note.empty()) {
-                        step.note = "C" + std::to_string(currentOctave);
-                    }
-                }
-                if (IsKeyDown(KEY_LEFT)) {
-                    int v = step.velocity - 1;
-                    if (v < 0) v = 0;
-                    step.velocity = v;
-                    if (v > 0 && step.note.empty()) {
-                        step.note = "C" + std::to_string(currentOctave);
-                    }
-                }
-            }
+            if ((triggerAction || (encoderTurn != 0)) && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
+                            if (IsKeyDown(KEY_UP)) {
+                                std::string curNote = step.note;
+                                if (curNote.empty()) {
+                                    step.note = "C" + std::to_string(currentOctave);
+                                    step.velocity = 3;
+                                } else {
+                                    step.note = TransposeNote(curNote, 1);
+                                }
+                            }
+                            if (IsKeyDown(KEY_DOWN)) {
+                                std::string curNote = step.note;
+                                if (curNote.empty()) {
+                                    step.note = "C" + std::to_string(currentOctave);
+                                    step.velocity = 3;
+                                } else {
+                                    step.note = TransposeNote(curNote, -1);
+                                }
+                            }
+                            
+                            int velocityChange = 0;
+                            if (encoderTurn != 0) {
+                                velocityChange = (encoderTurn > 0) ? 1 : -1;
+                            } else if (IsKeyDown(KEY_RIGHT)) {
+                                velocityChange = 1;
+                            } else if (IsKeyDown(KEY_LEFT)) {
+                                velocityChange = -1;
+                            }
 
+                            if (velocityChange != 0) {
+                                int v = step.velocity + velocityChange;
+                                if (v > 3) v = 3;
+                                if (v < 0) v = 0;
+                                step.velocity = v;
+                                if (v > 0 && step.note.empty()) {
+                                    step.note = "C" + std::to_string(currentOctave);
+                                }
+                            }
+                        }
             if (currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8) {
-                int changeCondition = 0;
-                if (triggerAction) {
-                    if (IsKeyDown(KEY_UP))   changeCondition = 1;
-                    if (IsKeyDown(KEY_DOWN)) changeCondition = -1;
-                }
+                            int changeCondition = 0;
+                            // If turned normally (without click), change the Step Condition
+                            if (encoderTurn != 0 && !encoderButton) {
+                                changeCondition = (encoderTurn > 0) ? 1 : -1;
+                            } else if (triggerAction) {
+                                if (IsKeyDown(KEY_UP))   changeCondition = 1;
+                                if (IsKeyDown(KEY_DOWN)) changeCondition = -1;
+                            }
 
-                if (changeCondition != 0) {
-                    std::string curTrig = step.condition;
-                        
-                    auto it = std::find(triggerOptions.begin(), triggerOptions.end(), curTrig);
-                    int index = 0;
-                    if (it != triggerOptions.end()) {
-                        index = std::distance(triggerOptions.begin(), it);
-                    }
-                    
-                    index += changeCondition;
-                    if (index < 0) index = triggerOptions.size() - 1;
-                    if (index >= (int)triggerOptions.size()) index = 0;
+                            if (changeCondition != 0) {
+                                std::string curTrig = step.condition;
+                                    
+                                auto it = std::find(triggerOptions.begin(), triggerOptions.end(), curTrig);
+                                int index = 0;
+                                if (it != triggerOptions.end()) {
+                                    index = std::distance(triggerOptions.begin(), it);
+                                }
+                                
+                                index += changeCondition;
+                                if (index < 0) index = triggerOptions.size() - 1;
+                                if (index >= (int)triggerOptions.size()) index = 0;
 
-                    step.condition = triggerOptions[index];
-                }
+                                step.condition = triggerOptions[index];
+                            }
 
-                int changeRetrig = 0;
-                if (triggerAction) {
-                    if (IsKeyDown(KEY_RIGHT)) changeRetrig = 1;
-                    if (IsKeyDown(KEY_LEFT))  changeRetrig = -1;
-                }
+                            int changeRetrig = 0;
+                            // If CLICKED and turned, change the Retrigger count
+                            if (encoderTurn != 0 && encoderButton) {
+                                changeRetrig = (encoderTurn > 0) ? 1 : -1;
+                            } else if (triggerAction) {
+                                if (IsKeyDown(KEY_RIGHT)) changeRetrig = 1;
+                                if (IsKeyDown(KEY_LEFT))  changeRetrig = -1;
+                            }
 
-                if (changeRetrig != 0) {
-                    int r = step.retrigger + changeRetrig;
-                    if (r < 0) r = 0;
-                    if (r > 16) r = 16;
-                    step.retrigger = r;
-                }
-            }
+                            if (changeRetrig != 0) {
+                                int r = step.retrigger + changeRetrig;
+                                if (r < 0) r = 0;
+                                if (r > 16) r = 16;
+                                step.retrigger = r;
+                            }
+                        }
             else if (currentScreen == SCREEN_SYNTH) {
                             int change = 0;
                             // EDIT: Check triggerAction OR encoderTurn
