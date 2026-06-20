@@ -240,12 +240,13 @@ void UpdateOled(RenderTexture2D oledScreen) {
     // Buffer size: 256 * 64 / 2 = 8,192 bytes
     static std::vector<uint8_t> oledBuffer(8192, 0);
 
-    // Read directly from the CPU framebuffer instead of GLES VRAM
+    // Read directly from the CPU framebuffer, reversing the X axis (right-to-left)
+    // to correct the horizontal mirroring of the physical OLED.
     int outIndex = 0;
     for (int y = 0; y < 64; ++y) {
         for (int x = 0; x < 256; x += 2) {
-            Color p1 = g_oledCPUPixels[y * 256 + x];
-            Color p2 = g_oledCPUPixels[y * 256 + (x + 1)];
+            Color p1 = g_oledCPUPixels[y * 256 + (255 - x)];
+            Color p2 = g_oledCPUPixels[y * 256 + (254 - x)];
 
             // Convert to 4-bit grayscale (0 to 15)
             uint8_t gray1 = (p1.r > 127 || p1.g > 127 || p1.b > 127) ? 15 : 0;
