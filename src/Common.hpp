@@ -65,9 +65,10 @@ struct SvfFilter {
             float v2 = s2 + a2 * s1 + a3 * v3;
 
             if (analog > 0.0f) {
-                // Soft-clip state variables inside the loop to simulate vintage transistor saturation
-                // This prevents resonance peaks from blowing up and adds beautiful harmonic drive
-                float saturationLimit = 1.0f / (analog * 0.8f + 0.2f); // Limits drop from 5.0 down to 1.0
+                        // Soft-clip state variables inside the loop to simulate transistor saturation
+                        // Scaling makes the former 100% limit (1.0) achievable at ~75%
+                        // At 100%, the limit drops to ~0.77 for much heavier warm saturation
+                        float saturationLimit = 1.0f / (analog * 1.15f + 0.15f);
                 
                 auto saturateInside = [saturationLimit](float val) {
                     float absVal = std::abs(val);

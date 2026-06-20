@@ -555,26 +555,27 @@ struct SynthVoice {
                             float freq1AnalogScale = 1.0f;
                             float freq2AnalogScale = 1.0f;
 
-                            if (analogAmount > 0.0f) {
-                                freq1AnalogScale += osc1Drift * analogAmount * 0.0015f; // Up to 0.15% random pitch drift
-                                freq2AnalogScale += osc2Drift * analogAmount * 0.0015f;
-                                freq2AnalogScale += analogAmount * 0.0003f; // Up to 0.03% detune offset max on Osc 2
-                            }
+            if (analogAmount > 0.0f) {
+                                    // Increase drift and detune instability (old 100% instability occurs at ~75%)
+                                    freq1AnalogScale += osc1Drift * analogAmount * 0.0022f; // Up to 0.22% random pitch drift
+                                    freq2AnalogScale += osc2Drift * analogAmount * 0.0022f;
+                                    freq2AnalogScale += analogAmount * 0.00042f; // Up to 0.042% static detune offset
+                                }
 
-                            float finalFreq1 = freq1 * freq1AnalogScale;
-                            float finalFreq2 = freq2 * freq2AnalogScale;
+                                float finalFreq1 = freq1 * freq1AnalogScale;
+                                float finalFreq2 = freq2 * freq2AnalogScale;
 
-                            float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
-                            float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
+                                float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
+                                float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
 
-                            // Apply 1-pole low pass filter waveform softening
-                            if (analogAmount > 0.0f) {
-                                float lpCoeff = 1.0f - (analogAmount * 0.65f); // Smoothly transitions from 1.0 down to 0.35
-                                osc1LPState += lpCoeff * (rawOsc1 - osc1LPState);
-                                osc2LPState += lpCoeff * (rawOsc2 - osc2LPState);
-                                rawOsc1 = osc1LPState;
-                                rawOsc2 = osc2LPState;
-                            }
+                                // Apply 1-pole low pass filter waveform softening (old 100% softening occurs at ~75%)
+                                if (analogAmount > 0.0f) {
+                                    float lpCoeff = 1.0f - (analogAmount * 0.75f); // Transitions down to 0.25 (darker, warmer)
+                                    osc1LPState += lpCoeff * (rawOsc1 - osc1LPState);
+                                    osc2LPState += lpCoeff * (rawOsc2 - osc2LPState);
+                                    rawOsc1 = osc1LPState;
+                                    rawOsc2 = osc2LPState;
+                                }
 
                             float drive = 1.0f + (smoothVol1 / 33.0f);
                             float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
