@@ -22,16 +22,19 @@
 #include <fstream>
 #include <iostream>
 #include <chrono>
-#include <cstdlib> // Required for system()
 
 std::atomic<int> g_encoderTurnQueue(0);
 std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
 void runEncoderThread() {
-    // 1. Programmatically force the Pi's internal pull-ups on startup.
-    // This holds CLK, DT, and SW at 1 (HIGH) so they don't float to 0 (LOW).
-    std::system("sudo pinctrl set 18,22,27 ip pu");
+    // --- USER CONFIGURATION SWITCHES ---
+    // 1. If your scroll direction is backwards, set this to true!
+    const bool FLIP_DIRECTION = true; 
+
+    // 2. Detent Steps: Standard encoders have 4 state changes per physical click. 
+    // If your encoder requires a full turn or feels too stiff, change this to 2 or 1!
+    const int DETENT_STEPS = 4; 
 
     const int OFFSET = 512;
     int pinCLK = OFFSET + 18; // 530 (BCM 18)
@@ -74,9 +77,13 @@ void runEncoderThread() {
     }
 
     char valCLK = '1', valDT = '1', valSW = '1';
-    bool lastCLK = true;
-    bool lastDT  = true;
-    auto lastTurnTime = std::chrono::steady_clock::now();
+    
+    // Read initial pin state
+    lseek(fdCLK, 0, SEEK_SET); read(fdCLK, &valCLK, 1);
+    lseek(fdDT, 0, SEEK_SET);  read(fdDT, &valDT, 1);
+    int lastVal = ((valCLK == '1') ? 2 : 0) | ((valDT == '1') ? 1 : 0);
+
+    int accumulatedSteps = 0;
 
     while (g_encoderThreadRunning) {
         lseek(fdCLK, 0, SEEK_SET);
@@ -94,26 +101,46 @@ void runEncoderThread() {
 
         g_encoderButtonState.store(swVal);
 
-        // Detect a state change on either pin
-        if (clkVal != lastCLK || dtVal != lastDT) {
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
+        // Convert CLK and DT to a 2-bit state value (0 to 3)
+        int val = (clkVal ? 2 : 0) | (dtVal ? 1 : 0);
 
-            // 35ms debouncing lockout ignores all mechanical bounces
-            if (elapsed > 35) {
-                // If CLK changed state first while DT remained unchanged: Clockwise
-                if (clkVal != lastCLK && dtVal == lastDT) {
-                    lastTurnTime = now;
-                    g_encoderTurnQueue.fetch_add(1);
+        if (val != lastVal) {
+            int diff = 0;
+
+            // 1. Clockwise transitions (+1)
+            if ((lastVal == 3 && val == 1) || 
+                (lastVal == 1 && val == 0) || 
+                (lastVal == 0 && val == 2) || 
+                (lastVal == 2 && val == 3)) {
+                diff = 1;
+            }
+            // 2. Counter-Clockwise transitions (-1)
+            else if ((lastVal == 3 && val == 2) || 
+                     (lastVal == 2 && val == 0) || 
+                     (lastVal == 0 && val == 1) || 
+                     (lastVal == 1 && val == 3)) {
+                diff = -1;
+            }
+
+            if (diff != 0) {
+                // Apply direction reversal in software if CLK/DT are swapped
+                if (FLIP_DIRECTION) {
+                    diff = -diff;
                 }
-                // If DT changed state first while CLK remained unchanged: Counter-Clockwise
-                else if (dtVal != lastDT && clkVal == lastCLK) {
-                    lastTurnTime = now;
+
+                accumulatedSteps += diff;
+
+                // Fire an event once we accumulate enough transitions for a detent click
+                if (accumulatedSteps >= DETENT_STEPS) {
+                    g_encoderTurnQueue.fetch_add(1);
+                    accumulatedSteps = 0;
+                }
+                else if (accumulatedSteps <= -DETENT_STEPS) {
                     g_encoderTurnQueue.fetch_sub(1);
+                    accumulatedSteps = 0;
                 }
             }
-            lastCLK = clkVal;
-            lastDT = dtVal;
+            lastVal = val;
         }
 
         // Poll at 1000Hz (1ms)
