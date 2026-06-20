@@ -511,13 +511,11 @@ std::vector<std::string> GetFileList(const std::string& directory, const std::st
             files.push_back(relPath.replace_extension("").string());
         }
     }
+    
+    // Sort the list alphabetically and return it
     std::sort(files.begin(), files.end());
     return files;
 }
-    std::sort(files.begin(), files.end());
-    return files;
-}
-
 // Search a directory for a specific slot-formatted file [2]
 std::string GetSlotName(const std::string& directory, int slotNum, const std::string& extension) {
     if (!std::filesystem::exists(directory)) return "Empty";
