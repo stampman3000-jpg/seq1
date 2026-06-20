@@ -15,141 +15,82 @@
 #include <unistd.h>
 
 #if defined(__linux__)
+#include <sys/mman.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <thread>
 #include <atomic>
-#include <fstream>
 #include <iostream>
 #include <chrono>
+#include <cstdlib>
 
 std::atomic<int> g_encoderTurnQueue(0);
 std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
 void runEncoderThread() {
-    // --- USER CONFIGURATION SWITCHES ---
-    // 1. If your scroll direction is backwards, set this to true!
-    const bool FLIP_DIRECTION = true; 
+    // Configure internal pull-ups on startup
+    std::system("sudo pinctrl set 18,22,27 ip pu");
+    usleep(10000);
 
-    // 2. Detent Steps: Standard encoders have 4 state changes per physical click. 
-    // If your encoder requires a full turn or feels too stiff, change this to 2 or 1!
-    const int DETENT_STEPS = 4; 
-
-    const int OFFSET = 512;
-    int pinCLK = OFFSET + 18; // 530 (BCM 18)
-    int pinDT  = OFFSET + 27; // 539 (BCM 27)
-    int pinSW  = OFFSET + 22; // 534 (BCM 22)
-
-    auto exportPin = [](int pin) {
-        std::ofstream f("/sys/class/gpio/export");
-        if (f.is_open()) f << pin;
-    };
-    auto setInDir = [](int pin) {
-        std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/direction";
-        std::ofstream f(path);
-        if (f.is_open()) f << "in";
-    };
-    
-    exportPin(pinCLK);
-    exportPin(pinDT);
-    exportPin(pinSW);
-    usleep(50000);
-    
-    setInDir(pinCLK);
-    setInDir(pinDT);
-    setInDir(pinSW);
-
-    std::string clkPath = "/sys/class/gpio/gpio" + std::to_string(pinCLK) + "/value";
-    std::string dtPath  = "/sys/class/gpio/gpio" + std::to_string(pinDT) + "/value";
-    std::string swPath  = "/sys/class/gpio/gpio" + std::to_string(pinSW) + "/value";
-
-    int fdCLK = open(clkPath.c_str(), O_RDONLY);
-    int fdDT  = open(dtPath.c_str(), O_RDONLY);
-    int fdSW  = open(swPath.c_str(), O_RDONLY);
-
-    if (fdCLK < 0 || fdDT < 0 || fdSW < 0) {
-        std::cerr << "[ENCODER] Failed to open GPIO sysfs descriptors." << std::endl;
-        if (fdCLK >= 0) close(fdCLK);
-        if (fdDT >= 0)  close(fdDT);
-        if (fdSW >= 0)  close(fdSW);
+    // Open gpiomem device
+    int fd = open("/dev/gpiomem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        std::cerr << "[ENCODER] Failed to open /dev/gpiomem. Thread aborting." << std::endl;
         return;
     }
 
-    char valCLK = '1', valDT = '1', valSW = '1';
-    
-    // Read initial pin state
-    lseek(fdCLK, 0, SEEK_SET); read(fdCLK, &valCLK, 1);
-    lseek(fdDT, 0, SEEK_SET);  read(fdDT, &valDT, 1);
-    int lastVal = ((valCLK == '1') ? 2 : 0) | ((valDT == '1') ? 1 : 0);
+    // Map 4KB of physical GPIO registers directly into our process RAM
+    volatile uint32_t* gpio = (volatile uint32_t*)mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
 
-    int accumulatedSteps = 0;
+    if (gpio == MAP_FAILED) {
+        std::cerr << "[ENCODER] Memory mapping /dev/gpiomem failed." << std::endl;
+        return;
+    }
+
+    // GPLEV0 is the register index holding the level of pins 0 to 31
+    const int GPLEV0 = 13;
+
+    // Read the initial atomic states of all pins at once
+    uint32_t levels = gpio[GPLEV0];
+    bool lastCLK = (levels & (1 << 18)) != 0;
+    
+    auto lastTurnTime = std::chrono::steady_clock::now();
 
     while (g_encoderThreadRunning) {
-        lseek(fdCLK, 0, SEEK_SET);
-        read(fdCLK, &valCLK, 1);
+        // Read the exact microsecond level of all 32 GPIO pins at once
+        uint32_t levels = gpio[GPLEV0];
 
-        lseek(fdDT, 0, SEEK_SET);
-        read(fdDT, &valDT, 1);
-
-        lseek(fdSW, 0, SEEK_SET);
-        read(fdSW, &valSW, 1);
-
-        bool clkVal = (valCLK == '1');
-        bool dtVal  = (valDT == '1');
-        bool swVal  = (valSW == '0'); // LOW (0) means pressed
+        bool clkVal = (levels & (1 << 18)) != 0;
+        bool dtVal  = (levels & (1 << 27)) != 0;
+        bool swVal  = (levels & (1 << 22)) == 0; // LOW (0) means pressed
 
         g_encoderButtonState.store(swVal);
 
-        // Convert CLK and DT to a 2-bit state value (0 to 3)
-        int val = (clkVal ? 2 : 0) | (dtVal ? 1 : 0);
+        // Falling-edge detection on CLK (Transitions from High to Low)
+        if (lastCLK && !clkVal) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
 
-        if (val != lastVal) {
-            int diff = 0;
-
-            // 1. Clockwise transitions (+1)
-            if ((lastVal == 3 && val == 1) || 
-                (lastVal == 1 && val == 0) || 
-                (lastVal == 0 && val == 2) || 
-                (lastVal == 2 && val == 3)) {
-                diff = 1;
-            }
-            // 2. Counter-Clockwise transitions (-1)
-            else if ((lastVal == 3 && val == 2) || 
-                     (lastVal == 2 && val == 0) || 
-                     (lastVal == 0 && val == 1) || 
-                     (lastVal == 1 && val == 3)) {
-                diff = -1;
-            }
-
-            if (diff != 0) {
-                // Apply direction reversal in software if CLK/DT are swapped
-                if (FLIP_DIRECTION) {
-                    diff = -diff;
-                }
-
-                accumulatedSteps += diff;
-
-                // Fire an event once we accumulate enough transitions for a detent click
-                if (accumulatedSteps >= DETENT_STEPS) {
-                    g_encoderTurnQueue.fetch_add(1);
-                    accumulatedSteps = 0;
-                }
-                else if (accumulatedSteps <= -DETENT_STEPS) {
-                    g_encoderTurnQueue.fetch_sub(1);
-                    accumulatedSteps = 0;
+            if (elapsed > 25) { // 25ms software debounce lockout
+                lastTurnTime = now;
+                // If DT is High when CLK falls: Clockwise. Else Counter-Clockwise
+                if (dtVal) {
+                    g_encoderTurnQueue.fetch_add(1);  // Clockwise increment
+                } else {
+                    g_encoderTurnQueue.fetch_sub(1);  // Counter-Clockwise decrement
                 }
             }
-            lastVal = val;
         }
+        lastCLK = clkVal;
 
-        // Poll at 1000Hz (1ms)
+        // Poll at 1000Hz (1ms) with practically 0% CPU overhead
         usleep(1000);
     }
 
-    close(fdCLK);
-    close(fdDT);
-    close(fdSW);
+    // Clean up memory mapping on exit
+    munmap((void*)gpio, 4096);
 }
 #endif
 
