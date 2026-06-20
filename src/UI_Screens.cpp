@@ -896,12 +896,13 @@ void DrawSynthScreen(const UIState& state) {
             Draw3x5String("PT", 197, 27, WHITE);
         }
 
-        if (fbSelected) {
-            DrawRectangle(219, 26, 9, 7, WHITE);
-            Draw3x5String("FB", 220, 27, BLACK);
-        } else {
-            Draw3x5String("FB", 220, 27, WHITE);
-        }
+        const char* fbLabel = (trk.algorithm == ALGO_PARALLEL) ? "AN" : "FB";
+                if (fbSelected) {
+                    DrawRectangle(219, 26, 9, 7, WHITE);
+                    Draw3x5String(fbLabel, 220, 27, BLACK);
+                } else {
+                    Draw3x5String(fbLabel, 220, 27, WHITE);
+                }
 
         if (mvolSelected) {
             DrawRectangle(238, 26, 17, 7, WHITE);

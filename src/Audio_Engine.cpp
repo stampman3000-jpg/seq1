@@ -151,7 +151,11 @@ struct SynthVoice {
 
         // Voice-local thread-safe random seed state
         uint32_t randomSeed = 0x12345678u;
-
+    // Warm Analog Emulation States
+            float osc1Drift = 0.0f;
+            float osc2Drift = 0.0f;
+            float osc1LPState = 0.0f;
+            float osc2LPState = 0.0f;
 
     // Running modulation offsets evaluated at block-rate
     float modCutoffOffset = 0.0f;
@@ -266,7 +270,13 @@ struct SynthVoice {
                 smoothMorph2 = -1.0f;
                 smoothVol1 = -1.0f;
                 smoothVol2 = -1.0f;
-
+        
+        // Reset analog emulation filters and drifts on note trigger
+                        osc1Drift = 0.0f;
+                        osc2Drift = 0.0f;
+                        osc1LPState = 0.0f;
+                        osc2LPState = 0.0f;
+        
                 // Seed voice-local random generator uniquely based on trigger properties
                 randomSeed = 0x12345678u + (uint32_t)(targetFreq * 100.0f);
 
@@ -346,6 +356,10 @@ struct SynthVoice {
             return (stepVal == -1) ? trackVal : stepVal;
         };
 
+        // Resolve active Analog value contextually (Reuses fmFeedback parameter in Parallel mode)
+                int analogVal = GetParam(sp.fmFeedback, trk.fmFeedback);
+                float analogAmount = (trk.algorithm == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.0f;
+        
         // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
         // Combine base parameters with LFO modulation offsets (clamped to safe ranges)
         float targetMorph1 = std::clamp(GetParam(sp.morph, trk.morph) + modMorph1Offset, 0.0f, 99.0f);
@@ -429,7 +443,16 @@ struct SynthVoice {
         filterUpdateCounter++;
                 if (filterUpdateCounter >= 64) {
                     filterUpdateCounter = 0;
-
+                    // Update slow-moving pitch drift (slop)
+                                        if (analogAmount > 0.0f) {
+                                            float rawNoise1 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
+                                            float rawNoise2 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
+                                            osc1Drift = osc1Drift * 0.92f + rawNoise1 * 0.08f;
+                                            osc2Drift = osc2Drift * 0.92f + rawNoise2 * 0.08f;
+                                        } else {
+                                            osc1Drift = 0.0f;
+                                            osc2Drift = 0.0f;
+                                        }
                     // Recalculate envelope parameters at block rate instead of per sample
                     float invSampleRate = 1.0f / (float)g_sampleRate;
 
@@ -523,27 +546,48 @@ struct SynthVoice {
         float finalSample = 0.0f;
 
         if (trk.algorithm == ALGO_PARALLEL) {
-                    // ==========================================
-                    // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
-                    // ==========================================
-                    float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
-                    float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
+                            // ==========================================
+                            // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
+                            // ==========================================
+                            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
+                            float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
 
-                    float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
-                    float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
+                            float freq1AnalogScale = 1.0f;
+                            float freq2AnalogScale = 1.0f;
 
-                    float drive = 1.0f + (smoothVol1 / 33.0f);
-                    float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
+                            if (analogAmount > 0.0f) {
+                                freq1AnalogScale += osc1Drift * analogAmount * 0.0015f; // Up to 0.15% random pitch drift
+                                freq2AnalogScale += osc2Drift * analogAmount * 0.0015f;
+                                freq2AnalogScale += analogAmount * 0.0003f; // Up to 0.03% detune offset max on Osc 2
+                            }
 
-                    float osc1 = saturatedOsc1 * envLevel1 * (smoothVol1 / 99.0f);
-                    float osc2 = rawOsc2 * envLevel2 * (smoothVol2 / 99.0f);
+                            float finalFreq1 = freq1 * freq1AnalogScale;
+                            float finalFreq2 = freq2 * freq2AnalogScale;
 
-                    finalSample = (osc1 + osc2) * 0.5f;
+                            float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
+                            float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
 
-                    // Normalized phase increments: no multiplication by 2*PI needed!
-                    phase1 += freq1 / (float)g_sampleRate;
-                    phase2 += freq2 / (float)g_sampleRate;
-                }
+                            // Apply 1-pole low pass filter waveform softening
+                            if (analogAmount > 0.0f) {
+                                float lpCoeff = 1.0f - (analogAmount * 0.65f); // Smoothly transitions from 1.0 down to 0.35
+                                osc1LPState += lpCoeff * (rawOsc1 - osc1LPState);
+                                osc2LPState += lpCoeff * (rawOsc2 - osc2LPState);
+                                rawOsc1 = osc1LPState;
+                                rawOsc2 = osc2LPState;
+                            }
+
+                            float drive = 1.0f + (smoothVol1 / 33.0f);
+                            float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
+
+                            float osc1 = saturatedOsc1 * envLevel1 * (smoothVol1 / 99.0f);
+                            float osc2 = rawOsc2 * envLevel2 * (smoothVol2 / 99.0f);
+
+                            finalSample = (osc1 + osc2) * 0.5f;
+
+                            // Normalized phase increments: no multiplication by 2*PI needed!
+                            phase1 += finalFreq1 / (float)g_sampleRate;
+                            phase2 += finalFreq2 / (float)g_sampleRate;
+                        }
         else {
                     // ==========================================
                     // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
@@ -589,8 +633,8 @@ struct SynthVoice {
         int fType = GetParam(sp.filterType, trk.filterType);
 
         // --- 9. RUN THROUGH SILKY STATE-VARIABLE FILTER (SVF) ---
-        float targetMasterVol = GetParam(sp.masterVolume, trk.masterVolume) / 99.0f; // <--- Add this line
-               return filter.process(combinedSignal, fType) * velocityScale * chokeVolume * targetMasterVol; // <--- Multiply here
+                float targetMasterVol = GetParam(sp.masterVolume, trk.masterVolume) / 99.0f; // <--- Add this line
+                       return filter.process(combinedSignal, fType, analogAmount) * velocityScale * chokeVolume * targetMasterVol; // <--- Multiply here
            }
 };
 

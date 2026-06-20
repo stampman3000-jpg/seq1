@@ -55,27 +55,45 @@ struct SvfFilter {
     }
 
     // Process a single sample and return the chosen filter type (LPF/HPF/BPF) output
-    inline float process(float x, int type) {
-        // Apply clean, linear bass compensation to the input signal to prevent bass drop-off
-        float input = x * bassComp;
+        inline float process(float x, int type, float analog = 0.0f) {
+            // Apply clean, linear bass compensation to the input signal to prevent bass drop-off
+            float input = x * bassComp;
 
-        // Pristine, linear Trapezoidal integration loop solver (completely free of distortion/overdrive)
-        float v3 = input - s2;
-        float v1 = a1 * s1 + a2 * v3;
-        float v2 = s2 + a2 * s1 + a3 * v3;
+            // Pristine, linear Trapezoidal integration loop solver
+            float v3 = input - s2;
+            float v1 = a1 * s1 + a2 * v3;
+            float v2 = s2 + a2 * s1 + a3 * v3;
 
-        // State update for next sample
-        s1 = 2.0f * v1 - s1;
-        s2 = 2.0f * v2 - s2;
+            if (analog > 0.0f) {
+                // Soft-clip state variables inside the loop to simulate vintage transistor saturation
+                // This prevents resonance peaks from blowing up and adds beautiful harmonic drive
+                float saturationLimit = 1.0f / (analog * 0.8f + 0.2f); // Limits drop from 5.0 down to 1.0
+                
+                auto saturateInside = [saturationLimit](float val) {
+                    float absVal = std::abs(val);
+                    if (absVal > saturationLimit) {
+                        return (val > 0.0f) ? saturationLimit : -saturationLimit;
+                    }
+                    float norm = val / saturationLimit;
+                    return val - (val * norm * norm) / 3.0f; // Cubic distortion curve
+                };
 
-        if (type == 0) {
-            return v2; // Low-Pass
-        } else if (type == 1) {
-            return input - k * v1 - v2; // High-Pass
-        } else {
-            return v1; // Band-Pass
+                v1 = saturateInside(v1);
+                v2 = saturateInside(v2);
+            }
+
+            // State update for next sample
+            s1 = 2.0f * v1 - s1;
+            s2 = 2.0f * v2 - s2;
+
+            if (type == 0) {
+                return v2; // Low-Pass
+            } else if (type == 1) {
+                return input - k * v1 - v2; // High-Pass
+            } else {
+                return v1; // Band-Pass
+            }
         }
-    }
 
     // Recalculate coefficients once per 64-sample block
     void calculateCoefficients(float cutoffHz, float resonanceNorm, float sampleRate) {
