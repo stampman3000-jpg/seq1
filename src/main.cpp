@@ -197,12 +197,14 @@ int main() {
                 encoderButton = g_encoderButtonState.load();
                 #endif
 
-                // If the encoder is turned, it automatically simulates holding Shift!
+                // Shift is simulated on any encoder turn so parameter values can change
                 bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) || (encoderTurn != 0);
 
-                // If the encoder is turned while the button is clicked, it simulates holding X (Step Locking)!
-                bool isAltDown = IsKeyDown(KEY_X) || encoderButton;
-                bool isAltHeld = IsKeyDown(KEY_X) || encoderButton;        // --- SAFE SYSTEM SHUTDOWN HOTKEY (Ctrl + Alt + §) ---
+                // RESTORED: Keep Alt/X strictly mapped to keyboard 'X' key to prevent popups on Page 1 clicks
+                bool isAltDown = IsKeyDown(KEY_X);
+                bool isAltHeld = IsKeyDown(KEY_X);
+        
+        // --- SAFE SYSTEM SHUTDOWN HOTKEY (Ctrl + Alt + §) ---
                #if defined(__linux__)
                if (isCtrlDown && isAltDown && IsKeyPressed(KEY_GRAVE)) {
                    ShutdownOled();
@@ -1114,27 +1116,40 @@ int main() {
                                     }
 
             if ((triggerAction || (encoderTurn != 0)) && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
-                            if (IsKeyDown(KEY_UP)) {
+                            // 1. If unclicked turn: Transpose Note up/down
+                            if (encoderTurn != 0 && !encoderButton) {
                                 std::string curNote = step.note;
                                 if (curNote.empty()) {
                                     step.note = "C" + std::to_string(currentOctave);
                                     step.velocity = 3;
                                 } else {
-                                    step.note = TransposeNote(curNote, 1);
+                                    // Transposes cleanly by the number of clicks turned
+                                    step.note = TransposeNote(curNote, encoderTurn);
                                 }
-                            }
-                            if (IsKeyDown(KEY_DOWN)) {
-                                std::string curNote = step.note;
-                                if (curNote.empty()) {
-                                    step.note = "C" + std::to_string(currentOctave);
-                                    step.velocity = 3;
-                                } else {
-                                    step.note = TransposeNote(curNote, -1);
+                            } else {
+                                if (IsKeyDown(KEY_UP)) {
+                                    std::string curNote = step.note;
+                                    if (curNote.empty()) {
+                                        step.note = "C" + std::to_string(currentOctave);
+                                        step.velocity = 3;
+                                    } else {
+                                        step.note = TransposeNote(curNote, 1);
+                                    }
+                                }
+                                if (IsKeyDown(KEY_DOWN)) {
+                                    std::string curNote = step.note;
+                                    if (curNote.empty()) {
+                                        step.note = "C" + std::to_string(currentOctave);
+                                        step.velocity = 3;
+                                    } else {
+                                        step.note = TransposeNote(curNote, -1);
+                                    }
                                 }
                             }
                             
+                            // 2. If clicked turn or Keyboard Left/Right: Change Step Velocity
                             int velocityChange = 0;
-                            if (encoderTurn != 0) {
+                            if (encoderTurn != 0 && encoderButton) {
                                 velocityChange = (encoderTurn > 0) ? 1 : -1;
                             } else if (IsKeyDown(KEY_RIGHT)) {
                                 velocityChange = 1;
@@ -1154,7 +1169,7 @@ int main() {
                         }
             if (currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8) {
                             int changeCondition = 0;
-                            // If turned normally (without click), change the Step Condition
+                            // If unclicked turn: Change Step Condition
                             if (encoderTurn != 0 && !encoderButton) {
                                 changeCondition = (encoderTurn > 0) ? 1 : -1;
                             } else if (triggerAction) {
@@ -1179,7 +1194,7 @@ int main() {
                             }
 
                             int changeRetrig = 0;
-                            // If CLICKED and turned, change the Retrigger count
+                            // If clicked turn: Change Step Retrigger/Ratchets (0 to 16)
                             if (encoderTurn != 0 && encoderButton) {
                                 changeRetrig = (encoderTurn > 0) ? 1 : -1;
                             } else if (triggerAction) {
@@ -1196,7 +1211,6 @@ int main() {
                         }
             else if (currentScreen == SCREEN_SYNTH) {
                             int change = 0;
-                            // EDIT: Check triggerAction OR encoderTurn
                             if (triggerAction || (encoderTurn != 0)) {
                                 bool isVolumeCol = (tracks[selectedTrack].engineType == ENGINE_SYNTH && synthGridCol == 3) ||
                                                    (synthGridCol == 11) ||
@@ -1205,7 +1219,12 @@ int main() {
                                 bool isSamplerToggleCol = (tracks[selectedTrack].engineType == ENGINE_SAMPLER) && (synthGridCol == 0);
 
                                 if (encoderTurn != 0) {
-                                    change = (encoderTurn > 0) ? 1 : -1;
+                                    // Fine single-step edits for encoders on standard columns, slightly wider steps for volume
+                                    if (isVolumeCol || isFeedbackCol) {
+                                        change = encoderTurn * 5;
+                                    } else {
+                                        change = encoderTurn;
+                                    }
                                 } else if (isVolumeCol || isFeedbackCol) {
                                     if (IsKeyDown(KEY_RIGHT)) change = 5;
                                     if (IsKeyDown(KEY_LEFT))  change = -5;
@@ -1220,10 +1239,11 @@ int main() {
                                 }
                             }
 
-                if (change != 0) {
-                    Track& trk = tracks[selectedTrack];
-                    StepParams& sp = trk.steps[cursorStep].params;
-                    bool isStepLock = IsKeyDown(KEY_X);
+                            if (change != 0) {
+                                Track& trk = tracks[selectedTrack];
+                                StepParams& sp = trk.steps[cursorStep].params;
+                                // EDIT: Allows both the keyboard 'X' key and the encoder click to act as a step-lock!
+                                bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
 
                     auto EditParam = [&](int& stepVal, int trackVal, int changeAmt, int minV, int maxV) {
                         int base = (stepVal == -1) ? trackVal : stepVal;
@@ -1340,7 +1360,7 @@ int main() {
                         if (change != 0) {
                             Track& trk = tracks[selectedTrack];
                             StepParams& sp = trk.steps[cursorStep].params;
-                            bool isStepLock = IsKeyDown(KEY_X);
+                            bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
 
                             auto EditParam = [&](int& stepVal, int trackVal, int changeAmt, int minV, int maxV) {
                                 int base = (stepVal == -1) ? trackVal : stepVal;
@@ -1718,7 +1738,8 @@ int main() {
                     }
                     else if (currentScreen == SCREEN_GLOBAL_FX) {
                         if (triggerNav) {
-                            bool isAltHeld = IsKeyDown(KEY_X);
+                            bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
+                            
                             if (isAltHeld) {
                                 if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                                 if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
