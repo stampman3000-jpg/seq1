@@ -18,6 +18,8 @@ int activePage = 0;
 int masterLength = 32;     // Default to 32 steps
 int stepUtilFocus = 0;     // Default focus on Microtiming
 
+bool g_hardwareEncoderClicked = false;
+
 float g_audioCpuLoad = 0.0f;
 bool showDiagnostics = false;
 // Global State Definitions

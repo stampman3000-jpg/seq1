@@ -97,6 +97,5 @@ bool LoadPattern(int patternIdx, const std::string& filename);
 bool SaveProject(int slot, const std::string& filename);
 bool LoadProject(const std::string& filename);
 
-bool g_hardwareEncoderClicked = false;
 
 void SwitchPattern(int newPatternIndex);
