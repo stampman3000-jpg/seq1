@@ -23,39 +23,52 @@
 #include <iostream>
 #include <chrono>
 
-// Thread-safe atomic variables to share inputs with the Raylib thread
-std::atomic<int> g_encoderTurnQueue(0);       // Positive for Clockwise, Negative for Counter-Clockwise
-std::atomic<bool> g_encoderButtonState(false); // True when clicked (down)
+std::atomic<int> g_encoderTurnQueue(0);
+std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
 void runEncoderThread() {
-    // Export BCM Pins: 18 (CLK), 27 (DT), 22 (SW)
+    // 512-offset for Broadcom GPIO pins under Bookworm kernel
+    const int OFFSET = 512;
+    int pinCLK = OFFSET + 18; // 530 (BCM 18)
+    int pinDT  = OFFSET + 27; // 539 (BCM 27)
+    int pinSW  = OFFSET + 22; // 534 (BCM 22)
+
+    // Export corrected BCM Offset Pins
     auto exportPin = [](int pin) {
         std::ofstream f("/sys/class/gpio/export");
-        if (f.is_open()) f << pin;
+        if (f.is_open()) {
+            f << pin;
+        }
     };
     auto setInDir = [](int pin) {
         std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/direction";
         std::ofstream f(path);
-        if (f.is_open()) f << "in";
+        if (f.is_open()) {
+            f << "in";
+        }
     };
     
-    exportPin(18);
-    exportPin(27);
-    exportPin(22);
+    exportPin(pinCLK);
+    exportPin(pinDT);
+    exportPin(pinSW);
     usleep(50000); // 50ms wait for sysfs export binds
     
-    setInDir(18);
-    setInDir(27);
-    setInDir(22);
+    setInDir(pinCLK);
+    setInDir(pinDT);
+    setInDir(pinSW);
 
-    // Keep open descriptors for fast, low-overhead polling
-    int fdCLK = open("/sys/class/gpio/gpio18/value", O_RDONLY);
-    int fdDT  = open("/sys/class/gpio/gpio27/value", O_RDONLY);
-    int fdSW  = open("/sys/class/gpio/gpio22/value", O_RDONLY);
+    // Open persistent sysfs file descriptors with the corrected offset paths
+    std::string clkPath = "/sys/class/gpio/gpio" + std::to_string(pinCLK) + "/value";
+    std::string dtPath  = "/sys/class/gpio/gpio" + std::to_string(pinDT) + "/value";
+    std::string swPath  = "/sys/class/gpio/gpio" + std::to_string(pinSW) + "/value";
+
+    int fdCLK = open(clkPath.c_str(), O_RDONLY);
+    int fdDT  = open(dtPath.c_str(), O_RDONLY);
+    int fdSW  = open(swPath.c_str(), O_RDONLY);
 
     if (fdCLK < 0 || fdDT < 0 || fdSW < 0) {
-        std::cerr << "[ENCODER] Failed to open GPIO sysfs descriptors." << std::endl;
+        std::cerr << "[ENCODER] Failed to open GPIO sysfs descriptors with 512 offset." << std::endl;
         if (fdCLK >= 0) close(fdCLK);
         if (fdDT >= 0)  close(fdDT);
         if (fdSW >= 0)  close(fdSW);
@@ -76,7 +89,7 @@ void runEncoderThread() {
         lseek(fdSW, 0, SEEK_SET);
         read(fdSW, &valSW, 1);
 
-        // Normally Open switch connects to GND when pressed (returns '0' / LOW)
+        // Switch connects to GND when pressed (normally returns '1', returns '0' when pressed)
         g_encoderButtonState.store(valSW == '0');
 
         // Check falling edge of CLK signal (A transitions 1 -> 0)
