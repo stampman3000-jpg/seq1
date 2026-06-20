@@ -556,10 +556,22 @@ struct SynthVoice {
                             float freq2AnalogScale = 1.0f;
 
             if (analogAmount > 0.0f) {
-                                    // Increase drift and detune instability (old 100% instability occurs at ~75%)
-                                    freq1AnalogScale += osc1Drift * analogAmount * 0.0022f; // Up to 0.22% random pitch drift
+                                    // 1. Apply random pitch slop (drift)
+                                    freq1AnalogScale += osc1Drift * analogAmount * 0.0022f;
                                     freq2AnalogScale += osc2Drift * analogAmount * 0.0022f;
-                                    freq2AnalogScale += analogAmount * 0.00042f; // Up to 0.042% static detune offset
+                                    
+                                    // 2. Apply static detune offset
+                                    freq2AnalogScale += analogAmount * 0.00042f;
+
+                                    // 3. Apply Differential Keyboard Tracking Error (Oscillator Divergence)
+                                    // Calculate how many octaves the note is away from center C4 (261.63 Hz)
+                                    float octavesFromCenter = log2f(baseFreq / 261.63f);
+
+                                    // As you play further from C4, Osc 1 drifts slightly sharp, and Osc 2 flat.
+                                    // At 100% Analog, this creates up to ~0.08% divergence per octave (~1.5 cents).
+                                    float trackingDivergence = octavesFromCenter * analogAmount * 0.0008f;
+                                    freq1AnalogScale += trackingDivergence;
+                                    freq2AnalogScale -= trackingDivergence;
                                 }
 
                                 float finalFreq1 = freq1 * freq1AnalogScale;
