@@ -22,12 +22,17 @@
 #include <fstream>
 #include <iostream>
 #include <chrono>
+#include <cstdlib> // Required for system()
 
 std::atomic<int> g_encoderTurnQueue(0);
 std::atomic<bool> g_encoderButtonState(false);
 std::atomic<bool> g_encoderThreadRunning(true);
 
 void runEncoderThread() {
+    // 1. Programmatically force the Pi's internal pull-ups on startup.
+    // This holds CLK, DT, and SW at 1 (HIGH) so they don't float to 0 (LOW).
+    std::system("sudo pinctrl set 18,22,27 ip pu");
+
     const int OFFSET = 512;
     int pinCLK = OFFSET + 18; // 530 (BCM 18)
     int pinDT  = OFFSET + 27; // 539 (BCM 27)
@@ -69,7 +74,8 @@ void runEncoderThread() {
     }
 
     char valCLK = '1', valDT = '1', valSW = '1';
-    bool lastCLKVal = true;
+    bool lastCLK = true;
+    bool lastDT  = true;
     auto lastTurnTime = std::chrono::steady_clock::now();
 
     while (g_encoderThreadRunning) {
@@ -84,27 +90,31 @@ void runEncoderThread() {
 
         bool clkVal = (valCLK == '1');
         bool dtVal  = (valDT == '1');
-        bool swVal  = (valSW == '0'); // LOW means pressed
+        bool swVal  = (valSW == '0'); // LOW (0) means pressed
 
         g_encoderButtonState.store(swVal);
 
-        // Detect falling edge of CLK (CLK transitions from High to Low)
-        if (lastCLKVal && !clkVal) {
+        // Detect a state change on either pin
+        if (clkVal != lastCLK || dtVal != lastDT) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
-            
-            // 35ms debouncing lock-out filters out all mechanical contact bounces
+
+            // 35ms debouncing lockout ignores all mechanical bounces
             if (elapsed > 35) {
-                lastTurnTime = now;
-                // If DT is still High on CLK fall, it is Clockwise. Otherwise Counter-Clockwise
-                if (dtVal) {
+                // If CLK changed state first while DT remained unchanged: Clockwise
+                if (clkVal != lastCLK && dtVal == lastDT) {
+                    lastTurnTime = now;
                     g_encoderTurnQueue.fetch_add(1);
-                } else {
+                }
+                // If DT changed state first while CLK remained unchanged: Counter-Clockwise
+                else if (dtVal != lastDT && clkVal == lastCLK) {
+                    lastTurnTime = now;
                     g_encoderTurnQueue.fetch_sub(1);
                 }
             }
+            lastCLK = clkVal;
+            lastDT = dtVal;
         }
-        lastCLKVal = clkVal;
 
         // Poll at 1000Hz (1ms)
         usleep(1000);
