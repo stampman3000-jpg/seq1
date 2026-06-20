@@ -195,6 +195,9 @@ int main() {
                 #if defined(__linux__)
                 encoderTurn = g_encoderTurnQueue.exchange(0);
                 encoderButton = g_encoderButtonState.load();
+                g_hardwareEncoderClicked = encoderButton; // Update the global drawing flag
+                #else
+                g_hardwareEncoderClicked = false;
                 #endif
 
                 // Shift is simulated on any encoder turn so parameter values can change
@@ -1341,12 +1344,12 @@ int main() {
                     }
             else if (currentScreen == SCREEN_TRACK_PARAMS) {
                             int change = 0;
-                            if (triggerAction) {
-                                // Standardizes toggle-like columns (including VOY on Row 3 Col 4, and LFO 1 WAV on Row 1 Col 4)
+                            if (triggerAction || (encoderTurn != 0)) {
                                 bool isToggleCol = (synthGridCol == 2 || (synthGridRow == 3 && synthGridCol == 4) || (synthGridRow == 1 && synthGridCol == 4) || synthGridCol == 5 || synthGridCol == 8 || synthGridCol == 9);
 
-                                if (isToggleCol) {
-                                    // Allow BOTH Left/Right and Up/Down to increment/decrement toggle parameters
+                                if (encoderTurn != 0) {
+                                    change = encoderTurn;
+                                } else if (isToggleCol) {
                                     if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_UP)) change = 1;
                                     if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_DOWN))  change = -1;
                                 } else {
@@ -1357,10 +1360,10 @@ int main() {
                                 }
                             }
 
-                        if (change != 0) {
-                            Track& trk = tracks[selectedTrack];
-                            StepParams& sp = trk.steps[cursorStep].params;
-                            bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
+                            if (change != 0) {
+                                Track& trk = tracks[selectedTrack];
+                                StepParams& sp = trk.steps[cursorStep].params;
+                                bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
 
                             auto EditParam = [&](int& stepVal, int trackVal, int changeAmt, int minV, int maxV) {
                                 int base = (stepVal == -1) ? trackVal : stepVal;
@@ -1439,11 +1442,12 @@ int main() {
                     }
             else if (currentScreen == SCREEN_PLACEHOLDER) {
                             int change = 0;
-                            if (triggerAction) {
-                                // REMOVED: || (synthGridRow == 3 && synthGridCol == 3)
+                            if (triggerAction || (encoderTurn != 0)) {
                                 bool isToggleCol = (synthGridCol == 1 && synthGridRow == 1);
                                 
-                                if (isToggleCol) {
+                                if (encoderTurn != 0) {
+                                    change = encoderTurn;
+                                } else if (isToggleCol) {
                                     if (IsKeyDown(KEY_RIGHT)) change = 1;
                                     if (IsKeyDown(KEY_LEFT))  change = -1;
                                 } else {
@@ -1454,10 +1458,10 @@ int main() {
                                 }
                             }
 
-                        if (change != 0) {
-                            Track& trk = tracks[selectedTrack];
-                            StepParams& sp = trk.steps[cursorStep].params;
-                            bool isStepLock = IsKeyDown(KEY_X);
+                            if (change != 0) {
+                                Track& trk = tracks[selectedTrack];
+                                StepParams& sp = trk.steps[cursorStep].params;
+                                bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
 
                             auto EditParam = [&](int& stepVal, int trackVal, int changeAmt, int minV, int maxV) {
                                 int base = (stepVal == -1) ? trackVal : stepVal;
@@ -1488,22 +1492,23 @@ int main() {
                             }
                         }
                     }
-                    else if (currentScreen == SCREEN_GLOBAL_FX) {
-                        int change = 0;
-                        if (triggerAction) {
-                            bool isToggleCol = (synthGridCol == 4 && synthGridRow == 2);
-                            
-                            if (isToggleCol) {
-                                if (IsKeyDown(KEY_RIGHT)) change = 1;
-                                if (IsKeyDown(KEY_LEFT))  change = -1;
-                            } else {
-                                if (IsKeyDown(KEY_RIGHT)) change = 1;
-                                if (IsKeyDown(KEY_LEFT))  change = -1;
-                                if (IsKeyDown(KEY_UP))    change = 10;
-                                if (IsKeyDown(KEY_DOWN))  change = -10;
-                            }
-                        }
-
+            else if (currentScreen == SCREEN_GLOBAL_FX) {
+                                    int change = 0;
+                                    if (triggerAction || (encoderTurn != 0)) {
+                                        bool isToggleCol = (synthGridCol == 4 && synthGridRow == 2);
+                                        
+                                        if (encoderTurn != 0) {
+                                            change = encoderTurn;
+                                        } else if (isToggleCol) {
+                                            if (IsKeyDown(KEY_RIGHT)) change = 1;
+                                            if (IsKeyDown(KEY_LEFT))  change = -1;
+                                        } else {
+                                            if (IsKeyDown(KEY_RIGHT)) change = 1;
+                                            if (IsKeyDown(KEY_LEFT))  change = -1;
+                                            if (IsKeyDown(KEY_UP))    change = 10;
+                                            if (IsKeyDown(KEY_DOWN))  change = -10;
+                                        }
+                                    }
                         if (change != 0) {
                             if (synthGridRow == 1) {
                                 if (synthGridCol == 0)      { globalFX.reverbDecay = std::clamp(globalFX.reverbDecay + change, 0, 99); }

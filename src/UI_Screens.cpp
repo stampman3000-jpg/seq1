@@ -338,8 +338,8 @@ void DrawSynthScreen(const UIState& state) {
     const Track& trk = tracks[state.selectedTrack];
     const StepParams& sp = trk.steps[state.cursorStep].params; // Read overrides from active step
 
-    bool isAltHeld = IsKeyDown(KEY_X);
-    auto GetEffectiveVal = [&](int stepVal, int trackVal, int drawX, int drawY, bool& isLocked) {
+    extern bool g_hardwareEncoderClicked;
+        bool isAltHeld = IsKeyDown(KEY_X) || g_hardwareEncoderClicked;    auto GetEffectiveVal = [&](int stepVal, int trackVal, int drawX, int drawY, bool& isLocked) {
         if (!isAltHeld) {
             isLocked = false;
             return trackVal;

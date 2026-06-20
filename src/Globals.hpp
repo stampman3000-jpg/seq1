@@ -34,9 +34,10 @@ extern int synthMode;
 extern const char* menuFeedback;
 extern SampleAsset g_samplePool[16];
 bool LoadSampleToPool(int slotIdx, const std::string& filename);
-
+extern bool g_hardwareEncoderClicked;
 extern float g_audioCpuLoad;
 extern bool showDiagnostics;
+
 
 // Track Initialization Defaults
 extern const int defaultPitchSweepDepth[8];
@@ -95,5 +96,7 @@ bool LoadPattern(int patternIdx, const std::string& filename);
 
 bool SaveProject(int slot, const std::string& filename);
 bool LoadProject(const std::string& filename);
+
+bool g_hardwareEncoderClicked = false;
 
 void SwitchPattern(int newPatternIndex);
