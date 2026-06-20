@@ -133,7 +133,7 @@ int main() {
                                         for (int r = 0; r < BOOT_ROWS; ++r) {
                                             for (int c = 0; c < BOOT_COLS; ++c) {
                                                 if (bootAnimationData[bootFrame][r][c] != 0) {
-                                                    CpuDrawPixel(c, r, WHITE); // RESTORED: Standard un-subtracted r
+                                                    CpuDrawPixel(c, r, WHITE); // Standard, no subtraction!
                                                 }
                                             }
                                         }
@@ -147,8 +147,8 @@ int main() {
                             BeginDrawing();
                                 ClearBackground(DARKGRAY);
                                 
-                                // FIXED: Using negative height corrects the OpenGL texture flip on Mac/HDMI
-                                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, -(float)oledScreen.texture.height };
+                                // FIXED: Using positive height is correct for standard uploaded textures
+                                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
                                 Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
                                 Vector2 origin = { 0.0f, 0.0f };
                                 DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
@@ -1819,8 +1819,8 @@ int main() {
                         BeginDrawing();
                             ClearBackground(DARKGRAY);
 
-                            // FIXED: Using negative height corrects the OpenGL texture flip on Mac/HDMI
-                            Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, -(float)oledScreen.texture.height };
+                            // FIXED: Using positive height is correct for standard uploaded textures
+                            Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
                             Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
                             Vector2 origin = { 0.0f, 0.0f };
 
