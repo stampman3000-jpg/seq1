@@ -14,6 +14,97 @@
 #include "OledDriver.hpp"
 #include <unistd.h>
 
+#if defined(__linux__)
+#include <fcntl.h>
+#include <unistd.h>
+#include <thread>
+#include <atomic>
+#include <fstream>
+#include <iostream>
+#include <chrono>
+
+// Thread-safe atomic variables to share inputs with the Raylib thread
+std::atomic<int> g_encoderTurnQueue(0);       // Positive for Clockwise, Negative for Counter-Clockwise
+std::atomic<bool> g_encoderButtonState(false); // True when clicked (down)
+std::atomic<bool> g_encoderThreadRunning(true);
+
+void runEncoderThread() {
+    // Export BCM Pins: 18 (CLK), 27 (DT), 22 (SW)
+    auto exportPin = [](int pin) {
+        std::ofstream f("/sys/class/gpio/export");
+        if (f.is_open()) f << pin;
+    };
+    auto setInDir = [](int pin) {
+        std::string path = "/sys/class/gpio/gpio" + std::to_string(pin) + "/direction";
+        std::ofstream f(path);
+        if (f.is_open()) f << "in";
+    };
+    
+    exportPin(18);
+    exportPin(27);
+    exportPin(22);
+    usleep(50000); // 50ms wait for sysfs export binds
+    
+    setInDir(18);
+    setInDir(27);
+    setInDir(22);
+
+    // Keep open descriptors for fast, low-overhead polling
+    int fdCLK = open("/sys/class/gpio/gpio18/value", O_RDONLY);
+    int fdDT  = open("/sys/class/gpio/gpio27/value", O_RDONLY);
+    int fdSW  = open("/sys/class/gpio/gpio22/value", O_RDONLY);
+
+    if (fdCLK < 0 || fdDT < 0 || fdSW < 0) {
+        std::cerr << "[ENCODER] Failed to open GPIO sysfs descriptors." << std::endl;
+        if (fdCLK >= 0) close(fdCLK);
+        if (fdDT >= 0)  close(fdDT);
+        if (fdSW >= 0)  close(fdSW);
+        return;
+    }
+
+    char lastCLKVal = '1';
+    char valCLK = '1', valDT = '1', valSW = '1';
+    auto lastTurnTime = std::chrono::steady_clock::now();
+
+    while (g_encoderThreadRunning) {
+        lseek(fdCLK, 0, SEEK_SET);
+        read(fdCLK, &valCLK, 1);
+
+        lseek(fdDT, 0, SEEK_SET);
+        read(fdDT, &valDT, 1);
+
+        lseek(fdSW, 0, SEEK_SET);
+        read(fdSW, &valSW, 1);
+
+        // Normally Open switch connects to GND when pressed (returns '0' / LOW)
+        g_encoderButtonState.store(valSW == '0');
+
+        // Check falling edge of CLK signal (A transitions 1 -> 0)
+        if (lastCLKVal == '1' && valCLK == '0') {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
+            if (elapsed > 12) { // 12ms software debounce lock-out
+                lastTurnTime = now;
+                // If B (DT) is High (1), it is Clockwise. Otherwise Counter-Clockwise
+                if (valDT == '1') {
+                    g_encoderTurnQueue.fetch_add(1);
+                } else {
+                    g_encoderTurnQueue.fetch_sub(1);
+                }
+            }
+        }
+        lastCLKVal = valCLK;
+
+        // Poll at 1000Hz (1ms) to eliminate missed turns during rapid scrolls
+        usleep(1000);
+    }
+
+    close(fdCLK);
+    close(fdDT);
+    close(fdSW);
+}
+#endif
+
 int main() {
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "8-Track Sequencer - Premium UI");
     SetTargetFPS(60);
@@ -25,6 +116,10 @@ int main() {
     InitAudioEngine();
     InitMidi(); // Spin up the RtMidi background ports
     InitOled();
+    
+#if defined(__linux__)
+    std::thread encoderThread(runEncoderThread);
+#endif
     
     // --- STARTUP BOOT ANIMATION STAGE ---
         bool playBootAnimation = true;
@@ -42,16 +137,17 @@ int main() {
             // Draw current animation frame to the CPU framebuffer
                         CpuClearBackground(BLACK);
                         
-                        // Render the active frame
-                        if (bootFrame < BOOT_FRAME_COUNT) {
-                            for (int r = 0; r < BOOT_ROWS; ++r) {
-                                for (int c = 0; c < BOOT_COLS; ++c) {
-                                    if (bootAnimationData[bootFrame][r][c] != 0) {
-                                        CpuDrawPixel(c, r, WHITE);
+            // Render the active frame
+                                    if (bootFrame < BOOT_FRAME_COUNT) {
+                                        for (int r = 0; r < BOOT_ROWS; ++r) {
+                                            for (int c = 0; c < BOOT_COLS; ++c) {
+                                                if (bootAnimationData[bootFrame][r][c] != 0) {
+                                                    // Invert the drawn row to match the correct top-to-bottom rendering
+                                                    CpuDrawPixel(c, (BOOT_ROWS - 1) - r, WHITE);
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                            }
-                        }
 
                         // Sync the CPU buffer to Raylib's GPU texture for simulated window
                         UpdateTexture(oledScreen.texture, g_oledCPUPixels);
@@ -98,13 +194,24 @@ int main() {
         uiFrameCounter++;
         bool blinkOn = (uiFrameCounter % 30 < 15);
 
-        // Detect Modifier Keys (Declared at the top of the loop)
-        bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-                          IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-                          
-        bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        // Detect Modifier Keys
+                bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
+                                  IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
 
-        bool isAltDown = IsKeyDown(KEY_X);
+                // Pull hardware rotary encoder events
+                int encoderTurn = 0;
+                bool encoderButton = false;
+                #if defined(__linux__)
+                encoderTurn = g_encoderTurnQueue.exchange(0);
+                encoderButton = g_encoderButtonState.load();
+                #endif
+
+                // If the encoder is turned, it automatically simulates holding Shift!
+                bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) || (encoderTurn != 0);
+
+                // If the encoder is turned while the button is clicked, it simulates holding X (Step Locking)!
+                bool isAltDown = IsKeyDown(KEY_X) || encoderButton;
+                bool isAltHeld = IsKeyDown(KEY_X) || encoderButton;
         
         // --- SAFE SYSTEM SHUTDOWN HOTKEY (Ctrl + Alt + §) ---
                #if defined(__linux__)
@@ -178,13 +285,15 @@ int main() {
                 DrawDiagnosticsScreen(state);
             EndTextureMode();
 
-            BeginDrawing();
-                ClearBackground(DARKGRAY);
-                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, -(float)oledScreen.texture.height };
-                Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
-                Vector2 origin = { 0.0f, 0.0f };
-                DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
-            EndDrawing();
+            // Render scaled up virtual texture to the physical window
+                            BeginDrawing();
+                                ClearBackground(DARKGRAY);
+                                // Fixed: Height is now positive to match the main loop
+                                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
+                                Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                                Vector2 origin = { 0.0f, 0.0f };
+                                DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+                            EndDrawing();
 
             continue; // Force jump directly to next sample/draw frame
         }
@@ -972,49 +1081,48 @@ int main() {
 
                         // --- STEP & TIMING UTILITIES MENU EDITING ---
             if (isShiftDown && isAltHeld) {
-                            // Up/Down arrows shift the selected row focus inside the popup
-                            if (IsKeyPressed(KEY_UP)) {
-                                stepUtilFocus--;
-                                if (stepUtilFocus < 0) stepUtilFocus = 2;
-                            }
-                            if (IsKeyPressed(KEY_DOWN)) {
-                                stepUtilFocus++;
-                                if (stepUtilFocus > 2) stepUtilFocus = 0;
-                            }
+                                        bool editStepUtil = false;
+                                        int editDirection = 0;
+                                        // EDIT: Allow encoder to edit values directly
+                                        if (encoderTurn != 0) {
+                                            editStepUtil = true;
+                                            editDirection = (encoderTurn > 0) ? 1 : -1;
+                                        } else {
+                                            if (IsKeyPressed(KEY_LEFT))  { editStepUtil = true; editDirection = -1; }
+                                            if (IsKeyPressed(KEY_RIGHT)) { editStepUtil = true; editDirection = 1; }
+                                        }
 
-                            // Left/Right arrows edit the active parameter based on row focus
-                            if (IsKeyPressed(KEY_LEFT)) {
-                                if (stepUtilFocus == 0) {
-                                    // Edit Microtiming
-                                    step.microtiming = std::clamp(step.microtiming - 1, -6, 6);
-                                }
-                                else if (stepUtilFocus == 1) {
-                                    // Edit Track Length (Polymeter)
-                                    tracks[selectedTrack].stepLength = std::clamp(tracks[selectedTrack].stepLength - 1, 1, 32);
-                                }
-                                else if (stepUtilFocus == 2) {
-                                    // Cycle Global Length (INF, 16, 32, 64)
-                                    if (masterLength == 0)       masterLength = 64;
-                                    else if (masterLength == 64) masterLength = 32;
-                                    else if (masterLength == 32) masterLength = 16;
-                                    else if (masterLength == 16) masterLength = 0; // 0 represents INF
-                                }
-                            }
-                            if (IsKeyPressed(KEY_RIGHT)) {
-                                if (stepUtilFocus == 0) {
-                                    step.microtiming = std::clamp(step.microtiming + 1, -6, 6);
-                                }
-                                else if (stepUtilFocus == 1) {
-                                    tracks[selectedTrack].stepLength = std::clamp(tracks[selectedTrack].stepLength + 1, 1, 32);
-                                }
-                                else if (stepUtilFocus == 2) {
-                                    if (masterLength == 0)       masterLength = 16;
-                                    else if (masterLength == 16) masterLength = 32;
-                                    else if (masterLength == 32) masterLength = 64;
-                                    else if (masterLength == 64) masterLength = 0; // 0 represents INF
-                                }
-                            }
-                        }
+                                        if (IsKeyPressed(KEY_UP)) {
+                                            stepUtilFocus--;
+                                            if (stepUtilFocus < 0) stepUtilFocus = 2;
+                                        }
+                                        if (IsKeyPressed(KEY_DOWN)) {
+                                            stepUtilFocus++;
+                                            if (stepUtilFocus > 2) stepUtilFocus = 0;
+                                        }
+
+                                        if (editStepUtil) {
+                                            if (stepUtilFocus == 0) {
+                                                step.microtiming = std::clamp(step.microtiming + editDirection, -6, 6);
+                                            }
+                                            else if (stepUtilFocus == 1) {
+                                                tracks[selectedTrack].stepLength = std::clamp(tracks[selectedTrack].stepLength + editDirection, 1, 32);
+                                            }
+                                            else if (stepUtilFocus == 2) {
+                                                if (editDirection > 0) {
+                                                    if (masterLength == 0)       masterLength = 16;
+                                                    else if (masterLength == 16) masterLength = 32;
+                                                    else if (masterLength == 32) masterLength = 64;
+                                                    else if (masterLength == 64) masterLength = 0;
+                                                } else {
+                                                    if (masterLength == 0)       masterLength = 64;
+                                                    else if (masterLength == 64) masterLength = 32;
+                                                    else if (masterLength == 32) masterLength = 16;
+                                                    else if (masterLength == 16) masterLength = 0;
+                                                }
+                                            }
+                                        }
+                                    }
 
             if (triggerAction && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
                 if (IsKeyDown(KEY_UP)) {
@@ -1090,27 +1198,30 @@ int main() {
                 }
             }
             else if (currentScreen == SCREEN_SYNTH) {
-                int change = 0;
-                if (triggerAction) {
-                    bool isVolumeCol = (tracks[selectedTrack].engineType == ENGINE_SYNTH && synthGridCol == 3) ||
-                                       (synthGridCol == 11) ||
-                                       (tracks[selectedTrack].engineType == ENGINE_SAMPLER && synthGridRow == 1 && synthGridCol == 12);
-                    bool isFeedbackCol = (synthGridRow == 1 && synthGridCol == 10);
-                    bool isSamplerToggleCol = (tracks[selectedTrack].engineType == ENGINE_SAMPLER) && (synthGridCol == 0);
+                            int change = 0;
+                            // EDIT: Check triggerAction OR encoderTurn
+                            if (triggerAction || (encoderTurn != 0)) {
+                                bool isVolumeCol = (tracks[selectedTrack].engineType == ENGINE_SYNTH && synthGridCol == 3) ||
+                                                   (synthGridCol == 11) ||
+                                                   (tracks[selectedTrack].engineType == ENGINE_SAMPLER && synthGridRow == 1 && synthGridCol == 12);
+                                bool isFeedbackCol = (synthGridRow == 1 && synthGridCol == 10);
+                                bool isSamplerToggleCol = (tracks[selectedTrack].engineType == ENGINE_SAMPLER) && (synthGridCol == 0);
 
-                    if (isVolumeCol || isFeedbackCol) {
-                        if (IsKeyDown(KEY_RIGHT)) change = 5;
-                        if (IsKeyDown(KEY_LEFT))  change = -5;
-                    } else if (isSamplerToggleCol) {
-                        if (IsKeyDown(KEY_RIGHT)) change = 1;
-                        if (IsKeyDown(KEY_LEFT))  change = -1;
-                    } else {
-                        if (IsKeyDown(KEY_RIGHT)) change = 1;
-                        if (IsKeyDown(KEY_LEFT))  change = -1;
-                        if (IsKeyDown(KEY_UP))    change = 10;
-                        if (IsKeyDown(KEY_DOWN))  change = -10;
-                    }
-                }
+                                if (encoderTurn != 0) {
+                                    change = (encoderTurn > 0) ? 1 : -1;
+                                } else if (isVolumeCol || isFeedbackCol) {
+                                    if (IsKeyDown(KEY_RIGHT)) change = 5;
+                                    if (IsKeyDown(KEY_LEFT))  change = -5;
+                                } else if (isSamplerToggleCol) {
+                                    if (IsKeyDown(KEY_RIGHT)) change = 1;
+                                    if (IsKeyDown(KEY_LEFT))  change = -1;
+                                } else {
+                                    if (IsKeyDown(KEY_RIGHT)) change = 1;
+                                    if (IsKeyDown(KEY_LEFT))  change = -1;
+                                    if (IsKeyDown(KEY_UP))    change = 10;
+                                    if (IsKeyDown(KEY_DOWN))  change = -10;
+                                }
+                            }
 
                 if (change != 0) {
                     Track& trk = tracks[selectedTrack];
@@ -1631,71 +1742,82 @@ int main() {
                     }
                 }
 
-                // --- DRAW TO VIRTUAL OLED ---
-                BeginTextureMode(oledScreen);
-                    ClearBackground(BLACK);
+        // --- DRAW TO VIRTUAL OLED ---
+                        // We clear and draw to the CPU framebuffer directly to minimize Pi CPU overhead
+                        CpuClearBackground(BLACK);
+                        CpuDrawLine(0, 7, OLED_WIDTH, 7, WHITE);
 
-                    DrawLine(0, 7, OLED_WIDTH, 7, WHITE);
+                        UIState state = {
+                            currentScreen, selectedTrack, cursorTrack, cursorStep,
+                            currentOctave, tempo, isPlaying, playhead,
+                            synthGridRow, synthGridCol, trackParamsGridCol,
+                            blinkOn, activeNotesString,
+                            systemMenuOpen, systemMenuCursor,
+                            menuFeedback,
+                            systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+                        };
 
-                    UIState state = {
-                        currentScreen, selectedTrack, cursorTrack, cursorStep,
-                        currentOctave, tempo, isPlaying, playhead,
-                        synthGridRow, synthGridCol, trackParamsGridCol,
-                        blinkOn, activeNotesString,
-                        systemMenuOpen, systemMenuCursor,
-                        menuFeedback,
-                        systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
-                    };
+                        // --- RENDER CURRENT SCREEN ---
+                        if (showDiagnostics) {
+                            DrawDiagnosticsScreen(state);
+                        } else {
+                            // FIXED: Corrected the typo where SCREEN_SEQ_1_4 was checked twice instead of checking SCREEN_SEQ_5_8
+                            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
+                                DrawSequencerScreen(state);
+                            }
+                            else if (currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8) {
+                                DrawTriggersScreen(state);
+                            }
+                            else if (currentScreen == SCREEN_SYNTH) {
+                                DrawSynthScreen(state);
+                            }
+                            else if (currentScreen == SCREEN_TRACK_PARAMS) {
+                                DrawFilterLfoPage(state);
+                            }
+                            else if (currentScreen == SCREEN_PLACEHOLDER) {
+                                DrawPlaceholderPage(state);
+                            }
+                            else if (currentScreen == SCREEN_GLOBAL_FX) {
+                                DrawGlobalFXPage(state);
+                            }
+                        }
 
-                    // --- RENDER CURRENT SCREEN ---
-                    if (showDiagnostics) {
-                        DrawDiagnosticsScreen(state);
-                    } else {
-                        if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
-                            DrawSequencerScreen(state);
+                        // Draw modal LFO popup centered on top
+                        if (lfoPopupOpen) {
+                            DrawModulationPopup(state);
                         }
-                        else if (currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8) {
-                            DrawTriggersScreen(state);
-                        }
-                        else if (currentScreen == SCREEN_SYNTH) {
-                            DrawSynthScreen(state);
-                        }
-                        else if (currentScreen == SCREEN_TRACK_PARAMS) {
-                            DrawFilterLfoPage(state);
-                        }
-                        else if (currentScreen == SCREEN_PLACEHOLDER) {
-                            DrawPlaceholderPage(state);
-                        }
-                        else if (currentScreen == SCREEN_GLOBAL_FX) {
-                            DrawGlobalFXPage(state);
-                        }
+
+                        // Sync CPU framebuffer to Raylib's GPU texture for simulated window
+                        UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+                        UpdateOled(oledScreen);
+
+        // --- RENDER SCALED-UP CANVAS TO WINDOW ---
+                        BeginDrawing();
+                            ClearBackground(DARKGRAY);
+
+                            // Standard, unmirrored, and right-side up render coordinates
+                            Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
+                            Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                            Vector2 origin = { 0.0f, 0.0f };
+
+                            DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+                            
+                        EndDrawing();
                     }
 
-                    // Draw modal LFO popup centered on top
-                    if (lfoPopupOpen) {
-                        DrawModulationPopup(state);
-                    }
+                    ShutdownAudioEngine();
+                    ShutdownMidi(); // Safely unbind and delete RtMidi ports
+                    ShutdownOled();
+                    UnloadRenderTexture(oledScreen);
+                    CloseWindow();
+#if defined(__linux__)
+    g_encoderThreadRunning = false;
+    if (encoderThread.joinable()) {
+        encoderThread.join();
+    }
+#endif
 
-                EndTextureMode();
-        UpdateOled(oledScreen);
-                // --- RENDER SCALED-UP CANVAS TO WINDOW ---
-                BeginDrawing();
-                    ClearBackground(DARKGRAY);
-
-                    Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, -(float)oledScreen.texture.height };
-                    Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
-                    Vector2 origin = { 0.0f, 0.0f };
-
-                    DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
-                    
-                EndDrawing();
-            }
-
-            ShutdownAudioEngine();
-            ShutdownMidi(); // Safely unbind and delete RtMidi ports
-    ShutdownOled();
     UnloadRenderTexture(oledScreen);
-            CloseWindow();
-
-            return 0;
-        }
+    CloseWindow();
+    return 0;
+                }
