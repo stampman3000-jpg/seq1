@@ -1,6 +1,25 @@
 #pragma once
 #include "Common.hpp"
 
+// High-speed CPU-side pixel buffer
+extern Color g_oledCPUPixels[256 * 64];
+
+// Fast CPU-side drawing primitives
+void CpuClearBackground(Color color);
+void CpuDrawPixel(int x, int y, Color color);
+void CpuDrawRectangle(int x, int y, int w, int h, Color color);
+void CpuDrawLine(int x0, int y0, int x1, int y1, Color color);
+void CpuDrawCircleLines(int cx, int cy, int r, Color color);
+void CpuDrawRectangleLines(int x, int y, int w, int h, Color color);
+
+// Seamlessly redirect standard Raylib GPU calls to our CPU Framebuffer
+#define DrawPixel CpuDrawPixel
+#define DrawRectangle CpuDrawRectangle
+#define DrawLine CpuDrawLine
+#define DrawCircleLines CpuDrawCircleLines
+#define DrawRectangleLines CpuDrawRectangleLines
+#define ClearBackground CpuClearBackground
+
 // Utility Drawing Declarations
 void DrawPixelLine(int x0, int y0, int x1, int y1, Color color);
 void DrawPixelRectLines(int x, int y, int w, int h, Color color);

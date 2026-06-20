@@ -13,6 +13,8 @@
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
 
+extern Color g_oledCPUPixels[256 * 64];
+
 // Global handles (only compiled on Linux)
 static int g_spiFd = -1;
 static std::ofstream g_dcFile;  // Persistent stream for DC pin
@@ -234,33 +236,24 @@ void UpdateOled(RenderTexture2D oledScreen) {
     // Start writing data to GDDRAM
     writeCommand(0x5C);
 
-    // Extract screen colors from Raylib
-    Image img = LoadImageFromTexture(oledScreen.texture);
-    Color* pixels = LoadImageColors(img);
-
     // SSD1322 expects 4-bits per pixel (2 pixels per byte)
     // Buffer size: 256 * 64 / 2 = 8,192 bytes
     static std::vector<uint8_t> oledBuffer(8192, 0);
 
-    // Because texture coordinates are vertically inverted in OpenGL,
-    // we read rows from bottom to top to draw right-side-up!
+    // Read directly from the CPU framebuffer instead of GLES VRAM
     int outIndex = 0;
-    for (int y = 63; y >= 0; --y) {
+    for (int y = 0; y < 64; ++y) {
         for (int x = 0; x < 256; x += 2) {
-            Color p1 = pixels[y * 256 + (255 - x)];
-            Color p2 = pixels[y * 256 + (254 - x)];
+            Color p1 = g_oledCPUPixels[y * 256 + x];
+            Color p2 = g_oledCPUPixels[y * 256 + (x + 1)];
 
             // Convert to 4-bit grayscale (0 to 15)
-            // If any channel is active, we turn the pixel fully white
             uint8_t gray1 = (p1.r > 127 || p1.g > 127 || p1.b > 127) ? 15 : 0;
             uint8_t gray2 = (p2.r > 127 || p2.g > 127 || p2.b > 127) ? 15 : 0;
 
             oledBuffer[outIndex++] = (gray1 << 4) | (gray2 & 0x0F);
         }
     }
-
-    UnloadImageColors(pixels);
-    UnloadImage(img);
 
     // Send the entire packed frame buffer via SPI
     gpioWrite(PIN_DC, 1); // DC High = Data

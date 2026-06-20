@@ -2,7 +2,78 @@
 #include "Globals.hpp"
 #include <cmath>
 #include <algorithm>
+// Instantiate the global CPU-side framebuffer
+Color g_oledCPUPixels[256 * 64];
 
+void CpuClearBackground(Color color) {
+    for (int i = 0; i < 256 * 64; ++i) {
+        g_oledCPUPixels[i] = color;
+    }
+}
+
+void CpuDrawPixel(int x, int y, Color color) {
+    if (x >= 0 && x < 256 && y >= 0 && y < 64) {
+        g_oledCPUPixels[y * 256 + x] = color;
+    }
+}
+
+void CpuDrawRectangle(int x, int y, int w, int h, Color color) {
+    for (int dy = 0; dy < h; ++dy) {
+        int py = y + dy;
+        if (py < 0 || py >= 64) continue;
+        for (int dx = 0; dx < w; ++dx) {
+            int px = x + dx;
+            if (px < 0 || px >= 256) continue;
+            g_oledCPUPixels[py * 256 + px] = color;
+        }
+    }
+}
+
+void CpuDrawLine(int x0, int y0, int x1, int y1, Color color) {
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy, e2;
+    while (true) {
+        CpuDrawPixel(x0, y0, color);
+        if (x0 == x1 && y0 == y1) break;
+        e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+void CpuDrawCircleLines(int cx, int cy, int r, Color color) {
+    int x = r, y = 0;
+    int P = 1 - r;
+    while (x >= y) {
+        CpuDrawPixel(cx + x, cy + y, color);
+        CpuDrawPixel(cx - x, cy + y, color);
+        CpuDrawPixel(cx + x, cy - y, color);
+        CpuDrawPixel(cx - x, cy - y, color);
+        CpuDrawPixel(cx + y, cy + x, color);
+        CpuDrawPixel(cx - y, cy + x, color);
+        CpuDrawPixel(cx + y, cy - x, color);
+        CpuDrawPixel(cx - y, cy - x, color);
+        y++;
+        if (P <= 0) {
+            P = P + 2 * y + 1;
+        } else {
+            x--;
+            P = P + 2 * y - 2 * x + 1;
+        }
+    }
+}
+
+void CpuDrawRectangleLines(int x, int y, int w, int h, Color color) {
+    for (int dx = 0; dx < w; ++dx) {
+        CpuDrawPixel(x + dx, y, color);
+        CpuDrawPixel(x + dx, y + h - 1, color);
+    }
+    for (int dy = 0; dy < h; ++dy) {
+        CpuDrawPixel(x, y + dy, color);
+        CpuDrawPixel(x + w - 1, y + dy, color);
+    }
+}
 struct DeterministicRand {
     unsigned int seed;
     DeterministicRand(unsigned int s) : seed(s) {}

@@ -39,22 +39,23 @@ int main() {
                 playBootAnimation = false; // Transition cleanly to sequencer
             }
 
-            // Draw current animation frame to the virtual OLED target texture
-            BeginTextureMode(oledScreen);
-                ClearBackground(BLACK);
-                
-                // Render the active frame
-                if (bootFrame < BOOT_FRAME_COUNT) {
-                    for (int r = 0; r < BOOT_ROWS; ++r) {
-                        for (int c = 0; c < BOOT_COLS; ++c) {
-                            if (bootAnimationData[bootFrame][r][c] != 0) {
-                                DrawPixel(c, r, WHITE);
+            // Draw current animation frame to the CPU framebuffer
+                        CpuClearBackground(BLACK);
+                        
+                        // Render the active frame
+                        if (bootFrame < BOOT_FRAME_COUNT) {
+                            for (int r = 0; r < BOOT_ROWS; ++r) {
+                                for (int c = 0; c < BOOT_COLS; ++c) {
+                                    if (bootAnimationData[bootFrame][r][c] != 0) {
+                                        CpuDrawPixel(c, r, WHITE);
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-            EndTextureMode();
-            UpdateOled(oledScreen);
+
+                        // Sync the CPU buffer to Raylib's GPU texture for simulated window
+                        UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+                        UpdateOled(oledScreen);
 
             // Render scaled up virtual texture to the physical window
             BeginDrawing();
@@ -567,34 +568,52 @@ int main() {
                 }
             }
             
-            BeginTextureMode(oledScreen);
-                ClearBackground(BLACK);
-                DrawLine(0, 7, OLED_WIDTH, 7, WHITE);
+            // --- DRAW TO CPU FRAMEBUFFER ---
+                        CpuClearBackground(BLACK);
+                        CpuDrawLine(0, 7, OLED_WIDTH, 7, WHITE);
 
-                UIState state = {
-                    currentScreen, selectedTrack, cursorTrack, cursorStep,
-                    currentOctave, tempo, isPlaying, playhead,
-                    synthGridRow, synthGridCol, trackParamsGridCol,
-                    blinkOn, activeNotesString,
-                    systemMenuOpen, systemMenuCursor,
-                    menuFeedback,
-                    systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
-                };
+                        UIState state = {
+                            currentScreen, selectedTrack, cursorTrack, cursorStep,
+                            currentOctave, tempo, isPlaying, playhead,
+                            synthGridRow, synthGridCol, trackParamsGridCol,
+                            blinkOn, activeNotesString,
+                            systemMenuOpen, systemMenuCursor,
+                            menuFeedback,
+                            systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+                        };
 
-                if (showDiagnostics) {
-                    DrawDiagnosticsScreen(state);
-                } else {
-                    if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
-                    else if (currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8) DrawTriggersScreen(state);
-                    else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
-                    else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
-                    else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
-                    else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
-                }
+                        // --- RENDER CURRENT SCREEN ---
+                        if (showDiagnostics) {
+                            DrawDiagnosticsScreen(state);
+                        } else {
+                            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
+                                DrawSequencerScreen(state);
+                            }
+                            else if (currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8) {
+                                DrawTriggersScreen(state);
+                            }
+                            else if (currentScreen == SCREEN_SYNTH) {
+                                DrawSynthScreen(state);
+                            }
+                            else if (currentScreen == SCREEN_TRACK_PARAMS) {
+                                DrawFilterLfoPage(state);
+                            }
+                            else if (currentScreen == SCREEN_PLACEHOLDER) {
+                                DrawPlaceholderPage(state);
+                            }
+                            else if (currentScreen == SCREEN_GLOBAL_FX) {
+                                DrawGlobalFXPage(state);
+                            }
+                        }
 
-                DrawSystemMenu(state);
-            EndTextureMode();
-            UpdateOled(oledScreen);
+                        // Draw modal LFO popup centered on top
+                        if (lfoPopupOpen) {
+                            DrawModulationPopup(state);
+                        }
+
+                        // Sync CPU framebuffer to Raylib GPU texture for simulated window
+                        UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+                        UpdateOled(oledScreen);
             
             BeginDrawing();
                 ClearBackground(DARKGRAY);
