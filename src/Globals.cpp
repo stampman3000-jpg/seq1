@@ -498,16 +498,22 @@ void ResetTrackToDefault(int t) {
     tracks[t].muted = false;
 }
 
-// Fetch all files inside a directory ending with a specific extension [2]
+// Fetch all files inside a directory and its subfolders ending with a specific extension [2]
 std::vector<std::string> GetFileList(const std::string& directory, const std::string& extension) {
     std::vector<std::string> files;
     if (!std::filesystem::exists(directory)) return files;
 
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    // Use recursive_directory_iterator to scan subfolders automatically
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
         if (entry.is_regular_file() && entry.path().extension() == extension) {
-            files.push_back(entry.path().stem().string()); // Extract raw filename
+            // Obtain path relative to the base directory (e.g. "drums/kick01")
+            std::filesystem::path relPath = std::filesystem::relative(entry.path(), directory);
+            files.push_back(relPath.replace_extension("").string());
         }
     }
+    std::sort(files.begin(), files.end());
+    return files;
+}
     std::sort(files.begin(), files.end());
     return files;
 }

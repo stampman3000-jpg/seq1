@@ -82,7 +82,8 @@ int main() {
     float keyRepeatTimer = 0.0f;
     float navRepeatTimer = 0.0f;
     float tempoRepeatTimer = 0.0f;
-
+    float menuRepeatTimer = 0.0f;
+    
     int activeScreenRow = 0;
 
     // Struct Step clipboard
@@ -419,17 +420,44 @@ int main() {
         }
 
         if (systemMenuOpen) {
+                    // Calculate rapid key-repeat scrolling direction
+                    int menuDir = 0; // -1 for UP, 1 for DOWN, 0 for idle
+                    bool triggerMenuNav = false;
+
+                    bool isUpDownHeld = IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN);
+                    if (isUpDownHeld) {
+                        if (menuRepeatTimer == 0.0f) {
+                            triggerMenuNav = true;
+                            menuRepeatTimer += GetFrameTime();
+                        } else {
+                            menuRepeatTimer += GetFrameTime();
+                            const float INITIAL_DELAY = 0.250f;   // 250ms hold delay before continuous repeat
+                            const float REPEAT_INTERVAL = 0.060f; // 60ms repeat speed (16 files per second)
+                            if (menuRepeatTimer >= INITIAL_DELAY) {
+                                triggerMenuNav = true;
+                                menuRepeatTimer -= REPEAT_INTERVAL;
+                            }
+                        }
+
+                        if (triggerMenuNav) {
+                            if (IsKeyDown(KEY_UP))    menuDir = -1;
+                            if (IsKeyDown(KEY_DOWN))  menuDir = 1;
+                        }
+                    } else {
+                        menuRepeatTimer = 0.0f; // Reset the timer when keys are released
+                    }
+
             if (systemMenuState == 0) {
-                if (IsKeyPressed(KEY_UP)) {
-                    systemMenuCursor--;
-                    if (systemMenuCursor < 0) systemMenuCursor = 6;
-                    menuFeedback = "";
-                }
-                if (IsKeyPressed(KEY_DOWN)) {
-                    systemMenuCursor++;
-                    if (systemMenuCursor > 6) systemMenuCursor = 0;
-                    menuFeedback = "";
-                }
+                            if (menuDir == -1) {
+                                systemMenuCursor--;
+                                if (systemMenuCursor < 0) systemMenuCursor = 6;
+                                menuFeedback = "";
+                            }
+                            if (menuDir == 1) {
+                                systemMenuCursor++;
+                                if (systemMenuCursor > 6) systemMenuCursor = 0;
+                                menuFeedback = "";
+                            }
                 if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
                     bool isSaveOption = (systemMenuCursor == 0 || systemMenuCursor == 2 || systemMenuCursor == 4);
                     
@@ -452,15 +480,15 @@ int main() {
                 }
             }
             else if (systemMenuState == 1) {
-                if (!g_fileList.empty()) {
-                    if (IsKeyPressed(KEY_UP)) {
-                        fileBrowserCursor--;
-                        if (fileBrowserCursor < 0) fileBrowserCursor = (int)g_fileList.size() - 1;
-                    }
-                    if (IsKeyPressed(KEY_DOWN)) {
-                        fileBrowserCursor++;
-                        if (fileBrowserCursor >= (int)g_fileList.size()) fileBrowserCursor = 0;
-                    }
+                            if (!g_fileList.empty()) {
+                                if (menuDir == -1) {
+                                    fileBrowserCursor--;
+                                    if (fileBrowserCursor < 0) fileBrowserCursor = (int)g_fileList.size() - 1;
+                                }
+                                if (menuDir == 1) {
+                                    fileBrowserCursor++;
+                                    if (fileBrowserCursor >= (int)g_fileList.size()) fileBrowserCursor = 0;
+                                }
                     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
                         if (systemMenuCursor == 6) {
                             saveSlotCursor = fileBrowserCursor;
@@ -486,16 +514,16 @@ int main() {
                 }
             }
             else if (systemMenuState == 2) {
-                int maxSlots = (systemMenuCursor == 0 || systemMenuCursor == 6) ? 16 : ((systemMenuCursor == 2) ? 128 : 1024);
-                
-                if (IsKeyPressed(KEY_UP)) {
-                    fileBrowserCursor--;
-                    if (fileBrowserCursor < 0) fileBrowserCursor = maxSlots - 1;
-                }
-                if (IsKeyPressed(KEY_DOWN)) {
-                    fileBrowserCursor++;
-                    if (fileBrowserCursor >= maxSlots) fileBrowserCursor = 0;
-                }
+                            int maxSlots = (systemMenuCursor == 0 || systemMenuCursor == 6) ? 16 : ((systemMenuCursor == 2) ? 128 : 1024);
+                            
+                            if (menuDir == -1) {
+                                fileBrowserCursor--;
+                                if (fileBrowserCursor < 0) fileBrowserCursor = maxSlots - 1;
+                            }
+                            if (menuDir == 1) {
+                                fileBrowserCursor++;
+                                if (fileBrowserCursor >= maxSlots) fileBrowserCursor = 0;
+                            }
                 if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
                     if (systemMenuCursor == 6) {
                         std::string selectedFile = "";

@@ -128,8 +128,12 @@ static void DrawPixelSquare(int cx, int cy, int r, Color color) {
 // =============================================================================
 
 void Draw5x5Char(char c, int x, int y, Color color) {
+    // Automatically convert lowercase letters to uppercase
+    if (c >= 'a' && c <= 'z') c = c - 32;
+
     const char* grid = nullptr;
     switch (c) {
+        case '_': grid = "00000" "00000" "00000" "00000" "11111"; break; // Underscore
         case '1': grid = "00100" "01100" "00100" "00100" "01110"; break;
         case '2': grid = "11111" "00001" "11111" "10000" "11111"; break;
         case '3': grid = "11111" "00001" "11111" "00001" "11111"; break;
@@ -197,8 +201,12 @@ void Draw5x5String(const char* str, int x, int y, Color color) {
 }
 
 void Draw3x5Char(char c, int x, int y, Color color) {
+    // Automatically convert lowercase letters to uppercase
+    if (c >= 'a' && c <= 'z') c = c - 32;
+
     const char* grid = nullptr;
     switch (c) {
+        case '_': grid = "000" "000" "000" "000" "111"; break; // Underscore
         case '1': grid = "010" "110" "010" "010" "111"; break;
         case '2': grid = "111" "001" "111" "100" "111"; break;
         case '3': grid = "111" "001" "111" "001" "111"; break;

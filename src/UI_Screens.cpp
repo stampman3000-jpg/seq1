@@ -1419,6 +1419,26 @@ void DrawPlaceholderPage(const UIState& state) {
                                     char slotBuf[32];
                                     snprintf(slotBuf, sizeof(slotBuf), "%02d SLOT (%s)", slotNum, customName.c_str());
                                     cleanName = slotBuf;
+                                    // Render Visual Scrollbar on Right Margin
+                                                        if (fileList.size() > 3) {
+                                                            int sbX = mx + mw - 7;
+                                                            int sbY = my + 14;
+                                                            int sbH = 26; // Height of scrollbar track area
+
+                                                            // Draw background track
+                                                            DrawPixelLine(sbX, sbY, sbX, sbY + sbH, GRAY);
+
+                                                            // Calculate indicator handle height and position dynamically
+                                                            float percentWindow = 3.0f / (float)fileList.size();
+                                                            int handleH = (int)(sbH * percentWindow);
+                                                            if (handleH < 4) handleH = 4; // Minimum handle size
+
+                                                            float percentScroll = (float)state.fileBrowserCursor / (float)(fileList.size() - 1);
+                                                            int handleY = sbY + (int)(percentScroll * (sbH - handleH));
+
+                                                            // Draw sliding handle block
+                                                            DrawRectangle(sbX - 1, handleY, 3, handleH, WHITE);
+                                                        }
                                 }
                             }
 
