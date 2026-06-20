@@ -29,6 +29,10 @@ struct SamplerVoice {
     float smoothCutoff = -1.0f;
     float smoothVol = -1.0f;
 
+    // Virtual Auto-Gate States
+        uint32_t gateTimerSamples = 0;
+        bool useGateTimer = false;
+    
     // Running modulation offsets evaluated at block-rate
     float modCutoffOffset = 0.0f;
     float modResOffset = 0.0f;

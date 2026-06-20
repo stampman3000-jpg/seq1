@@ -149,6 +149,10 @@ struct SynthVoice {
         float smoothVol1 = -1.0f;
         float smoothVol2 = -1.0f;
 
+    // Virtual Auto-Gate States
+        uint32_t gateTimerSamples = 0;
+        bool useGateTimer = false;
+    
         // Voice-local thread-safe random seed state
         uint32_t randomSeed = 0x12345678u;
     // Warm Analog Emulation States
@@ -281,14 +285,28 @@ struct SynthVoice {
                 randomSeed = 0x12345678u + (uint32_t)(targetFreq * 100.0f);
 
         // Reset mod offsets
-        modCutoffOffset = 0.0f;
-        modResOffset = 0.0f;
-        modVol1Offset = 0.0f;
-        modVol2Offset = 0.0f;
-        modMorph1Offset = 0.0f;
-        modMorph2Offset = 0.0f;
-        modPitchOffset = 0.0f;
-    }
+                modCutoffOffset = 0.0f;
+                modResOffset = 0.0f;
+                modVol1Offset = 0.0f;
+                modVol2Offset = 0.0f;
+                modMorph1Offset = 0.0f;
+                modMorph2Offset = 0.0f;
+                modPitchOffset = 0.0f;
+
+                // Auto-Gate Timer Initialization
+                if (isSeq) {
+                    double tickLengthSeconds = 2.5 / tempo;
+                    uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
+                    uint32_t samplesPerStep = samplesPerTick * 6;
+                    
+                    // Hold the gate open for 85% of a step's duration
+                    gateTimerSamples = (uint32_t)(samplesPerStep * 0.85f);
+                    useGateTimer = true;
+                } else {
+                    useGateTimer = false;
+                    gateTimerSamples = 0;
+                }
+            }
 
     void Release() {
         if (stage1 != ENV1_IDLE) stage1 = ENV1_RELEASE;
@@ -329,24 +347,34 @@ struct SynthVoice {
                 return (1.0f - t) * sawSample + t * sqrSample;
             }
         }
-    // Dynamic processing: receives track index to query appropriate variables
     float Process(int trackIdx) {
-            if (stage1 == ENV1_IDLE && stage2 == ENV2_IDLE && noiseStage == NOISE_IDLE && filterStage == FLT_IDLE) return 0.0f;
+                if (stage1 == ENV1_IDLE && stage2 == ENV2_IDLE && noiseStage == NOISE_IDLE && filterStage == FLT_IDLE) return 0.0f;
 
-            // Fast crossfade choke ramp (256 samples is approx 5.8ms at 44.1kHz)
-            if (choking) {
-                chokeVolume -= 1.0f / 256.0f;
-                if (chokeVolume <= 0.0f) {
-                    chokeVolume = 0.0f;
-                    active = false;
-                    choking = false;
-                    stage1 = ENV1_IDLE;
-                    stage2 = ENV2_IDLE;
-                    noiseStage = NOISE_IDLE;
-                    filterStage = FLT_IDLE;
-                    return 0.0f;
+                // 1. Process the Auto-Gate Timer (Tells the ADSR to release)
+                if (useGateTimer) {
+                    if (gateTimerSamples > 0) {
+                        gateTimerSamples--;
+                        if (gateTimerSamples == 0) {
+                            Release();
+                            useGateTimer = false;
+                        }
+                    }
                 }
-            }
+
+                // 2. Fast crossfade choke ramp (Prevents clicks on sudden overlaps)
+                if (choking) {
+                    chokeVolume -= 1.0f / 256.0f;
+                    if (chokeVolume <= 0.0f) {
+                        chokeVolume = 0.0f;
+                        active = false;
+                        choking = false;
+                        stage1 = ENV1_IDLE;
+                        stage2 = ENV2_IDLE;
+                        noiseStage = NOISE_IDLE;
+                        filterStage = FLT_IDLE;
+                        return 0.0f;
+                    }
+                }
 
         const Track& trk = tracks[trackIdx];
         const StepParams& sp = trk.steps[playhead].params; // Parameter overrides on the active step

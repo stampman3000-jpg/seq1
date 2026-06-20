@@ -91,15 +91,27 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
     modPitchOffset = 0.0f;
     modMorphOffset = 0.0f;
 
-    // Clear grain pools safely, maintaining exact synchronization on the global budget counter
-    for (int i = 0; i < MAX_GRAINS; ++i) {
-        if (grainPool[i].active) {
-            grainPool[i].active = false;
-            g_globalActiveGrains--;
+    // Clear grain pools safely
+        for (int i = 0; i < MAX_GRAINS; ++i) {
+            if (grainPool[i].active) {
+                grainPool[i].active = false;
+                g_globalActiveGrains--;
+            }
         }
-    }
-    samplesSinceLastGrain = 99999; // Force instant grain spawn on first sample
-}
+        samplesSinceLastGrain = 99999;
+
+        // Auto-Gate Timer Initialization
+        if (isSeq) {
+            double tickLengthSeconds = 2.5 / tempo;
+            uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
+            uint32_t samplesPerStep = samplesPerTick * 6;
+            
+            gateTimerSamples = (uint32_t)(samplesPerStep * 0.85f);
+            useGateTimer = true;
+        } else {
+            useGateTimer = false;
+            gateTimerSamples = 0;
+        }
 
 void SamplerVoice::Release() {
     if (stage != ENV_IDLE) stage = ENV_RELEASE;
@@ -108,8 +120,19 @@ void SamplerVoice::Release() {
     if (filterStage != FLT_IDLE) filterStage = FLT_RELEASE;
 }
 
-float SamplerVoice::Process(int trackIdx) {
-    if (stage == ENV_IDLE || !active) return 0.0f;
+    float SamplerVoice::Process(int trackIdx) {
+        if (stage == ENV_IDLE || !active) return 0.0f;
+
+        // Process the Auto-Gate Timer
+        if (useGateTimer) {
+            if (gateTimerSamples > 0) {
+                gateTimerSamples--;
+                if (gateTimerSamples == 0) {
+                    Release();
+                    useGateTimer = false;
+                }
+            }
+        }
 
     // Fast crossfade choke ramp
     if (choking) {
