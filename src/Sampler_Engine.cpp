@@ -125,15 +125,18 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
         if (stage == ENV_IDLE || !active) return 0.0f;
 
         // Process the Auto-Gate Timer
-        if (useGateTimer) {
-            if (gateTimerSamples > 0) {
-                gateTimerSamples--;
-                if (gateTimerSamples == 0) {
-                    Release();
-                    useGateTimer = false;
+            if (useGateTimer) {
+                if (gateTimerSamples > 0) {
+                    gateTimerSamples--;
+                    if (gateTimerSamples == 0) {
+                        // Only trigger the release stage if looping or granular
+                        if (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) {
+                            Release();
+                        }
+                        useGateTimer = false;
+                    }
                 }
             }
-        }
 
     // Fast crossfade choke ramp
     if (choking) {
@@ -171,27 +174,55 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
         pitchModFactor = 1.0f;
     }
 
-    // 1. Process Volume Envelope
-        switch (stage) {
-            case ENV_ATTACK:  envLevel += envAtkRate; if (envLevel >= 1.0f) { envLevel = 1.0f; stage = ENV_DECAY; } break;
-            case ENV_DECAY:   envLevel -= envDecRate; if (envLevel <= envSusLevel) { envLevel = envSusLevel; stage = ENV_SUSTAIN; } break;
-            case ENV_SUSTAIN: envLevel = envSusLevel; break;
-            case ENV_RELEASE:
-                envLevel -= envRelRate;
-                if (envLevel <= 0.0f) {
-                    envLevel = 0.0f;
-                    stage = ENV_IDLE;
-                    active = false;
-                    for (int i = 0; i < MAX_GRAINS; ++i) {
-                        if (grainPool[i].active) {
-                            grainPool[i].active = false;
-                            g_globalActiveGrains--;
+        // 1. Process Volume Envelope
+            int loopMode = GetParam(sp.sampleLoop, trk.sampleLoop);
+            
+            // One-shots decay all the way to 0.0f. Loops/Granular sustain normally.
+            float effectiveSustain = (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) ? envSusLevel : 0.0f;
+
+            switch (stage) {
+                case ENV_ATTACK:
+                    envLevel += envAtkRate;
+                    if (envLevel >= 1.0f) {
+                        envLevel = 1.0f;
+                        stage = ENV_DECAY;
+                    }
+                    break;
+                    
+                case ENV_DECAY:
+                    envLevel -= envDecRate;
+                    if (envLevel <= effectiveSustain) {
+                        envLevel = effectiveSustain;
+                        if (effectiveSustain == 0.0f) {
+                            // If decaying to zero, cleanly finish the voice (No clicking!)
+                            stage = ENV_IDLE;
+                            active = false;
+                        } else {
+                            stage = ENV_SUSTAIN;
                         }
                     }
-                }
-                break;
-            default: break;
-        }
+                    break;
+                    
+                case ENV_SUSTAIN:
+                    envLevel = envSusLevel;
+                    break;
+                    
+                case ENV_RELEASE:
+                    envLevel -= envRelRate;
+                    if (envLevel <= 0.0f) {
+                        envLevel = 0.0f;
+                        stage = ENV_IDLE;
+                        active = false;
+                        for (int i = 0; i < MAX_GRAINS; ++i) {
+                            if (grainPool[i].active) {
+                                grainPool[i].active = false;
+                                g_globalActiveGrains--;
+                            }
+                        }
+                    }
+                    break;
+                default: break;
+            }
 
     // 2. Process Filter Envelope (ADSR)
         switch (filterStage) {

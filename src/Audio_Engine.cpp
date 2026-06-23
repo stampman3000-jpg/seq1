@@ -410,9 +410,19 @@ struct SynthVoice {
         // --- 1. PROCESS ENVELOPE 1 (Carrier) ---
                 switch (stage1) {
                     case ENV1_ATTACK:  envLevel1 += envAtkRate1; if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; } break;
-                    case ENV1_DECAY:   envLevel1 -= envDecRate1; if (envLevel1 <= envSusLevel1) { envLevel1 = envSusLevel1; stage1 = ENV1_SUSTAIN; } break;
+                    case ENV1_DECAY:   envLevel1 *= envDecayCoef1;
+                        if (envLevel1 <= envSusLevel1) {
+                            envLevel1 = envSusLevel1;
+                            stage1 = ENV1_SUSTAIN;
+                        }
+                        break;
                     case ENV1_SUSTAIN: envLevel1 = envSusLevel1; break;
-                    case ENV1_RELEASE: envLevel1 -= envRelRate1; if (envLevel1 <= 0.0f) { envLevel1 = 0.0f; stage1 = ENV1_IDLE; } break;
+                    case ENV1_RELEASE: envLevel1 *= envReleaseCoef1;
+                        if (envLevel1 <= 0.001f) { // Threshold close to zero
+                            envLevel1 = 0.0f;
+                            stage1 = ENV1_IDLE;
+                        }
+                        break;
                     default: break;
                 }
         // --- 2. PROCESS ENVELOPE 2 (Modulator) ---
@@ -1503,27 +1513,29 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
         g_samplerVoiceIndex[trackIdx] = (g_samplerVoiceIndex[trackIdx] + 1) % finalPolyMode;
     }
 }
-    // Releases any active voices playing this specific MIDI note on the track
-    void ReleaseVoiceLive(int trackIdx, int midiNote) {
-        if (trackIdx < 0 || trackIdx >= 8) return;
-        
-        float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
+void ReleaseVoiceLive(int trackIdx, int midiNote) {
+    if (trackIdx < 0 || trackIdx >= 8) return;
+    
+    float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
 
-        if (tracks[trackIdx].engineType == ENGINE_SYNTH) {
-            for (int v = 0; v < 4; ++v) {
-                if (g_trackVoices[trackIdx][v].active && std::abs(g_trackVoices[trackIdx][v].baseFreq - freq) < 0.01f) {
-                    g_trackVoices[trackIdx][v].Release();
-                }
+    if (tracks[trackIdx].engineType == ENGINE_SYNTH) {
+        for (int v = 0; v < 4; ++v) {
+            if (g_trackVoices[trackIdx][v].active && std::abs(g_trackVoices[trackIdx][v].baseFreq - freq) < 0.01f) {
+                g_trackVoices[trackIdx][v].Release();
             }
-        } else {
-            // Releases sampler voices on key release
-            for (int v = 0; v < 4; ++v) {
-                if (g_samplerVoices[trackIdx][v].active) {
+        }
+    } else {
+        // Releases sampler voices on key release
+        for (int v = 0; v < 4; ++v) {
+            if (g_samplerVoices[trackIdx][v].active) {
+                // SOLUTION B: Only trigger release if looping or granular
+                if (tracks[trackIdx].sampleLoop == 1 || tracks[trackIdx].algorithm == ALGO_GRANULAR) {
                     g_samplerVoices[trackIdx][v].Release();
                 }
             }
         }
     }
+}
 bool IsSynthVoiceActive(int trackIdx, int voiceIdx) {
     if (trackIdx < 0 || trackIdx >= 8 || voiceIdx < 0 || voiceIdx >= 4) return false;
     return g_trackVoices[trackIdx][voiceIdx].active;
