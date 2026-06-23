@@ -410,19 +410,9 @@ struct SynthVoice {
         // --- 1. PROCESS ENVELOPE 1 (Carrier) ---
                 switch (stage1) {
                     case ENV1_ATTACK:  envLevel1 += envAtkRate1; if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; } break;
-                    case ENV1_DECAY:   envLevel1 *= envDecayCoef1;
-                        if (envLevel1 <= envSusLevel1) {
-                            envLevel1 = envSusLevel1;
-                            stage1 = ENV1_SUSTAIN;
-                        }
-                        break;
+                    case ENV1_DECAY:   envLevel1 -= envDecRate1; if (envLevel1 <= envSusLevel1) { envLevel1 = envSusLevel1; stage1 = ENV1_SUSTAIN; } break;
                     case ENV1_SUSTAIN: envLevel1 = envSusLevel1; break;
-                    case ENV1_RELEASE: envLevel1 *= envReleaseCoef1;
-                        if (envLevel1 <= 0.001f) { // Threshold close to zero
-                            envLevel1 = 0.0f;
-                            stage1 = ENV1_IDLE;
-                        }
-                        break;
+                    case ENV1_RELEASE: envLevel1 -= envRelRate1; if (envLevel1 <= 0.0f) { envLevel1 = 0.0f; stage1 = ENV1_IDLE; } break;
                     default: break;
                 }
         // --- 2. PROCESS ENVELOPE 2 (Modulator) ---

@@ -121,24 +121,29 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
         if (filterStage != FLT_IDLE) filterStage = FLT_RELEASE;
     }
 
-    float SamplerVoice::Process(int trackIdx) {
-        if (stage == ENV_IDLE || !active) return 0.0f;
+float SamplerVoice::Process(int trackIdx) {
+    if (stage == ENV_IDLE || !active) return 0.0f;
 
-        // Process the Auto-Gate Timer
-            if (useGateTimer) {
-                if (gateTimerSamples > 0) {
-                    gateTimerSamples--;
-                    if (gateTimerSamples == 0) {
-                        // Only trigger the release stage if looping or granular
-                        if (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) {
-                            Release();
-                        }
-                        useGateTimer = false;
-                    }
+    // --- MOVE THESE DECLARATIONS TO THE TOP ---
+    const Track& trk = tracks[trackIdx];
+    const StepParams& sp = trk.steps[playhead].params;
+    int loopMode = (sp.sampleLoop == -1) ? trk.sampleLoop : sp.sampleLoop;
+
+    // 1. Process the Auto-Gate Timer
+    if (useGateTimer) {
+        if (gateTimerSamples > 0) {
+            gateTimerSamples--;
+            if (gateTimerSamples == 0) {
+                // Only trigger the release stage if looping or granular
+                if (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) {
+                    Release();
                 }
+                useGateTimer = false;
             }
+        }
+    }
 
-    // Fast crossfade choke ramp
+    // 2. Fast crossfade choke ramp
     if (choking) {
         chokeVolume -= 1.0f / 256.0f;
         if (chokeVolume <= 0.0f) {
@@ -156,8 +161,8 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
         }
     }
 
-    const Track& trk = tracks[trackIdx];
-    const StepParams& sp = trk.steps[playhead].params;
+    // --- REMOVE THE DUPLICATED DECLARATIONS FROM HERE ---
+    // (Ensure const Track& trk and const StepParams& sp are not declared a second time here)
 
     // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
     float targetVol = std::clamp(GetParam(sp.volume, trk.volume) + modVolOffset, 0.0f, 99.0f);
