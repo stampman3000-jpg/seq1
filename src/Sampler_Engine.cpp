@@ -180,7 +180,7 @@ float SamplerVoice::Process(int trackIdx) {
     }
 
         // 1. Process Volume Envelope
-            int loopMode = GetParam(sp.sampleLoop, trk.sampleLoop);
+            loopMode = GetParam(sp.sampleLoop, trk.sampleLoop);
             
             // One-shots decay all the way to 0.0f. Loops/Granular sustain normally.
             float effectiveSustain = (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) ? envSusLevel : 0.0f;
