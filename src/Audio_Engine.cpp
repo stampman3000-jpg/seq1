@@ -70,12 +70,25 @@ static void UpdateGlobalLFOs() {
             } else if (trk.lfo1Wave == 3) { // Square
                 float norm = trk.lfo1Phase / (2.0f * 3.14159265f);
                 val = (norm < 0.5f) ? 1.0f : -1.0f;
-            } else { // Sample & Hold
-                                if (wrapped || trk.lfo1LastVal == 0.0f) {
-                                    trk.lfo1LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
-                                }
-                                val = trk.lfo1LastVal;
-                            }
+            } else if (trk.lfo1Wave == 4) { // Sample & Hold
+                                            if (wrapped || trk.lfo1LastVal == 0.0f) {
+                                                trk.lfo1LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
+                                            }
+                                            val = trk.lfo1LastVal;
+                                        } else { // SEQ: Track Note Pitch Sequencer Follower [1]
+                                            int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+                                            if (currentStepIdx < 0) currentStepIdx = 0;
+                                            const Step& step = trk.steps[currentStepIdx];
+                                            
+                                            if (!step.note.empty()) {
+                                                int midiVal = NoteToMidi(step.note);
+                                                // Scale pitch symmetrically around C4 (MIDI 60) over a 2-octave range
+                                                val = (float)(midiVal - 60) / 24.0f;
+                                                val = std::clamp(val, -1.0f, 1.0f);
+                                            } else {
+                                                val = 0.0f;
+                                            }
+                                        }
             // Scale and output value relative to depth
             g_globalLFOValues[t][0] = val * (trk.lfo1Depth / 99.0f);
         }
@@ -105,12 +118,24 @@ static void UpdateGlobalLFOs() {
             } else if (trk.lfo2Wave == 3) { // Square
                 float norm = trk.lfo2Phase / (2.0f * 3.14159265f);
                 val = (norm < 0.5f) ? 1.0f : -1.0f;
-            } else { // Sample & Hold
-                                if (wrapped || trk.lfo2LastVal == 0.0f) {
-                                    trk.lfo2LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
-                                }
-                                val = trk.lfo2LastVal;
-                            }
+            } else if (trk.lfo2Wave == 4) { // Sample & Hold
+                                            if (wrapped || trk.lfo2LastVal == 0.0f) {
+                                                trk.lfo2LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
+                                            }
+                                            val = trk.lfo2LastVal;
+                                        } else { // SEQ: Track Note Pitch Sequencer Follower [1]
+                                            int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+                                            if (currentStepIdx < 0) currentStepIdx = 0;
+                                            const Step& step = trk.steps[currentStepIdx];
+                                            
+                                            if (!step.note.empty()) {
+                                                int midiVal = NoteToMidi(step.note);
+                                                val = (float)(midiVal - 60) / 24.0f;
+                                                val = std::clamp(val, -1.0f, 1.0f);
+                                            } else {
+                                                val = 0.0f;
+                                            }
+                                        }
             // Scale and output value relative to depth
             g_globalLFOValues[t][1] = val * (trk.lfo2Depth / 99.0f);
         }
@@ -533,6 +558,7 @@ struct SynthVoice {
                         else if (m.destParam == DEST_MORPH1)     modMorph1Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_MORPH2)     modMorph2Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f; // Scale to pitch semitones (max +/-1 octave)
+                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f; // ADDED: Target Modulator Vol / FM Index [1]
                     }
                 }
 
@@ -547,6 +573,7 @@ struct SynthVoice {
                         else if (m.destParam == DEST_MORPH1)     modMorph1Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_MORPH2)     modMorph2Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
+                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f; // ADDED: Target Modulator Vol / FM Index [1]
                     }
                 }
             }

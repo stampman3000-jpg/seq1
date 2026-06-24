@@ -130,6 +130,7 @@ enum ModDestination {
     DEST_MORPH2,
     DEST_PITCH,
     DEST_DECAY,
+    DEST_VOLUME2,
 
     // Tape Buffer Parameters (Page 4 targets)
     DEST_TAPE_MEM,

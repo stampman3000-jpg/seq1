@@ -1087,10 +1087,11 @@ void DrawFilterLfoPage(const UIState& state) {
 
         if (wSelected) DrawRectangle(134, yPos, 16, 8, WHITE);
         if (effLWave == 0)      Draw3x5String("SIN", 135, yPos + 1, wSelected ? BLACK : WHITE);
-        else if (effLWave == 1) Draw3x5String("TRI", 135, yPos + 1, wSelected ? BLACK : WHITE);
-        else if (effLWave == 2) Draw3x5String("SAW", 135, yPos + 1, wSelected ? BLACK : WHITE);
-        else if (effLWave == 3) Draw3x5String("SQR", 135, yPos + 1, wSelected ? BLACK : WHITE);
-        else                    Draw3x5String("S&H", 135, yPos + 1, wSelected ? BLACK : WHITE);
+                else if (effLWave == 1) Draw3x5String("TRI", 135, yPos + 1, wSelected ? BLACK : WHITE);
+                else if (effLWave == 2) Draw3x5String("SAW", 135, yPos + 1, wSelected ? BLACK : WHITE);
+                else if (effLWave == 3) Draw3x5String("SQR", 135, yPos + 1, wSelected ? BLACK : WHITE);
+                else if (effLWave == 4) Draw3x5String("S&H", 135, yPos + 1, wSelected ? BLACK : WHITE);
+                else                    Draw3x5String("SEQ", 135, yPos + 1, wSelected ? BLACK : WHITE); // ADDED: "SEQ" label [1]
 
         DrawOctagonKnob(168, yPos + 4, effLSpeed / 99.0f, sSelected, WHITE);
         
@@ -1633,6 +1634,7 @@ void DrawModulationPopup(const UIState& state) {
             else if (m.destParam == DEST_MORPH2)    paramStr = "MORPH2 ";
             else if (m.destParam == DEST_PITCH)     paramStr = "PITCH  ";
             else if (m.destParam == DEST_DECAY)     paramStr = "DECAY  ";
+            else if (m.destParam == DEST_VOLUME2)   paramStr = "VOL2/FM";
             else if (m.destParam == DEST_TAPE_MEM)  paramStr = "T.MEM  ";
             else if (m.destParam == DEST_TAPE_HDS)  paramStr = "T.HDS  ";
             else if (m.destParam == DEST_TAPE_SPR)  paramStr = "T.SPR  ";

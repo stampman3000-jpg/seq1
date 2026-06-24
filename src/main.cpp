@@ -1386,9 +1386,9 @@ int main() {
                                 }
                                 else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterEnvDepth, trk.filterEnvDepth, change, 0, 99); else trk.filterEnvDepth = std::clamp(trk.filterEnvDepth + change, 0, 99); }
                                 else if (synthGridCol == 4) {
-                                    int baseW = (isStepLock && sp.lfo1Wave != -1) ? sp.lfo1Wave : trk.lfo1Wave;
-                                    int newW = baseW + change;
-                                    if (newW < 0) newW = 4; if (newW > 4) newW = 0;
+                                                                    int baseW = (isStepLock && sp.lfo1Wave != -1) ? sp.lfo1Wave : trk.lfo1Wave;
+                                                                    int newW = baseW + change;
+                                                                    if (newW < 0) newW = 5; if (newW > 5) newW = 0; // CHANGED: Allowed 5 (SEQ) [1]
                                     if (isStepLock) sp.lfo1Wave = newW;
                                     else            trk.lfo1Wave = newW;
                                 }
@@ -1421,9 +1421,9 @@ int main() {
                                     }
                                 }
                                 else if (synthGridCol == 5) { // Shipped LFO 2 WAV
-                                    int baseW2 = (isStepLock && sp.lfo2Wave != -1) ? sp.lfo2Wave : trk.lfo2Wave;
-                                    int newW2 = baseW2 + change;
-                                    if (newW2 < 0) newW2 = 4; if (newW2 > 4) newW2 = 0;
+                                                                    int baseW2 = (isStepLock && sp.lfo2Wave != -1) ? sp.lfo2Wave : trk.lfo2Wave;
+                                                                    int newW2 = baseW2 + change;
+                                                                    if (newW2 < 0) newW2 = 5; if (newW2 > 5) newW2 = 0; // CHANGED: Allowed 5 (SEQ) [1]
                                     if (isStepLock) sp.lfo2Wave = newW2;
                                     else            trk.lfo2Wave = newW2;
                                 }
