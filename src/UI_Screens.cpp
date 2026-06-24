@@ -1139,6 +1139,12 @@ void DrawGlobalFXPage(const UIState& state) {
     std::string patStr = GetPatternHeaderString();
     Draw5x5String(("GLOBAL MASTER FX " + patStr).c_str(), 2, 1, WHITE); // Draws clean header
 
+    // Standardized Step Indicator
+    bool isAltHeld = IsKeyDown(KEY_X);
+    int displayStep = isAltHeld ? (state.cursorStep + 1) : (state.playhead + 1);
+    std::string stepStr = "STEP: " + std::to_string(displayStep);
+    Draw5x5String(stepStr.c_str(), 168, 1, WHITE);
+
     std::string bpmStr = std::to_string((int)state.tempo) + "BPM";
     Draw5x5String(bpmStr.c_str(), 218, 1, WHITE);
 
@@ -1208,6 +1214,15 @@ void DrawPlaceholderPage(const UIState& state) {
     // 1. Header
     std::string headerTrack = "TRACK " + std::to_string(state.selectedTrack + 1) + " " + GetPatternHeaderString();
     Draw5x5String(headerTrack.c_str(), 2, 1, WHITE);
+
+    // Standardized Step Indicator (Cursor step if holding X, otherwise playhead)
+    bool isAltHeld = IsKeyDown(KEY_X);
+    int displayStep = isAltHeld ? (state.cursorStep + 1) : (state.playhead + 1);
+    std::string stepStr = "STEP: " + std::to_string(displayStep);
+    Draw5x5String(stepStr.c_str(), 168, 1, WHITE);
+
+    std::string bpmStr = std::to_string((int)state.tempo) + "BPM";
+    Draw5x5String(bpmStr.c_str(), 218, 1, WHITE);
 
     std::string bpmStr = std::to_string((int)state.tempo) + "BPM";
     Draw5x5String(bpmStr.c_str(), 218, 1, WHITE);
