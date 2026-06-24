@@ -1634,8 +1634,12 @@ void DrawModulationPopup(const UIState& state) {
             else if (m.destParam == DEST_MORPH2)    paramStr = "MORPH2 ";
             else if (m.destParam == DEST_PITCH)     paramStr = "PITCH  ";
             else if (m.destParam == DEST_DECAY)     paramStr = "DECAY  ";
-            else if (m.destParam == DEST_VOLUME2)   paramStr = "VOL2/FM";
-            else if (m.destParam == DEST_TAPE_MEM)  paramStr = "T.MEM  ";
+                        else if (m.destParam == DEST_VOLUME2)   paramStr = "VOL2/FM";
+                        else if (m.destParam == DEST_SAMP_START) paramStr = "SMP_STR"; // ADDED [1]
+                        else if (m.destParam == DEST_GRAN_SIZE)  paramStr = "GR_SIZE"; // ADDED [1]
+                        else if (m.destParam == DEST_GRAN_DENS)  paramStr = "GR_DENS"; // ADDED [1]
+                        else if (m.destParam == DEST_GRAN_SCAT)  paramStr = "GR_SCAT"; // ADDED [1]
+                        else if (m.destParam == DEST_TAPE_MEM)  paramStr = "T.MEM  ";
             else if (m.destParam == DEST_TAPE_HDS)  paramStr = "T.HDS  ";
             else if (m.destParam == DEST_TAPE_SPR)  paramStr = "T.SPR  ";
             else if (m.destParam == DEST_TAPE_SPD)  paramStr = "T.SPD  ";

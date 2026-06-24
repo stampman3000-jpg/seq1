@@ -131,6 +131,11 @@ enum ModDestination {
     DEST_PITCH,
     DEST_DECAY,
     DEST_VOLUME2,
+    
+    DEST_SAMP_START, // ADDED: Sample Start target [1]
+       DEST_GRAN_SIZE,  // ADDED: Grain Size target [1]
+       DEST_GRAN_DENS,  // ADDED: Grain Density target [1]
+       DEST_GRAN_SCAT,  // ADDED: Grain Scatter target [1]
 
     // Tape Buffer Parameters (Page 4 targets)
     DEST_TAPE_MEM,

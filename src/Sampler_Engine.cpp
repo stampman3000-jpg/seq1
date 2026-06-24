@@ -90,7 +90,11 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
     modVolOffset = 0.0f;
     modPitchOffset = 0.0f;
     modMorphOffset = 0.0f;
-
+    modSampStartOffset = 0.0f; // ADDED [1]
+       modGranSizeOffset = 0.0f;  // ADDED [1]
+       modGranDensOffset = 0.0f;  // ADDED [1]
+       modGranScatOffset = 0.0f;  // ADDED [1]
+    
     // Clear grain pools safely
         for (int i = 0; i < MAX_GRAINS; ++i) {
             if (grainPool[i].active) {
@@ -248,9 +252,10 @@ float SamplerVoice::Process(int trackIdx) {
     if (filterUpdateCounter >= 64) {
         filterUpdateCounter = 0;
         
-        // Recalculate granular spawn interval once per block
-        int density = GetParam(sp.grainDensity, trk.grainDensity);
-        float normDensity = density / 99.0f;
+        // Recalculate granular spawn interval once per block (Modulated by LFO)
+                float rawDensity = GetParam(sp.grainDensity, trk.grainDensity) + modGranDensOffset;
+                float clampedDensity = std::clamp(rawDensity, 0.0f, 99.0f);
+                float normDensity = clampedDensity / 99.0f;
         float spawnIntervalSec = 0.0015f + (1.0f - normDensity) * 0.1485f;
         cachedSpawnIntervalSamples = (uint32_t)(spawnIntervalSec * g_sampleRate);
 
@@ -274,7 +279,10 @@ float SamplerVoice::Process(int trackIdx) {
         modVolOffset = 0.0f;
         modPitchOffset = 0.0f;
         modMorphOffset = 0.0f;
-
+        modSampStartOffset = 0.0f; // ADDED [1]
+           modGranSizeOffset = 0.0f;  // ADDED [1]
+           modGranDensOffset = 0.0f;  // ADDED [1]
+           modGranScatOffset = 0.0f;  // ADDED [1]
         // Pull and sum modulation offsets from all 16 global LFO outputs targeting this sampler voice
         for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
             const Track& srcTrk = tracks[srcTrkIdx];
@@ -282,26 +290,30 @@ float SamplerVoice::Process(int trackIdx) {
             // Check LFO 1 Slots
             for (int s = 0; s < 3; ++s) {
                 const ModSlot& m = srcTrk.lfo1Slots[s];
-                if (m.destType == 1 && m.destTrack == trackIdx) {
-                    float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
-                    if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f; // Scale to semitones
-                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f; // Modulates position
+                if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f; // Scale to semitones
+                                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f; // Modulates position
+                                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f; // ADDED [1]
+                                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;  // ADDED [1]
+                                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;  // ADDED [1]
+                                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;  // ADDED [1]
                 }
             }
 
             // Check LFO 2 Slots
             for (int s = 0; s < 3; ++s) {
                 const ModSlot& m = srcTrk.lfo2Slots[s];
-                if (m.destType == 1 && m.destTrack == trackIdx) {
-                    float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
-                    if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f;
+                if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
+                                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f;
+                                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f; // ADDED [1]
+                                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;  // ADDED [1]
+                                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;  // ADDED [1]
+                                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;  // ADDED [1]
                 }
             }
         }
@@ -347,8 +359,10 @@ float SamplerVoice::Process(int trackIdx) {
 float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
     if (sampleBuffer == nullptr || sampleLengthSamples == 0) return 0.0f;
 
-    // Linear mapping from 0..99 parameters to samples
-    uint32_t startIdx = (uint32_t)((GetParam(sp.sampleStart, trk.sampleStart) / 99.0f) * sampleLengthSamples);
+    // Linear mapping from 0..99 parameters to samples (Modulated by LFO)
+        float rawStartVal = GetParam(sp.sampleStart, trk.sampleStart) + modSampStartOffset;
+        float clampedStartVal = std::clamp(rawStartVal, 0.0f, 99.0f);
+        uint32_t startIdx = (uint32_t)((clampedStartVal / 99.0f) * sampleLengthSamples);
     uint32_t lengthVal = (uint32_t)((GetParam(sp.sampleLength, trk.sampleLength) / 99.0f) * sampleLengthSamples);
     uint32_t endIdx = startIdx + lengthVal;
     if (endIdx > sampleLengthSamples) endIdx = sampleLengthSamples;
@@ -485,8 +499,9 @@ void SamplerVoice::SpawnGrain(const Track& trk, const StepParams& sp) {
             float normPos = std::clamp(GetParam(sp.grainPosition, trk.grainPosition) + modMorphOffset, 0.0f, 99.0f) / 99.0f;
             uint32_t baseStart = (uint32_t)(normPos * sampleLengthSamples);
 
-            // 2. Playhead Position Scatter (Up to 100% of the entire file length)
-            int scatter = GetParam(sp.grainScatter, trk.grainScatter);
+            // 2. Playhead Position Scatter (Modulated by LFO)
+                        float rawScatter = GetParam(sp.grainScatter, trk.grainScatter) + modGranScatOffset;
+                        int scatter = std::clamp((int)rawScatter, 0, 99);
             if (scatter > 0) {
                 int maxScatterSamples = (int)((scatter / 99.0f) * sampleLengthSamples);
                 // Compute random offset using lock-free PRNG
@@ -495,8 +510,9 @@ void SamplerVoice::SpawnGrain(const Track& trk, const StepParams& sp) {
                 baseStart = (uint32_t)std::clamp((int)baseStart + randomOffset, 0, (int)sampleLengthSamples - 1);
             }
 
-            // 3. Duration (Size) of grain (Expanded from 2ms up to 1000ms)
-            float normSize = GetParam(sp.grainSize, trk.grainSize) / 99.0f;
+            // 3. Duration (Size) of grain (Modulated by LFO)
+                        float rawSizeVal = GetParam(sp.grainSize, trk.grainSize) + modGranSizeOffset;
+                        float normSize = std::clamp(rawSizeVal, 0.0f, 99.0f) / 99.0f;
             float durationSec = 0.002f + normSize * 0.998f;
             g.durationSamples = (uint32_t)(durationSec * g_sampleRate);
 

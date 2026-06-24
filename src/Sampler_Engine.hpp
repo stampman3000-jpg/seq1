@@ -39,7 +39,11 @@ struct SamplerVoice {
     float modVolOffset = 0.0f;
     float modPitchOffset = 0.0f;
     float modMorphOffset = 0.0f; // Maps to grain position / slice selection offset
-    
+    float modSampStartOffset = 0.0f; // ADDED [1]
+        float modGranSizeOffset = 0.0f;  // ADDED [1]
+        float modGranDensOffset = 0.0f;  // ADDED [1]
+        float modGranScatOffset = 0.0f;  // ADDED [1]
+
     // Voice-local thread-safe random seed state
     uint32_t randomSeed = 0x12345678;
     
