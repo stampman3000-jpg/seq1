@@ -320,34 +320,93 @@ void InitializeTracks() {
         }
     }
 
-    // --- GENERATE SYNTHETIC DEFAULT PLUCK INTO POOL SLOT 1 ---
-        // Allows testing Slicing, Loops, and Granular cloud algorithms instantly on startup!
+    // --- PEAK CALCULATION HELPER LAMBDA ---
+        // Safely scales absolute peak values to a vertical drawing radius (0 to 11 pixels)
+        auto CalculatePeaks = [](int slotIdx) {
+            if (g_samplePool[slotIdx].pcmData.empty()) return;
+            
+            for (int i = 0; i < 97; ++i) {
+                size_t startFrame = (i * g_samplePool[slotIdx].pcmData.size()) / 97;
+                size_t endFrame = ((i + 1) * g_samplePool[slotIdx].pcmData.size()) / 97;
+                if (endFrame > g_samplePool[slotIdx].pcmData.size()) endFrame = g_samplePool[slotIdx].pcmData.size();
+                if (startFrame >= endFrame) startFrame = (endFrame > 0) ? (endFrame - 1) : 0;
+
+                int16_t peak = 0;
+                for (size_t f = startFrame; f < endFrame; ++f) {
+                    int16_t absVal = std::abs(g_samplePool[slotIdx].pcmData[f]);
+                    if (absVal > peak) peak = absVal;
+                }
+                g_samplePool[slotIdx].visualPeaks[i] = (uint8_t)((peak / 32768.0f) * 11.0f);
+            }
+        };
+
+        // --- SLOT 0: DEFAULT SYNTHETIC PLUCK (DFL_PLK) ---
         g_samplePool[0].name = "DFL_PLK";
         g_samplePool[0].pcmData.resize(32000); // 1 second of audio at 32000Hz
         for (int i = 0; i < 32000; ++i) {
             float t = (float)i / 32000.0f;
-            
-            // Generate a 440Hz sine wave
             float sample = sinf(2.0f * 3.14159265f * 440.0f * t);
-            
-            // Apply a smooth exponential pluck decay envelope
             float envelope = expf(-6.0f * t);
             sample *= envelope;
-
             g_samplePool[0].pcmData[i] = (int16_t)(sample * 32767.0f);
         }
+        CalculatePeaks(0);
 
-        // Pre-calculate visual peaks for the default pluck
-        for (int i = 0; i < 97; ++i) {
-            size_t startFrame = (i * 32000) / 97;
-            size_t endFrame = ((i + 1) * 32000) / 97;
-            int16_t peak = 0;
-            for (size_t f = startFrame; f < endFrame; ++f) {
-                int16_t absVal = std::abs(g_samplePool[0].pcmData[f]);
-                if (absVal > peak) peak = absVal;
-            }
-            g_samplePool[0].visualPeaks[i] = (uint8_t)((peak / 32768.0f) * 11.0f);
+        // --- SLOT 1: ANALOG KICK DRUM (FAC_KIK) ---
+        g_samplePool[1].name = "FAC_KIK";
+        g_samplePool[1].pcmData.resize(9600); // 0.3 seconds at 32000Hz
+        float kickPhase = 0.0f;
+        for (int i = 0; i < 9600; ++i) {
+            float t = (float)i / 32000.0f;
+            // Pitch sweep from 150Hz rapidly down to 48Hz
+            float freq = 48.0f + 102.0f * expf(-45.0f * t);
+            kickPhase += 2.0f * 3.14159265f * freq / 32000.0f;
+            if (kickPhase > 2.0f * 3.14159265f) kickPhase -= 2.0f * 3.14159265f;
+            
+            float envelope = expf(-12.0f * t);
+            float sample = sinf(kickPhase) * envelope;
+            g_samplePool[1].pcmData[i] = (int16_t)(sample * 32767.0f);
         }
+        CalculatePeaks(1);
+
+        // --- SLOT 2: SNAPPY SNARE DRUM (FAC_SNR) ---
+        g_samplePool[2].name = "FAC_SNR";
+        g_samplePool[2].pcmData.resize(8000); // 0.25 seconds at 32000Hz
+        uint32_t snrSeed = 0x12345678u;
+        for (int i = 0; i < 8000; ++i) {
+            float t = (float)i / 32000.0f;
+            // Fast, deterministic pseudo-random noise generator
+            snrSeed = snrSeed * 1103515245u + 12345u;
+            float noise = ((float)(snrSeed / 65536 % 32768) / 16384.0f) - 1.0f;
+
+            // Snare is composed of a drum skin body (~180Hz) and rattling wire noise
+            float body = sinf(2.0f * 3.14159265f * 180.0f * t) * expf(-40.0f * t);
+            float rattle = noise * expf(-15.0f * t);
+            float sample = (body * 0.4f + rattle * 0.6f);
+            
+            g_samplePool[2].pcmData[i] = (int16_t)(sample * 32767.0f);
+        }
+        CalculatePeaks(2);
+
+        // --- SLOT 3: CRISP HIGH-PASSED HI-HAT (FAC_HAT) ---
+        g_samplePool[3].name = "FAC_HAT";
+        g_samplePool[3].pcmData.resize(4000); // 0.125 seconds at 32000Hz
+        uint32_t hatSeed = 0x87654321u;
+        float hpState = 0.0f;
+        for (int i = 0; i < 4000; ++i) {
+            float t = (float)i / 32000.0f;
+            hatSeed = hatSeed * 1103515245u + 12345u;
+            float noise = ((float)(hatSeed / 65536 % 32768) / 16384.0f) - 1.0f;
+
+            // Apply a 1-pole high pass filter in the loop to strip out low-end rumble and isolate sizzle
+            float hpOut = noise - hpState;
+            hpState = hpState + 0.35f * hpOut;
+
+            float envelope = expf(-25.0f * t);
+            float sample = hpOut * envelope * 0.8f;
+            g_samplePool[3].pcmData[i] = (int16_t)(sample * 32767.0f);
+        }
+        CalculatePeaks(3);
     }
 
 int NoteToMidi(const std::string& noteStr) {
