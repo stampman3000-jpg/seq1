@@ -1215,14 +1215,11 @@ void DrawPlaceholderPage(const UIState& state) {
     std::string headerTrack = "TRACK " + std::to_string(state.selectedTrack + 1) + " " + GetPatternHeaderString();
     Draw5x5String(headerTrack.c_str(), 2, 1, WHITE);
 
-    // Standardized Step Indicator (Cursor step if holding X, otherwise playhead)
+    // Standardized Step Indicator (Declared once at the top)
     bool isAltHeld = IsKeyDown(KEY_X);
     int displayStep = isAltHeld ? (state.cursorStep + 1) : (state.playhead + 1);
     std::string stepStr = "STEP: " + std::to_string(displayStep);
     Draw5x5String(stepStr.c_str(), 168, 1, WHITE);
-
-    std::string bpmStr = std::to_string((int)state.tempo) + "BPM";
-    Draw5x5String(bpmStr.c_str(), 218, 1, WHITE);
 
     std::string bpmStr = std::to_string((int)state.tempo) + "BPM";
     Draw5x5String(bpmStr.c_str(), 218, 1, WHITE);
@@ -1232,7 +1229,6 @@ void DrawPlaceholderPage(const UIState& state) {
 
     const Track& trk = tracks[state.selectedTrack];
     const StepParams& sp = trk.steps[state.cursorStep].params;
-    bool isAltHeld = IsKeyDown(KEY_X);
 
     auto GetEffectiveVal = [&](int stepVal, int trackVal, int drawX, int drawY, bool& isLocked) {
         if (!isAltHeld) {
