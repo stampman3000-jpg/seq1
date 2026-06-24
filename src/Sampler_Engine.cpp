@@ -128,7 +128,6 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
 float SamplerVoice::Process(int trackIdx) {
     if (stage == ENV_IDLE || !active) return 0.0f;
 
-    // --- MOVE THESE DECLARATIONS TO THE TOP ---
     const Track& trk = tracks[trackIdx];
     const StepParams& sp = trk.steps[playhead].params;
     int loopMode = (sp.sampleLoop == -1) ? trk.sampleLoop : sp.sampleLoop;
@@ -165,9 +164,6 @@ float SamplerVoice::Process(int trackIdx) {
         }
     }
 
-    // --- REMOVE THE DUPLICATED DECLARATIONS FROM HERE ---
-    // (Ensure const Track& trk and const StepParams& sp are not declared a second time here)
-
     // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
     float targetVol = std::clamp(GetParam(sp.volume, trk.volume) + modVolOffset, 0.0f, 99.0f);
     if (smoothVol < 0.0f) {
@@ -175,77 +171,76 @@ float SamplerVoice::Process(int trackIdx) {
     } else {
         smoothVol += (targetVol - smoothVol) * 0.005f;
     }
+
     // Slew cutoff parameter per-sample to eliminate block-rate zipper noise and step-lock clicks
-        float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
-        if (smoothCutoff < 0.0f) {
-            smoothCutoff = targetCutoff;
-        } else {
-            smoothCutoff += (targetCutoff - smoothCutoff) * 0.004f; // Smooth 5-10ms slew
-        }    // Process Pitch Decay Sweep
+    float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
+    if (smoothCutoff < 0.0f) {
+        smoothCutoff = targetCutoff;
+    } else {
+        smoothCutoff += (targetCutoff - smoothCutoff) * 0.004f; // Smooth 5-10ms slew
+    }
+
+    // Process Pitch Decay Sweep
     if (pitchModFactor > 1.0f) {
         pitchModFactor = 1.0f + (pitchModFactor - 1.0f) * pitchDecayRate;
     } else {
         pitchModFactor = 1.0f;
     }
 
-        // 1. Process Volume Envelope
-            loopMode = GetParam(sp.sampleLoop, trk.sampleLoop);
-            
-            // One-shots decay all the way to 0.0f. Loops/Granular sustain normally.
-            float effectiveSustain = (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) ? envSusLevel : 0.0f;
+    // 1. Process Volume Envelope
+    float effectiveSustain = (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) ? envSusLevel : 0.0f;
 
-            switch (stage) {
-                case ENV_ATTACK:
-                    envLevel += envAtkRate;
-                    if (envLevel >= 1.0f) {
-                        envLevel = 1.0f;
-                        stage = ENV_DECAY;
-                    }
-                    break;
-                    
-                case ENV_DECAY:
-                    envLevel -= envDecRate;
-                    if (envLevel <= effectiveSustain) {
-                        envLevel = effectiveSustain;
-                        if (effectiveSustain == 0.0f) {
-                            // If decaying to zero, cleanly finish the voice (No clicking!)
-                            stage = ENV_IDLE;
-                            active = false;
-                        } else {
-                            stage = ENV_SUSTAIN;
-                        }
-                    }
-                    break;
-                    
-                case ENV_SUSTAIN:
-                    envLevel = envSusLevel;
-                    break;
-                    
-                case ENV_RELEASE:
-                    envLevel -= envRelRate;
-                    if (envLevel <= 0.0f) {
-                        envLevel = 0.0f;
-                        stage = ENV_IDLE;
-                        active = false;
-                        for (int i = 0; i < MAX_GRAINS; ++i) {
-                            if (grainPool[i].active) {
-                                grainPool[i].active = false;
-                                g_globalActiveGrains--;
-                            }
-                        }
-                    }
-                    break;
-                default: break;
+    switch (stage) {
+        case ENV_ATTACK:
+            envLevel += envAtkRate;
+            if (envLevel >= 1.0f) {
+                envLevel = 1.0f;
+                stage = ENV_DECAY;
             }
+            break;
+            
+        case ENV_DECAY:
+            envLevel -= envDecRate;
+            if (envLevel <= effectiveSustain) {
+                envLevel = effectiveSustain;
+                if (effectiveSustain == 0.0f) {
+                    stage = ENV_IDLE;
+                    active = false;
+                } else {
+                    stage = ENV_SUSTAIN;
+                }
+            }
+            break;
+            
+        case ENV_SUSTAIN:
+            envLevel = envSusLevel;
+            break;
+            
+        case ENV_RELEASE:
+            envLevel -= envRelRate;
+            if (envLevel <= 0.0f) {
+                envLevel = 0.0f;
+                stage = ENV_IDLE;
+                active = false;
+                for (int i = 0; i < MAX_GRAINS; ++i) {
+                    if (grainPool[i].active) {
+                        grainPool[i].active = false;
+                        g_globalActiveGrains--;
+                    }
+                }
+            }
+            break;
+        default: break;
+    }
 
     // 2. Process Filter Envelope (ADSR)
-        switch (filterStage) {
-            case FLT_ATTACK:  filterEnvLevel += filterAtkRate; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
-            case FLT_DECAY:   filterEnvLevel -= filterDecRate; if (filterEnvLevel <= filterSusLevel) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; } break;
-            case FLT_SUSTAIN: filterEnvLevel = filterSusLevel; break;
-            case FLT_RELEASE: filterEnvLevel -= filterRelRate; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
-            default: break;
-        }
+    switch (filterStage) {
+        case FLT_ATTACK:  filterEnvLevel += filterAtkRate; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
+        case FLT_DECAY:   filterEnvLevel -= filterDecRate; if (filterEnvLevel <= filterSusLevel) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; } break;
+        case FLT_SUSTAIN: filterEnvLevel = filterSusLevel; break;
+        case FLT_RELEASE: filterEnvLevel -= filterRelRate; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
+        default: break;
+    }
 
     // 3. Block-Rate SVF Coefficients Update (Every 64 Samples)
     filterUpdateCounter++;
@@ -253,25 +248,24 @@ float SamplerVoice::Process(int trackIdx) {
         filterUpdateCounter = 0;
         
         // Recalculate granular spawn interval once per block (Modulated by LFO)
-                float rawDensity = GetParam(sp.grainDensity, trk.grainDensity) + modGranDensOffset;
-                float clampedDensity = std::clamp(rawDensity, 0.0f, 99.0f);
-                float normDensity = clampedDensity / 99.0f;
+        float rawDensity = GetParam(sp.grainDensity, trk.grainDensity) + modGranDensOffset;
+        float clampedDensity = std::clamp(rawDensity, 0.0f, 99.0f);
+        float normDensity = clampedDensity / 99.0f;
         float spawnIntervalSec = 0.0015f + (1.0f - normDensity) * 0.1485f;
         cachedSpawnIntervalSamples = (uint32_t)(spawnIntervalSec * g_sampleRate);
 
-            // Recalculate envelope parameters at block rate instead of per sample
-            float invSampleRate = 1.0f / (float)g_sampleRate;
+        // Recalculate envelope parameters at block rate instead of per sample
+        float invSampleRate = 1.0f / (float)g_sampleRate;
 
-            envAtkRate = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
-            envDecRate = invSampleRate / GetEnvTime(GetParam(sp.decay, trk.decay));
-            envRelRate = invSampleRate / GetEnvTime(GetParam(sp.release, trk.release));
-            envSusLevel = GetParam(sp.sustain, trk.sustain) / 99.0f;
+        envAtkRate = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
+        envDecRate = invSampleRate / GetEnvTime(GetParam(sp.decay, trk.decay));
+        envRelRate = invSampleRate / GetEnvTime(GetParam(sp.release, trk.release));
+        envSusLevel = GetParam(sp.sustain, trk.sustain) / 99.0f;
 
-            filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
-            filterDecRate = invSampleRate / GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
-            filterRelRate = invSampleRate / GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
-            filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
-
+        filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
+        filterDecRate = invSampleRate / GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
+        filterRelRate = invSampleRate / GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
+        filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
 
         // Reset mod offsets
         modCutoffOffset = 0.0f;
@@ -279,10 +273,11 @@ float SamplerVoice::Process(int trackIdx) {
         modVolOffset = 0.0f;
         modPitchOffset = 0.0f;
         modMorphOffset = 0.0f;
-        modSampStartOffset = 0.0f; // ADDED [1]
-           modGranSizeOffset = 0.0f;  // ADDED [1]
-           modGranDensOffset = 0.0f;  // ADDED [1]
-           modGranScatOffset = 0.0f;  // ADDED [1]
+        modSampStartOffset = 0.0f;
+        modGranSizeOffset = 0.0f;
+        modGranDensOffset = 0.0f;
+        modGranScatOffset = 0.0f;
+
         // Pull and sum modulation offsets from all 16 global LFO outputs targeting this sampler voice
         for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
             const Track& srcTrk = tracks[srcTrkIdx];
@@ -290,44 +285,48 @@ float SamplerVoice::Process(int trackIdx) {
             // Check LFO 1 Slots
             for (int s = 0; s < 3; ++s) {
                 const ModSlot& m = srcTrk.lfo1Slots[s];
-                if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f; // Scale to semitones
-                                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f; // Modulates position
-                                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f; // ADDED [1]
-                                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;  // ADDED [1]
-                                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;  // ADDED [1]
-                                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;  // ADDED [1]
+                if (m.destType == 1 && m.destTrack == trackIdx) {
+                    float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
+                    if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
+                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;
                 }
             }
 
             // Check LFO 2 Slots
             for (int s = 0; s < 3; ++s) {
                 const ModSlot& m = srcTrk.lfo2Slots[s];
-                if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f;
-                                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f; // ADDED [1]
-                                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;  // ADDED [1]
-                                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;  // ADDED [1]
-                                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;  // ADDED [1]
+                if (m.destType == 1 && m.destTrack == trackIdx) {
+                    float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
+                    if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
+                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;
+                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;
                 }
             }
         }
 
         // Modulate the normalized control position (0.0 to 1.0) logarithmically before mapping to Hz
-                float normCut = smoothCutoff / 99.0f;
-                int dptVal = GetParam(sp.filterEnvDepth, trk.filterEnvDepth);
-                float envMod = filterEnvLevel * (dptVal / 99.0f);
+        float normCut = smoothCutoff / 99.0f;
+        int dptVal = GetParam(sp.filterEnvDepth, trk.filterEnvDepth);
+        float envMod = filterEnvLevel * (dptVal / 99.0f);
 
-                // Blend base cutoff and envelope modulation in the normalized control domain
-                float finalNormCut = std::clamp(normCut + envMod, 0.0f, 1.0f);
+        // Blend base cutoff and envelope modulation in the normalized control domain
+        float finalNormCut = std::clamp(normCut + envMod, 0.0f, 1.0f);
 
-                // Quartic mapping of modulated cutoff (15Hz to 16000Hz)
-                float finalCutoffHz = 15.0f + (finalNormCut * finalNormCut * finalNormCut * finalNormCut) * 15985.0f;
+        // Quartic mapping of modulated cutoff (15Hz to 16000Hz)
+        float finalCutoffHz = 15.0f + (finalNormCut * finalNormCut * finalNormCut * finalNormCut) * 15985.0f;
         float resNorm = std::clamp(GetParam(sp.filterResonance, trk.filterResonance) + modResOffset, 0.0f, 99.0f) / 99.0f;
 
         // Recalculate coefficients
@@ -353,7 +352,7 @@ float SamplerVoice::Process(int trackIdx) {
     int fType = GetParam(sp.filterType, trk.filterType);
 
     // --- 7. Run through State-Variable Filter (SVF) Stage & Scale by Note Velocity ---
-        return filter.process(saturated, fType) * velocityScale * chokeVolume;
+    return filter.process(saturated, fType) * velocityScale * chokeVolume;
 }
 
 float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
