@@ -1074,9 +1074,12 @@ int main() {
 
                         bool isAltHeld = IsKeyDown(KEY_X);
 
-                        // --- STEP & TIMING UTILITIES MENU EDITING ---
-            if (isShiftDown && isAltHeld) {
-                                        bool editStepUtil = false;
+            // --- STEP & TIMING UTILITIES MENU EDITING ---
+                        bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8 ||
+                                                currentScreen == SCREEN_TRIG_1_4 || currentScreen == SCREEN_TRIG_5_8);
+
+                        if (isShiftDown && isAltHeld && isSequencerPage) { // CHANGED: Added screen guard
+                                                    bool editStepUtil = false;
                                         int editDirection = 0;
                                         // EDIT: Allow encoder to edit values directly
                                         if (encoderTurn != 0) {
