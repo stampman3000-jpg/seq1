@@ -14,7 +14,11 @@ extern int cursorStep;
 extern int activePage;
 extern int masterLength;   // Pattern loop limit: 16, 32, 64, or 0 (INF)
 extern int stepUtilFocus;  // 0 = Microtiming, 1 = Track Length, 2 = Global Lengt
-
+extern bool stepPopupOpen;
+extern int stepPopupFocusX;   // 0 = Parameters (Left Column), 1 = Chord Keyboard (Right Column)
+extern int stepPopupFocusY;   // 0 = Retrig, 1 = Condit, 2 = Length
+extern int stepPopupCondCol;  // 0..15 focused condition bit
+extern int stepPopupChordKey; // 0..12 hovered piano key index
 extern float g_audioCpuLoad;
 extern bool showDiagnostics;
 // Global Arrays and Tables

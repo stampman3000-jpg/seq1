@@ -36,7 +36,7 @@ static int GetParam(int stepVal, int trackVal) {
     return (stepVal == -1) ? trackVal : stepVal;
 }
 
-void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq) {
+void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq, int noteLength) {
     sampleBuffer = buffer;
     sampleLengthSamples = length;
     active = (buffer != nullptr && length > 0);
@@ -104,19 +104,21 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
         }
         samplesSinceLastGrain = 99999;
 
-        // Auto-Gate Timer Initialization
-        if (isSeq) {
-            double tickLengthSeconds = 2.5 / tempo;
-            uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
-            uint32_t samplesPerStep = samplesPerTick * 6;
-            
-            gateTimerSamples = (uint32_t)(samplesPerStep * 0.85f);
-            useGateTimer = true;
-        } else {
-            useGateTimer = false;
-            gateTimerSamples = 0;
-        }
-    } // <--- ADD THIS CLOSING BRACE HERE!
+    // Auto-Gate Timer Initialization
+           if (isSeq) {
+               double tickLengthSeconds = 2.5 / tempo;
+               uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
+               uint32_t samplesPerStep = samplesPerTick * 6;
+               
+               float holdStepsCount = (noteLength == 0) ? 0.85f : ((float)noteLength - 0.15f);
+               gateTimerSamples = (uint32_t)(samplesPerStep * holdStepsCount);
+               useGateTimer = true;
+           } else {
+               useGateTimer = false;
+               gateTimerSamples = 0;
+           }
+       }
+
 
     void SamplerVoice::Release() {
         if (stage != ENV_IDLE) stage = ENV_RELEASE;

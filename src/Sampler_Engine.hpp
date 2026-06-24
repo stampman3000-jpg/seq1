@@ -91,7 +91,7 @@ struct SamplerVoice {
     uint32_t samplesSinceLastGrain = 0;
 
     // Interface Functions
-    void Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq = false);
+    void Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0);
     void Release();
     void Choke(); // Click-free fadeout Choke
     float Process(int trackIdx);

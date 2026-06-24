@@ -217,7 +217,7 @@ void DrawSequencerScreen(const UIState& state) {
     }
 }
 // Complete main rendering engine for Page 2: TRIGS
-void DrawTriggersScreen(const UIState& state) {
+/*void DrawTriggersScreen(const UIState& state) {
     std::string patStr = GetPatternHeaderString();
     
     // Append page indicator (P1 or P2) cleanly into the header title
@@ -323,7 +323,7 @@ void DrawTriggersScreen(const UIState& state) {
     if (isShiftHeld && isAltHeld) {
         DrawMicrotimingPopup(state);
     }
-}
+}*/
 // Complete main rendering engine for Page 3: SYNTH
 void DrawSynthScreen(const UIState& state) {
     std::string headerTrack = "TRACK " + std::to_string(state.selectedTrack + 1) + " " + GetPatternHeaderString();
@@ -1767,5 +1767,241 @@ void DrawDiagnosticsScreen(const UIState& state) {
                 DrawRectangleLines(x, y, 4, 5, WHITE); // Hollow block
             }
         }
+    }
+}
+// --- STEP PROPERTIES EDITING POPUP ---
+void DrawStepPopup(const UIState& state) {
+    // Large, centered popup frame (180x56) matching your custom layout
+    int mx = 38, my = 4, mw = 180, mh = 56;
+    
+    DrawRectangle(mx, my, mw, mh, BLACK);
+    DrawPixelRectLines(mx, my, mw, mh, WHITE);
+
+    // Fetch the active step context safely relative to track and cursor position
+    int activeTrackIdx = (state.currentScreen == SCREEN_SEQ_5_8) ? state.cursorTrack + 4 : state.cursorTrack;
+    const Step& step = tracks[activeTrackIdx].steps[state.cursorStep];
+
+    // Left and Right column boundary starting points
+    int leftX = mx + 4, leftY = my + 11;
+    int rightX = mx + 94, rightY = my + 11;
+
+    // Draw central vertical dividing line separating parameters from the chord piano
+    DrawPixelLine(mx + 92, my + 11, mx + 92, my + mh - 5, WHITE);
+
+    // =========================================================================
+    // I. ROW 0: RETRIG (8x2 Grid)
+    // =========================================================================
+    bool retrigSelected = (stepPopupOpen && stepPopupFocusX == 0 && stepPopupFocusY == 0);
+    if (retrigSelected) {
+        DrawRectangle(leftX + 2, leftY + 2, 30, 7, WHITE);
+        Draw3x5String("RETRIG", leftX + 3, leftY + 3, BLACK);
+    } else {
+        Draw3x5String("RETRIG", leftX + 3, leftY + 3, WHITE);
+    }
+
+    // Draw 8x2 grid representing 16 subdivisions
+    int rx = leftX + 36;
+    int ry0 = leftY + 1;
+    for (int p = 0; p < 16; ++p) {
+        int col = p % 8;
+        int row = p / 8;
+        DrawPixelRectLines(rx + col * 6, ry0 + row * 6, 4, 4, WHITE);
+        if (p < step.retrigger) {
+            DrawRectangle(rx + col * 6, ry0 + row * 6, 4, 4, WHITE);
+        }
+    }
+
+    // =========================================================================
+    // II. ROW 1: CONDIT (8x2 Grid)
+    // =========================================================================
+    bool conditSelected = (stepPopupOpen && stepPopupFocusX == 0 && stepPopupFocusY == 1);
+    if (conditSelected) {
+        DrawRectangle(leftX + 2, leftY + 15, 30, 7, WHITE);
+        Draw3x5String("CONDIT", leftX + 3, leftY + 16, BLACK);
+    } else {
+        Draw3x5String("CONDIT", leftX + 3, leftY + 16, WHITE);
+    }
+
+    // Draw 8x2 grid representing 16 custom loop bars
+        int cx = leftX + 36;
+        int cy0 = leftY + 14;
+
+        // 1. Determine the selected cycle length from bits 8..15 of condMask
+        int cycleLength = 1;
+        for (int c = 0; c < 8; ++c) {
+            if (step.condMask & (1 << (8 + c))) {
+                cycleLength = c + 1;
+                break;
+            }
+        }
+
+        for (int b = 0; b < 16; ++b) {
+            int col = b % 8;
+            int row = b / 8;
+            
+            bool isActive = false;
+            if (row == 0) {
+                // Top Row: Individual loop triggers
+                isActive = (step.condMask & (1 << b)) != 0;
+            } else {
+                // Bottom Row: Fill from the left up to the active cycle length
+                isActive = (col < cycleLength);
+            }
+
+            bool isCursorOnBit = (conditSelected && stepPopupCondCol == b);
+
+            DrawPixelRectLines(cx + col * 6, cy0 + row * 6, 4, 4, WHITE);
+            if (isActive) {
+                DrawRectangle(cx + col * 6 + 1, cy0 + row * 6 + 1, 2, 2, WHITE);
+            }
+            
+            // Draw visual cursor indicator on active selected block
+            if (isCursorOnBit && state.blinkOn) {
+                DrawPixelRectLines(cx + col * 6 - 1, cy0 + row * 6 - 1, 6, 6, WHITE);
+            }
+        }
+
+    // =========================================================================
+    // III. ROW 2: NT. LNGT (8x2 Grid)
+    // =========================================================================
+    bool lengthSelected = (stepPopupOpen && stepPopupFocusX == 0 && stepPopupFocusY == 2);
+    if (lengthSelected) {
+        DrawRectangle(leftX + 2, leftY + 28, 30, 7, WHITE);
+        Draw3x5String("LENGTH", leftX + 3, leftY + 29, BLACK);
+    } else {
+        Draw3x5String("LENGTH", leftX + 3, leftY + 29, WHITE);
+    }
+
+    // Draw 8x2 grid representing 16 step length blocks
+    int lx = leftX + 36;
+    int ly0 = leftY + 27;
+    if (step.noteLength == 0) {
+        Draw3x5String("AUTO (0.85)", lx, ly0 + 4, WHITE);
+    } else {
+        for (int p = 0; p < 16; ++p) {
+            int col = p % 8;
+            int row = p / 8;
+            DrawPixelRectLines(lx + col * 6, ly0 + row * 6, 4, 4, WHITE);
+            if (p < step.noteLength) {
+                DrawRectangle(lx + col * 6, ly0 + row * 6, 4, 4, WHITE);
+            }
+        }
+    }
+
+    // =========================================================================
+    // IV. RIGHT COLUMN: CHORD PIANO KEYBOARD
+    // =========================================================================
+    bool chordSelected = (stepPopupOpen && stepPopupFocusX == 1);
+    if (chordSelected) {
+        DrawRectangle(rightX + 22, rightY + 3, 34, 7, WHITE);
+        Draw3x5String("CHORD", rightX + 26, rightY + 4, BLACK);
+    } else {
+        Draw3x5String("CHORD", rightX + 26, rightY + 4, WHITE);
+    }
+
+    // Draw active chord formula name text
+    const char* chordNames[] = { "NONE", "MAJOR", "MINOR", "SUS4", "DOM7", "MAJ7", "MIN7" };
+    Draw3x5String(chordNames[step.chordType], rightX + 24, rightY + 12, GRAY);
+
+    // Keyboard Base coordinates
+    int kx = rightX + 16;
+    int ky = rightY + 20;
+    int kh = 14;
+
+    // White keys list: C, D, E, F, G, A, B, C+ (drawn 6-pixels wide each)
+    int whiteKeysX[] = { 0, 6, 12, 18, 24, 30, 36, 42 };
+    for (int w = 0; w < 8; ++w) {
+        DrawPixelRectLines(kx + whiteKeysX[w], ky, 6, kh, WHITE);
+    }
+
+    // Black keys list: C# (between C/D), D# (D/E), F# (F/G), G# (G/A), A# (A/B)
+    int blackKeysX[] = { 4, 10, 22, 28, 34 };
+    for (int b = 0; b < 5; ++b) {
+        DrawRectangle(kx + blackKeysX[b], ky, 4, 9, BLACK);
+        DrawPixelRectLines(kx + blackKeysX[b], ky, 4, 9, WHITE);
+    }
+
+    // Determine active notes belonging to either preset formulas OR custom recorded chord notes
+    std::vector<int> activeSemitones;
+    std::vector<std::string> allActiveNotes;
+    if (!step.note.empty()) {
+        allActiveNotes.push_back(step.note);
+    }
+    for (int k = 0; k < 3; ++k) {
+        if (!step.chordNotes[k].empty()) {
+            allActiveNotes.push_back(step.chordNotes[k]);
+        }
+    }
+
+    if (step.chordType > 0) {
+        // Preset Formula offsets
+        std::vector<int> chordOffsets;
+        if (step.chordType == 1)      chordOffsets = {0, 4, 7};      // Major (Root, Maj 3rd, 5th)
+        else if (step.chordType == 2) chordOffsets = {0, 3, 7};      // Minor (Root, Min 3rd, 5th)
+        else if (step.chordType == 3) chordOffsets = {0, 5, 7};      // Sus4 (Root, Perf 4th, 5th)
+        else if (step.chordType == 4) chordOffsets = {0, 4, 7, 10};  // Dom7 (Root, Maj 3rd, 5th, Min 7th)
+        else if (step.chordType == 5) chordOffsets = {0, 4, 7, 11};  // Maj7 (Root, Maj 3rd, 5th, Maj 7th)
+        else if (step.chordType == 6) chordOffsets = {0, 3, 7, 10};  // Min7 (Root, Min 3rd, 5th, Min 7th)
+
+        if (!step.note.empty()) {
+            int rootMidi = NoteToMidi(step.note);
+            for (int offset : chordOffsets) {
+                int keyIdx = ((rootMidi + offset) % 12);
+                activeSemitones.push_back(keyIdx);
+            }
+        }
+    } else {
+        // Custom played chord notes (Map relative to C)
+        for (const auto& nStr : allActiveNotes) {
+            int midiVal = NoteToMidi(nStr);
+            if (midiVal >= 0) {
+                activeSemitones.push_back(midiVal % 12); // 0 = C, 1 = C#, etc.
+            }
+        }
+    }
+
+    // Draw solid indicator dots inside active chord keys
+    for (int offset : activeSemitones) {
+        int dotX = kx;
+        int dotY = ky + kh - 4;
+        bool isBlackKey = false;
+
+        if (offset == 0)  dotX += 2; // C
+        else if (offset == 1)  { dotX += 5; dotY = ky + 5; isBlackKey = true; } // C#
+        else if (offset == 2)  dotX += 8; // D
+        else if (offset == 3)  { dotX += 11; dotY = ky + 5; isBlackKey = true; } // D#
+        else if (offset == 4)  dotX += 14; // E
+        else if (offset == 5)  dotX += 20; // F
+        else if (offset == 6)  { dotX += 23; dotY = ky + 5; isBlackKey = true; } // F#
+        else if (offset == 7)  dotX += 26; // G
+        else if (offset == 8)  { dotX += 29; dotY = ky + 5; isBlackKey = true; } // G#
+        else if (offset == 9)  dotX += 32; // A
+        else if (offset == 10) { dotX += 35; dotY = ky + 5; isBlackKey = true; } // A#
+        else if (offset == 11) dotX += 38; // B
+
+        DrawRectangle(dotX, dotY, 2, 2, isBlackKey ? BLACK : WHITE);
+    }
+
+    // Draw visual cursor arrow pointing to the currently hovered piano key
+    if (chordSelected) {
+        int arrowX = kx;
+        int arrowY = ky + kh + 1;
+        
+        int k = stepPopupChordKey;
+        if (k == 0)       arrowX += 2;  // C
+        else if (k == 1)  arrowX += 5;  // C#
+        else if (k == 2)  arrowX += 8;  // D
+        else if (k == 3)  arrowX += 11; // D#
+        else if (k == 4)  arrowX += 14; // E
+        else if (k == 5)  arrowX += 20; // F
+        else if (k == 6)  arrowX += 23; // F#
+        else if (k == 7)  arrowX += 26; // G
+        else if (k == 8)  arrowX += 29; // G#
+        else if (k == 9)  arrowX += 32; // A
+        else if (k == 10) arrowX += 35; // A#
+        else if (k == 11) arrowX += 38; // B
+        else if (k == 12) arrowX += 44; // C+
+
+        Draw3x5Char('^', arrowX - 1, arrowY, WHITE);
     }
 }

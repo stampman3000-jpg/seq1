@@ -252,10 +252,10 @@ struct SynthVoice {
             chokeVolume = 1.0f;
         }
     
-    void Trigger(float targetFreq, int depth, int time, int velocity, bool isSeq = false) {
-            baseFreq = targetFreq;
-            active = true;
-            stage1 = ENV1_ATTACK;
+    void Trigger(float targetFreq, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0) {
+                baseFreq = targetFreq;
+                active = true;
+                stage1 = ENV1_ATTACK;
             stage2 = ENV2_ATTACK;
             lastModOutput = 0.0f; // Flush feedback buffer on note trigger
             envLevel1 = 0.0f;
@@ -318,20 +318,21 @@ struct SynthVoice {
                 modMorph2Offset = 0.0f;
                 modPitchOffset = 0.0f;
 
-                // Auto-Gate Timer Initialization
-                if (isSeq) {
-                    double tickLengthSeconds = 2.5 / tempo;
-                    uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
-                    uint32_t samplesPerStep = samplesPerTick * 6;
-                    
-                    // Hold the gate open for 85% of a step's duration
-                    gateTimerSamples = (uint32_t)(samplesPerStep * 0.85f);
-                    useGateTimer = true;
-                } else {
-                    useGateTimer = false;
-                    gateTimerSamples = 0;
-                }
-            }
+        // Auto-Gate Timer Initialization
+                       if (isSeq) {
+                           double tickLengthSeconds = 2.5 / tempo;
+                           uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
+                           uint32_t samplesPerStep = samplesPerTick * 6;
+                           
+                           // Hold for noteLength steps (subtracting 15% step decay interval for release spacing)
+                           float holdStepsCount = (noteLength == 0) ? 0.85f : ((float)noteLength - 0.15f);
+                           gateTimerSamples = (uint32_t)(samplesPerStep * holdStepsCount);
+                           useGateTimer = true;
+                       } else {
+                           useGateTimer = false;
+                           gateTimerSamples = 0;
+                       }
+                   }
 
     void Release() {
         if (stage1 != ENV1_IDLE) stage1 = ENV1_RELEASE;
@@ -987,96 +988,136 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
             playhead = (tracks[selectedTrack].localTick / 6) % tracks[selectedTrack].stepLength;
 
             // 1. Check for active note triggers at the beginning of a tick
-            if (tickTriggered) {
-                for (int t = 0; t < 8; ++t) {
-                    if (tracks[t].muted) continue;
+                     if (tickTriggered) {
+                         for (int t = 0; t < 8; ++t) {
+                             if (tracks[t].muted) continue;
 
-                    // Scan steps specifically up to this track's active step length limit
-                    for (int s = 0; s < tracks[t].stepLength; ++s) {
-                        const Step& step = tracks[t].steps[s];
+                             for (int s = 0; s < tracks[t].stepLength; ++s) {
+                                 const Step& step = tracks[t].steps[s];
 
-                        int triggerTick = (s * 6 + step.microtiming);
-                        int localLengthTicks = tracks[t].stepLength * 6;
-                        
-                        // Wrap microtiming relative to this track's local loop length
-                        triggerTick = triggerTick % localLengthTicks;
-                        if (triggerTick < 0) triggerTick += localLengthTicks;
+                                 int triggerTick = (s * 6 + step.microtiming);
+                                 int localLengthTicks = tracks[t].stepLength * 6;
+                                 
+                                 triggerTick = triggerTick % localLengthTicks;
+                                 if (triggerTick < 0) triggerTick += localLengthTicks;
 
-                        // Trigger notes relative to track-local clock
-                        if (triggerTick == tracks[t].localTick) {
-                            if (step.velocity > 0 && !step.note.empty()) {
-                                if (EvaluateCondition(step.condition, t)) {
-                                    int midiNote = NoteToMidi(step.note);
-                                    if (midiNote >= 0) {
-                                        float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
-                                        
-                                        // Resolve Pitch Sweep settings (supporting Step-locks)
-                                        int depth = (step.params.pitchSweepDepth == -1) ? tracks[t].pitchSweepDepth : step.params.pitchSweepDepth;
-                                        int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
+                                 if (triggerTick == tracks[t].localTick) {
+                                     if (step.velocity > 0 && !step.note.empty()) {
+                                         // 1. Extract the denominator cycle length M (bits 8 to 15)
+                                                                     int cycleLength = 1;
+                                                                     for (int c = 0; c < 8; ++c) {
+                                                                         if (step.condMask & (1 << (8 + c))) {
+                                                                             cycleLength = c + 1;
+                                                                             break;
+                                                                         }
+                                                                     }
 
-                                        int finalPolyMode = GetParam(step.params.polyMode, tracks[t].polyMode);
-                                        if (finalPolyMode < 1) finalPolyMode = 1;
-                                        if (finalPolyMode > 4) finalPolyMode = 4;
+                                                                     // 2. Determine current cycle relative to active loop count
+                                                                     int currentCycleIdx = g_trackBarCount[t] % cycleLength;
 
-                                        if (tracks[t].engineType == ENGINE_SYNTH) {
-                                            g_trackVoiceIndex[t] = g_trackVoiceIndex[t] % finalPolyMode;
-                                            int targetIdx = g_trackVoiceIndex[t];
+                                                                     // 3. Verify if current cycle is enabled in the top row (bits 0 to 7)
+                                                                     bool maskActive = (step.condMask & (1 << currentCycleIdx)) != 0;
 
-                                            if (g_trackVoices[t][targetIdx].active) {
-                                                g_trackVoices[t][targetIdx].Choke(); // Smoothly crossfade/choke oldest voice
-                                            }
-                                            g_trackVoices[t][targetIdx].Trigger(freq, depth, time, step.velocity, true);
-                                            g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % finalPolyMode;
-                                        } else {
-                                            int slot = GetParam(step.params.sampleSlot, tracks[t].sampleSlot);
-                                            const int16_t* buffer = g_samplePool[slot].pcmData.data();
-                                            uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
-                                            float noteOffset = (float)(midiNote - 60);
+                                         if (maskActive) {
+                                             int midiNoteRoot = NoteToMidi(step.note);
+                                             if (midiNoteRoot >= 0) {
+                                                 // Build the note indices list
+                                                 std::vector<int> midiNotesToTrigger;
+                                                 midiNotesToTrigger.push_back(midiNoteRoot);
 
-                                            g_samplerVoiceIndex[t] = g_samplerVoiceIndex[t] % finalPolyMode;
-                                            int targetIdx = g_samplerVoiceIndex[t];
+                                                 if (step.chordType > 0) {
+                                                     std::vector<int> chordOffsets;
+                                                     if (step.chordType == 1)      chordOffsets = {4, 7};      // Major
+                                                     else if (step.chordType == 2) chordOffsets = {3, 7};      // Minor
+                                                     else if (step.chordType == 3) chordOffsets = {5, 7};      // Sus4
+                                                     else if (step.chordType == 4) chordOffsets = {4, 7, 10};  // Dom7
+                                                     else if (step.chordType == 5) chordOffsets = {4, 7, 11};  // Maj7
+                                                     else if (step.chordType == 6) chordOffsets = {3, 7, 10};  // Min7
+                                                     for (int offset : chordOffsets) {
+                                                         midiNotesToTrigger.push_back(midiNoteRoot + offset);
+                                                     }
+                                                 } else {
+                                                     for (int k = 0; k < 3; ++k) {
+                                                         if (!step.chordNotes[k].empty()) {
+                                                             int extraMidi = NoteToMidi(step.chordNotes[k]);
+                                                             if (extraMidi >= 0) midiNotesToTrigger.push_back(extraMidi);
+                                                         }
+                                                     }
+                                                 }
+                                                 
+                                                 int depth = (step.params.pitchSweepDepth == -1) ? tracks[t].pitchSweepDepth : step.params.pitchSweepDepth;
+                                                 int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
 
-                                            if (g_samplerVoices[t][targetIdx].active) {
-                                                g_samplerVoices[t][targetIdx].Choke(); // Smoothly crossfade/choke oldest voice
-                                            }
-                                            g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true);
-                                            g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % finalPolyMode;
-                                        }
+                                                 int finalPolyMode = GetParam(step.params.polyMode, tracks[t].polyMode);
+                                                 if (finalPolyMode < 1) finalPolyMode = 1;
+                                                 if (finalPolyMode > 4) finalPolyMode = 4;
 
-                                        // Set up ratchet queue
-                                        if (step.retrigger > 1) {
-                                            ActiveRetrig& ar = g_activeRetrigs[t];
-                                            ar.midiNote = midiNote;
-                                            ar.remainingTriggers = step.retrigger - 1;
-                                            ar.sampleInterval = samplesPerStep / step.retrigger;
-                                            ar.sampleCounter = 0;
-                                            ar.velocity = step.velocity; // Store velocity for ratchets
-                                        } else {
-                                            g_activeRetrigs[t].remainingTriggers = 0; // Clear queue
-                                        }
-                                    }
-                                }
-                            } else if (step.velocity == 0 && !step.note.empty()) {
-                                // Explicit Gate Off / Release (ONLY releases if user placed an active gate-off step)
-                                if (tracks[t].engineType == ENGINE_SYNTH) {
-                                    for (int v = 0; v < 4; ++v) {
-                                        if (g_trackVoices[t][v].triggeredBySequencer) {
-                                            g_trackVoices[t][v].Release();
-                                        }
-                                    }
-                                } else {
-                                    for (int v = 0; v < 4; ++v) {
-                                        if (g_samplerVoices[t][v].triggeredBySequencer) {
-                                            g_samplerVoices[t][v].Release();
-                                        }
-                                    }
-                                }
-                                g_activeRetrigs[t].remainingTriggers = 0;
-                            }
-                        }
-                    }
-                }
-            }
+                                                 int notesCount = std::min((int)midiNotesToTrigger.size(), finalPolyMode);
+
+                                                 for (int n = 0; n < notesCount; ++n) {
+                                                     int midiNote = midiNotesToTrigger[n];
+                                                     float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
+
+                                                     if (tracks[t].engineType == ENGINE_SYNTH) {
+                                                         g_trackVoiceIndex[t] = g_trackVoiceIndex[t] % finalPolyMode;
+                                                         int targetIdx = g_trackVoiceIndex[t];
+
+                                                         if (g_trackVoices[t][targetIdx].active) {
+                                                             g_trackVoices[t][targetIdx].Choke();
+                                                         }
+                                                         g_trackVoices[t][targetIdx].Trigger(freq, depth, time, step.velocity, true, step.noteLength);
+                                                         g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % finalPolyMode;
+                                                     } else {
+                                                         int slot = GetParam(step.params.sampleSlot, tracks[t].sampleSlot);
+                                                         const int16_t* buffer = g_samplePool[slot].pcmData.data();
+                                                         uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
+                                                         float noteOffset = (float)(midiNote - 60);
+
+                                                         g_samplerVoiceIndex[t] = g_samplerVoiceIndex[t] % finalPolyMode;
+                                                         int targetIdx = g_samplerVoiceIndex[t];
+
+                                                         if (g_samplerVoices[t][targetIdx].active) {
+                                                             g_samplerVoices[t][targetIdx].Choke();
+                                                         }
+                                                         g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength);
+                                                         g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % finalPolyMode;
+                                                     }
+                                                 }
+
+                                                 // Set up ratchet queue (ratchets repeat the root note)
+                                                 if (step.retrigger > 1) {
+                                                     ActiveRetrig& ar = g_activeRetrigs[t];
+                                                     ar.midiNote = midiNoteRoot;
+                                                     ar.remainingTriggers = step.retrigger - 1;
+                                                     ar.sampleInterval = samplesPerStep / step.retrigger;
+                                                     ar.sampleCounter = 0;
+                                                     ar.velocity = step.velocity;
+                                                 } else {
+                                                     g_activeRetrigs[t].remainingTriggers = 0;
+                                                 }
+                                             }
+                                         }
+                                     } else if (step.velocity == 0 && !step.note.empty()) {
+                                         // Explicit Gate Off / Release
+                                         if (tracks[t].engineType == ENGINE_SYNTH) {
+                                             for (int v = 0; v < 4; ++v) {
+                                                 if (g_trackVoices[t][v].triggeredBySequencer) {
+                                                     g_trackVoices[t][v].Release();
+                                                 }
+                                             }
+                                         } else {
+                                             for (int v = 0; v < 4; ++v) {
+                                                 if (g_samplerVoices[t][v].triggeredBySequencer) {
+                                                     g_samplerVoices[t][v].Release();
+                                                 }
+                                             }
+                                         }
+                                         g_activeRetrigs[t].remainingTriggers = 0;
+                                     }
+                                 }
+                             }
+                         }
+                     }
 
             // 2. Update and execute active sample-accurate retriggers
             for (int t = 0; t < 8; ++t) {

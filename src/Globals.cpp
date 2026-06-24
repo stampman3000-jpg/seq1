@@ -42,6 +42,13 @@ bool systemMenuOpen = false;
 int systemMenuCursor = 0;
 int systemMenuState = 0;
 
+bool stepPopupOpen = false;
+int stepPopupFocusX = 0;
+int stepPopupFocusY = 0;
+int stepPopupCondCol = 0;
+int stepPopupChordKey = 0;
+
+
 // Instantiate Modulation Matrix Popup variables
 bool lfoPopupOpen = false;
 int lfoPopupLfoIdx = 0;
@@ -180,34 +187,43 @@ void InitializeTracks() {
     }
 
     for (int t = 0; t < 8; ++t) {
-            tracks[t].name = GetTrackName(t);
-            
-            // Loop up to 32 steps instead of 16
-            for (int s = 0; s < 32; ++s) {
-                if (s < 16) {
-                    // Page 1 (Steps 1-16) receives your startup demo data
-                    if (t < 4) {
-                        tracks[t].steps[s].note = rawNotes1_4[t][s];
-                        tracks[t].steps[s].velocity = rawVels1_4[t][s];
-                        tracks[t].steps[s].condition = rawTrigs1_4[t][s];
-                        tracks[t].steps[s].retrigger = rawRetrigs1_4[t][s];
-                    } else {
-                        tracks[t].steps[s].note = rawNotes5_8[t - 4][s];
-                        tracks[t].steps[s].velocity = rawVels5_8[t - 4][s];
-                        tracks[t].steps[s].condition = rawTrigs5_8[t - 4][s];
-                        tracks[t].steps[s].retrigger = rawRetrigs5_8[t - 4][s];
-                    }
-                } else {
-                    // Page 2 (Steps 17-32) is initialized as completely empty
-                    tracks[t].steps[s].note = "";
-                    tracks[t].steps[s].velocity = 0;
-                    tracks[t].steps[s].condition = "";
-                    tracks[t].steps[s].retrigger = 0;
-                }
-                // Reset all parameter locks and microtiming across all 32 steps
-                tracks[t].steps[s].params.reset();
-                tracks[t].steps[s].microtiming = 0;
+        tracks[t].name = GetTrackName(t);
+        
+        // Loop up to 32 steps instead of 16
+        for (int s = 0; s < 32; ++s) {
+            if (s < 16) {
+                // Page 1 (Steps 1-16) receives your startup demo data
+                if (t < 4) {
+                                    tracks[t].steps[s].note = rawNotes1_4[t][s];
+                                    tracks[t].steps[s].velocity = rawVels1_4[t][s];
+                                    tracks[t].steps[s].condition = ""; // Completely clean
+                                    tracks[t].steps[s].retrigger = rawRetrigs1_4[t][s];
+                                } else {
+                                    tracks[t].steps[s].note = rawNotes5_8[t - 4][s];
+                                    tracks[t].steps[s].velocity = rawVels5_8[t - 4][s];
+                                    tracks[t].steps[s].condition = ""; // Completely clean
+                                    tracks[t].steps[s].retrigger = rawRetrigs5_8[t - 4][s];
+                                }
+            } else {
+                // Page 2 (Steps 17-32) is initialized as completely empty
+                tracks[t].steps[s].note = "";
+                tracks[t].steps[s].velocity = 0;
+                tracks[t].steps[s].condition = "";
+                tracks[t].steps[s].retrigger = 0;
             }
+            // Reset all parameter locks and microtiming across all 32 steps
+            tracks[t].steps[s].params.reset();
+            tracks[t].steps[s].microtiming = 0;
+
+            // --- INITIALIZE POPUP FIELDS CORRECTLY INSIDE STEP LOOP ---
+                        tracks[t].steps[s].condMask = 0x0101; // Default: active on loop 1, cycle length 1
+                        tracks[t].steps[s].noteLength = 0;
+                        tracks[t].steps[s].chordType = 0;
+            tracks[t].steps[s].chordNotes[0] = "";
+            tracks[t].steps[s].chordNotes[1] = "";
+            tracks[t].steps[s].chordNotes[2] = "";
+        }
+        
         tracks[t].localTick = -1;
         // Initialize default core engine routing (Track 1 & Tracks 5-8: Synths, Tracks 2-4: Samplers)
         if (t == 0 || t >= 4) {
@@ -219,47 +235,47 @@ void InitializeTracks() {
         }
 
         tracks[t].sampleSlot = 0;
-                tracks[t].morph = 0; tracks[t].coarse = 0; tracks[t].fine = 0; tracks[t].volume = 99;
-                tracks[t].attack = 10; tracks[t].decay = 30; tracks[t].sustain = 75; tracks[t].release = 20;
-                tracks[t].morph2 = 50; tracks[t].coarse2 = 12; tracks[t].fine2 = 15; tracks[t].volume2 = 70;
-                tracks[t].attack2 = 20; tracks[t].decay2 = 45; tracks[t].sustain2 = 50; tracks[t].release2 = 30;
+        tracks[t].morph = 0; tracks[t].coarse = 0; tracks[t].fine = 0; tracks[t].volume = 99;
+        tracks[t].attack = 10; tracks[t].decay = 30; tracks[t].sustain = 75; tracks[t].release = 20;
+        tracks[t].morph2 = 50; tracks[t].coarse2 = 12; tracks[t].fine2 = 15; tracks[t].volume2 = 70;
+        tracks[t].attack2 = 20; tracks[t].decay2 = 45; tracks[t].sustain2 = 50; tracks[t].release2 = 30;
 
-                tracks[t].pitchSweepDepth = 0; // Pitch sweep depth always down (0) on startup
-                tracks[t].pitchSweepTime = defaultPitchSweepTime[t];
-                tracks[t].reverbSend = defaultReverbSend[t];
-                tracks[t].delaySend = defaultDelaySend[t];
-                tracks[t].sampleRateRed = defaultSampleRateRed[t];
-                tracks[t].bitRed = defaultBitRed[t];
-                
-                tracks[t].fmFeedback = 20;
-                tracks[t].noiseVolume = 40;
-                tracks[t].noiseAttack = 10;
-                tracks[t].noiseHold = 30;
-                tracks[t].noiseDecay = 40;
+        tracks[t].pitchSweepDepth = 0; // Pitch sweep depth always down (0) on startup
+        tracks[t].pitchSweepTime = defaultPitchSweepTime[t];
+        tracks[t].reverbSend = defaultReverbSend[t];
+        tracks[t].delaySend = defaultDelaySend[t];
+        tracks[t].sampleRateRed = defaultSampleRateRed[t];
+        tracks[t].bitRed = defaultBitRed[t];
+        
+        tracks[t].fmFeedback = 20;
+        tracks[t].noiseVolume = 40;
+        tracks[t].noiseAttack = 10;
+        tracks[t].noiseHold = 30;
+        tracks[t].noiseDecay = 40;
 
-                // Populate sampler defaults
-                tracks[t].sampleStart = 0;   // Start always at the beginning
-                tracks[t].sampleLength = 99;  // End always at the end
-                tracks[t].sampleLoop = 0;    // One-Shot by default
-                tracks[t].sampleTune = 0;
-                tracks[t].loopStart = 0;     // Loop start always at the beginning
-                tracks[t].loopEnd = 99;      // Loop end always at the end
-                tracks[t].sliceDivisions = 8;
+        // Populate sampler defaults
+        tracks[t].sampleStart = 0;   // Start always at the beginning
+        tracks[t].sampleLength = 99;  // End always at the end
+        tracks[t].sampleLoop = 0;    // One-Shot by default
+        tracks[t].sampleTune = 0;
+        tracks[t].loopStart = 0;     // Loop start always at the beginning
+        tracks[t].loopEnd = 99;      // Loop end always at the end
+        tracks[t].sliceDivisions = 8;
         tracks[t].tapeMemory = 50;
-                tracks[t].tapeHeads = 1;
-                tracks[t].tapeSpread = 0;
-                tracks[t].tapeSpeed = 74;
-                tracks[t].tapeTether = 99;
-                tracks[t].tapeDrift = 10;
-                tracks[t].tapeDriftRate = 20;
-                tracks[t].tapeFeedback = 30;
-                tracks[t].tapeFbSpread = 10;
-                tracks[t].tapeFbSource = 0;
-                tracks[t].tapeFreeze = 0;
-                tracks[t].tapeSmearRate = 0;
-                tracks[t].tapeSmearSize = 40;
-                tracks[t].tapeMix = 0;
-                tracks[t].tapeFX.reset();
+        tracks[t].tapeHeads = 1;
+        tracks[t].tapeSpread = 0;
+        tracks[t].tapeSpeed = 74;
+        tracks[t].tapeTether = 99;
+        tracks[t].tapeDrift = 10;
+        tracks[t].tapeDriftRate = 20;
+        tracks[t].tapeFeedback = 30;
+        tracks[t].tapeFbSpread = 10;
+        tracks[t].tapeFbSource = 0;
+        tracks[t].tapeFreeze = 0;
+        tracks[t].tapeSmearRate = 0;
+        tracks[t].tapeSmearSize = 40;
+        tracks[t].tapeMix = 0;
+        tracks[t].tapeFX.reset();
         tracks[t].polyMode = 1;
 
         // Populate granular defaults
@@ -269,45 +285,45 @@ void InitializeTracks() {
         tracks[t].grainScatter = 10;
 
         tracks[t].filterCutoff = 80;
-                tracks[t].filterResonance = 20;
-                tracks[t].filterType = 0;
-                tracks[t].filterEnvDepth = 30;
-                tracks[t].filterAttack = 15;
-                tracks[t].filterDecay = 35;
-                tracks[t].filterSustain = 60;
-                tracks[t].filterRelease = 25;
-                tracks[t].lfo1Wave = 0;
-                tracks[t].lfo1Speed = 25;
-                tracks[t].lfo1Depth = 40;
-                tracks[t].lfo1Trigger = 0;
-                tracks[t].lfo1Sync = 0;
-                tracks[t].lfo1Dest = 0;
-                tracks[t].lfo2Wave = 1;
-                tracks[t].lfo2Speed = 30;
-                tracks[t].lfo2Depth = 20;
-                tracks[t].lfo2Trigger = 0;
-                tracks[t].lfo2Sync = 1;
-                tracks[t].lfo2Dest = 3;
+        tracks[t].filterResonance = 20;
+        tracks[t].filterType = 0;
+        tracks[t].filterEnvDepth = 30;
+        tracks[t].filterAttack = 15;
+        tracks[t].filterDecay = 35;
+        tracks[t].filterSustain = 60;
+        tracks[t].filterRelease = 25;
+        tracks[t].lfo1Wave = 0;
+        tracks[t].lfo1Speed = 25;
+        tracks[t].lfo1Depth = 40;
+        tracks[t].lfo1Trigger = 0;
+        tracks[t].lfo1Sync = 0;
+        tracks[t].lfo1Dest = 0;           // Kept temporarily for Step-Lock backwards compatibility
+        tracks[t].lfo2Wave = 1;
+        tracks[t].lfo2Speed = 30;
+        tracks[t].lfo2Depth = 20;
+        tracks[t].lfo2Trigger = 0;
+        tracks[t].lfo2Sync = 1;
+        tracks[t].lfo2Dest = 3;
 
-                // Initialize LFO Phase variables
-                tracks[t].lfo1Phase = 0.0f;
-                tracks[t].lfo2Phase = 0.0f;
-                tracks[t].lfo1LastVal = 0.0f;
-                tracks[t].lfo2LastVal = 0.0f;
+        // Initialize LFO Phase variables
+        tracks[t].lfo1Phase = 0.0f;
+        tracks[t].lfo2Phase = 0.0f;
+        tracks[t].lfo1LastVal = 0.0f;
+        tracks[t].lfo2LastVal = 0.0f;
 
-                // Initialize 3 routing slots per LFO to clean "None" states
-                for (int i = 0; i < 3; ++i) {
-                    tracks[t].lfo1Slots[i] = ModSlot{0, 0, 0, 0};
-                    tracks[t].lfo2Slots[i] = ModSlot{0, 0, 0, 0};
-                }
+        // Initialize 3 routing slots per LFO to clean "None" states
+        for (int i = 0; i < 3; ++i) {
+            tracks[t].lfo1Slots[i] = ModSlot{0, 0, 0, 0};
+            tracks[t].lfo2Slots[i] = ModSlot{0, 0, 0, 0};
+        }
 
-                // Set Slot 1 of LFO 1 to target local Cutoff with +40 depth by default
-                tracks[t].lfo1Slots[0] = ModSlot{1, t, DEST_CUTOFF, 40};
+        // Set Slot 1 of LFO 1 to target local Cutoff with +40 depth by default
+        tracks[t].lfo1Slots[0] = ModSlot{1, t, DEST_CUTOFF, 40};
 
-                // Set Slot 1 of LFO 2 to target local Morph 2 with +20 depth by default
-                tracks[t].lfo2Slots[0] = ModSlot{1, t, DEST_MORPH2, 20};
+        // Set Slot 1 of LFO 2 to target local Morph 2 with +20 depth by default
+        tracks[t].lfo2Slots[0] = ModSlot{1, t, DEST_MORPH2, 20};
 
-                tracks[t].saturationSend = 0;
+        tracks[t].saturationSend = 0;
         tracks[t].masterVolume = 99;
         tracks[t].autoPanSend = 0;
         tracks[t].muted = false;
@@ -320,94 +336,89 @@ void InitializeTracks() {
         }
     }
 
-    // --- PEAK CALCULATION HELPER LAMBDA ---
-        // Safely scales absolute peak values to a vertical drawing radius (0 to 11 pixels)
-        auto CalculatePeaks = [](int slotIdx) {
-            if (g_samplePool[slotIdx].pcmData.empty()) return;
-            
-            for (int i = 0; i < 97; ++i) {
-                size_t startFrame = (i * g_samplePool[slotIdx].pcmData.size()) / 97;
-                size_t endFrame = ((i + 1) * g_samplePool[slotIdx].pcmData.size()) / 97;
-                if (endFrame > g_samplePool[slotIdx].pcmData.size()) endFrame = g_samplePool[slotIdx].pcmData.size();
-                if (startFrame >= endFrame) startFrame = (endFrame > 0) ? (endFrame - 1) : 0;
+    // --- PEAK CALCULATION HELPER ---
+    auto CalculatePeaks = [](int slotIdx) {
+        if (g_samplePool[slotIdx].pcmData.empty()) return;
+        
+        for (int i = 0; i < 97; ++i) {
+            size_t startFrame = (i * g_samplePool[slotIdx].pcmData.size()) / 97;
+            size_t endFrame = ((i + 1) * g_samplePool[slotIdx].pcmData.size()) / 97;
+            if (endFrame > g_samplePool[slotIdx].pcmData.size()) endFrame = g_samplePool[slotIdx].pcmData.size();
+            if (startFrame >= endFrame) startFrame = (endFrame > 0) ? (endFrame - 1) : 0;
 
-                int16_t peak = 0;
-                for (size_t f = startFrame; f < endFrame; ++f) {
-                    int16_t absVal = std::abs(g_samplePool[slotIdx].pcmData[f]);
-                    if (absVal > peak) peak = absVal;
-                }
-                g_samplePool[slotIdx].visualPeaks[i] = (uint8_t)((peak / 32768.0f) * 11.0f);
+            int16_t peak = 0;
+            for (size_t f = startFrame; f < endFrame; ++f) {
+                int16_t absVal = std::abs(g_samplePool[slotIdx].pcmData[f]);
+                if (absVal > peak) peak = absVal;
             }
-        };
-
-        // --- SLOT 0: DEFAULT SYNTHETIC PLUCK (DFL_PLK) ---
-        g_samplePool[0].name = "DFL_PLK";
-        g_samplePool[0].pcmData.resize(32000); // 1 second of audio at 32000Hz
-        for (int i = 0; i < 32000; ++i) {
-            float t = (float)i / 32000.0f;
-            float sample = sinf(2.0f * 3.14159265f * 440.0f * t);
-            float envelope = expf(-6.0f * t);
-            sample *= envelope;
-            g_samplePool[0].pcmData[i] = (int16_t)(sample * 32767.0f);
+            g_samplePool[slotIdx].visualPeaks[i] = (uint8_t)((peak / 32768.0f) * 11.0f);
         }
-        CalculatePeaks(0);
+    };
 
-        // --- SLOT 1: ANALOG KICK DRUM (FAC_KIK) ---
-        g_samplePool[1].name = "FAC_KIK";
-        g_samplePool[1].pcmData.resize(9600); // 0.3 seconds at 32000Hz
-        float kickPhase = 0.0f;
-        for (int i = 0; i < 9600; ++i) {
-            float t = (float)i / 32000.0f;
-            // Pitch sweep from 150Hz rapidly down to 48Hz
-            float freq = 48.0f + 102.0f * expf(-45.0f * t);
-            kickPhase += 2.0f * 3.14159265f * freq / 32000.0f;
-            if (kickPhase > 2.0f * 3.14159265f) kickPhase -= 2.0f * 3.14159265f;
-            
-            float envelope = expf(-12.0f * t);
-            float sample = sinf(kickPhase) * envelope;
-            g_samplePool[1].pcmData[i] = (int16_t)(sample * 32767.0f);
-        }
-        CalculatePeaks(1);
-
-        // --- SLOT 2: SNAPPY SNARE DRUM (FAC_SNR) ---
-        g_samplePool[2].name = "FAC_SNR";
-        g_samplePool[2].pcmData.resize(8000); // 0.25 seconds at 32000Hz
-        uint32_t snrSeed = 0x12345678u;
-        for (int i = 0; i < 8000; ++i) {
-            float t = (float)i / 32000.0f;
-            // Fast, deterministic pseudo-random noise generator
-            snrSeed = snrSeed * 1103515245u + 12345u;
-            float noise = ((float)(snrSeed / 65536 % 32768) / 16384.0f) - 1.0f;
-
-            // Snare is composed of a drum skin body (~180Hz) and rattling wire noise
-            float body = sinf(2.0f * 3.14159265f * 180.0f * t) * expf(-40.0f * t);
-            float rattle = noise * expf(-15.0f * t);
-            float sample = (body * 0.4f + rattle * 0.6f);
-            
-            g_samplePool[2].pcmData[i] = (int16_t)(sample * 32767.0f);
-        }
-        CalculatePeaks(2);
-
-        // --- SLOT 3: CRISP HIGH-PASSED HI-HAT (FAC_HAT) ---
-        g_samplePool[3].name = "FAC_HAT";
-        g_samplePool[3].pcmData.resize(4000); // 0.125 seconds at 32000Hz
-        uint32_t hatSeed = 0x87654321u;
-        float hpState = 0.0f;
-        for (int i = 0; i < 4000; ++i) {
-            float t = (float)i / 32000.0f;
-            hatSeed = hatSeed * 1103515245u + 12345u;
-            float noise = ((float)(hatSeed / 65536 % 32768) / 16384.0f) - 1.0f;
-
-            // Apply a 1-pole high pass filter in the loop to strip out low-end rumble and isolate sizzle
-            float hpOut = noise - hpState;
-            hpState = hpState + 0.35f * hpOut;
-
-            float envelope = expf(-25.0f * t);
-            float sample = hpOut * envelope * 0.8f;
-            g_samplePool[3].pcmData[i] = (int16_t)(sample * 32767.0f);
-        }
-        CalculatePeaks(3);
+    // --- SLOT 0: DEFAULT SYNTHETIC PLUCK (DFL_PLK) ---
+    g_samplePool[0].name = "DFL_PLK";
+    g_samplePool[0].pcmData.resize(32000); // 1 second of audio at 32000Hz
+    for (int i = 0; i < 32000; ++i) {
+        float t = (float)i / 32000.0f;
+        float sample = sinf(2.0f * 3.14159265f * 440.0f * t);
+        float envelope = expf(-6.0f * t);
+        sample *= envelope;
+        g_samplePool[0].pcmData[i] = (int16_t)(sample * 32767.0f);
     }
+    CalculatePeaks(0);
+
+    // --- SLOT 1: ANALOG KICK DRUM (FAC_KIK) ---
+    g_samplePool[1].name = "FAC_KIK";
+    g_samplePool[1].pcmData.resize(9600); // 0.3 seconds at 32000Hz
+    float kickPhase = 0.0f;
+    for (int i = 0; i < 9600; ++i) {
+        float t = (float)i / 32000.0f;
+        float freq = 48.0f + 102.0f * expf(-45.0f * t);
+        kickPhase += 2.0f * 3.14159265f * freq / 32000.0f;
+        if (kickPhase > 2.0f * 3.14159265f) kickPhase -= 2.0f * 3.14159265f;
+        
+        float envelope = expf(-12.0f * t);
+        float sample = sinf(kickPhase) * envelope;
+        g_samplePool[1].pcmData[i] = (int16_t)(sample * 32767.0f);
+    }
+    CalculatePeaks(1);
+
+    // --- SLOT 2: SNAPPY SNARE DRUM (FAC_SNR) ---
+    g_samplePool[2].name = "FAC_SNR";
+    g_samplePool[2].pcmData.resize(8000); // 0.25 seconds at 32000Hz
+    uint32_t snrSeed = 0x12345678u;
+    for (int i = 0; i < 8000; ++i) {
+        float t = (float)i / 32000.0f;
+        snrSeed = snrSeed * 1103515245u + 12345u;
+        float noise = ((float)(snrSeed / 65536 % 32768) / 16384.0f) - 1.0f;
+
+        float body = sinf(2.0f * 3.14159265f * 180.0f * t) * expf(-40.0f * t);
+        float rattle = noise * expf(-15.0f * t);
+        float sample = (body * 0.4f + rattle * 0.6f);
+        
+        g_samplePool[2].pcmData[i] = (int16_t)(sample * 32767.0f);
+    }
+    CalculatePeaks(2);
+
+    // --- SLOT 3: CRISP HIGH-PASSED HI-HAT (FAC_HAT) ---
+    g_samplePool[3].name = "FAC_HAT";
+    g_samplePool[3].pcmData.resize(4000); // 0.125 seconds at 32000Hz
+    uint32_t hatSeed = 0x87654321u;
+    float hpState = 0.0f;
+    for (int i = 0; i < 4000; ++i) {
+        float t = (float)i / 32000.0f;
+        hatSeed = hatSeed * 1103515245u + 12345u;
+        float noise = ((float)(hatSeed / 65536 % 32768) / 16384.0f) - 1.0f;
+
+        float hpOut = noise - hpState;
+        hpState = hpState + 0.35f * hpOut;
+
+        float envelope = expf(-25.0f * t);
+        float sample = hpOut * envelope * 0.8f;
+        g_samplePool[3].pcmData[i] = (int16_t)(sample * 32767.0f);
+    }
+    CalculatePeaks(3);
+}
 
 int NoteToMidi(const std::string& noteStr) {
     if (noteStr.empty()) return -1;
@@ -453,10 +464,18 @@ void ResetTrackToDefault(int t) {
     }
 
     // Reset step parameters lock overrides
-    for (int s = 0; s < 16; ++s) {
-        tracks[t].steps[s].params.reset();
-        tracks[t].steps[s].microtiming = 0;
-    }
+        for (int s = 0; s < 16; ++s) {
+            tracks[t].steps[s].params.reset();
+            tracks[t].steps[s].microtiming = 0;
+
+            // Reset step-based popup defaults
+                    tracks[t].steps[s].condMask = 0x0101;
+                    tracks[t].steps[s].noteLength = 0;
+                    tracks[t].steps[s].chordType = 0;
+            tracks[t].steps[s].chordNotes[0] = "";
+            tracks[t].steps[s].chordNotes[1] = "";
+            tracks[t].steps[s].chordNotes[2] = "";
+        }
 
     tracks[t].sampleSlot = 0;
     tracks[t].morph = 0;
@@ -776,13 +795,21 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
         file << trk.polyMode << "\n";
 
         // Save 16 steps
-        for (int s = 0; s < 32; ++s) {
-            const Step& step = trk.steps[s];
-            file << (step.note.empty() ? "-" : step.note) << "\n";
-            file << step.velocity << "\n";
-            file << (step.condition.empty() ? "-" : step.condition) << "\n";
-            file << step.retrigger << "\n";
-            file << step.microtiming << "\n"; // Save microtiming
+                for (int s = 0; s < 32; ++s) {
+                    const Step& step = trk.steps[s];
+                    file << (step.note.empty() ? "-" : step.note) << "\n";
+                    file << step.velocity << "\n";
+                    file << (step.condition.empty() ? "-" : step.condition) << "\n";
+                    file << step.retrigger << "\n";
+                    file << step.microtiming << "\n"; // Save microtiming
+
+                    // Popup details
+                    file << step.condMask << "\n";
+                    file << step.noteLength << "\n";
+                    file << step.chordType << "\n";
+                    file << (step.chordNotes[0].empty() ? "-" : step.chordNotes[0]) << "\n";
+                    file << (step.chordNotes[1].empty() ? "-" : step.chordNotes[1]) << "\n";
+                    file << (step.chordNotes[2].empty() ? "-" : step.chordNotes[2]) << "\n";
 
             // Step overrides
             const StepParams& sp = step.params;
@@ -865,12 +892,33 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
         file >> trk.polyMode;
 
         for (int s = 0; s < 32; ++s) {
-            Step& step = trk.steps[s];
-            file >> step.note; if (step.note == "-") step.note = "";
-            file >> step.velocity;
-            file >> step.condition; if (step.condition == "-") step.condition = "";
-            file >> step.retrigger;
-            file >> step.microtiming; // Load microtiming
+                    Step& step = trk.steps[s];
+                    file >> step.note; if (step.note == "-") step.note = "";
+                    file >> step.velocity;
+            file >> step.condition; step.condition = ""; // Force clean legacy text triggers
+                    file >> step.retrigger;
+                    file >> step.microtiming; // Load microtiming
+
+                    std::string tempMask, tempLen, tempChord;
+                    if (file >> tempMask >> tempLen >> tempChord) {
+                        step.condMask = (uint16_t)std::stoul(tempMask);
+                        step.noteLength = std::stoi(tempLen);
+                        step.chordType = std::stoi(tempChord);
+
+                        std::string n0, n1, n2;
+                        file >> n0 >> n1 >> n2;
+                        step.chordNotes[0] = (n0 == "-") ? "" : n0;
+                        step.chordNotes[1] = (n1 == "-") ? "" : n1;
+                        step.chordNotes[2] = (n2 == "-") ? "" : n2;
+                    } else {
+                        file.clear(); // Flush EOF errors
+                        step.condMask = 0xFFFF;
+                        step.noteLength = 0;
+                        step.chordType = 0;
+                        step.chordNotes[0] = "";
+                        step.chordNotes[1] = "";
+                        step.chordNotes[2] = "";
+                    }
 
             StepParams& sp = step.params;
             file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;
@@ -999,6 +1047,14 @@ bool SaveProject(int slot, const std::string& filename) {
                 file << (step.condition.empty() ? "-" : step.condition) << "\n";
                 file << step.retrigger << "\n";
                 file << step.microtiming << "\n"; // Save microtiming
+                
+                // Popup details
+                           file << step.condMask << "\n";
+                           file << step.noteLength << "\n";
+                           file << step.chordType << "\n";
+                           file << (step.chordNotes[0].empty() ? "-" : step.chordNotes[0]) << "\n";
+                           file << (step.chordNotes[1].empty() ? "-" : step.chordNotes[1]) << "\n";
+                           file << (step.chordNotes[2].empty() ? "-" : step.chordNotes[2]) << "\n";
 
                 const StepParams& sp = step.params;
                 file << sp.morph << "\n" << sp.coarse << "\n" << sp.fine << "\n" << sp.volume << "\n";
@@ -1104,9 +1160,30 @@ bool LoadProject(const std::string& filename) {
                 Step& step = trk.steps[s];
                 file >> step.note; if (step.note == "-") step.note = "";
                 file >> step.velocity;
-                file >> step.condition; if (step.condition == "-") step.condition = "";
+                file >> step.condition; step.condition = ""; // Force clean legacy text triggers
                 file >> step.retrigger;
                 file >> step.microtiming; // Load microtiming
+                
+                std::string tempMask, tempLen, tempChord;
+                           if (file >> tempMask >> tempLen >> tempChord) {
+                               step.condMask = (uint16_t)std::stoul(tempMask);
+                               step.noteLength = std::stoi(tempLen);
+                               step.chordType = std::stoi(tempChord);
+
+                               std::string n0, n1, n2;
+                               file >> n0 >> n1 >> n2;
+                               step.chordNotes[0] = (n0 == "-") ? "" : n0;
+                               step.chordNotes[1] = (n1 == "-") ? "" : n1;
+                               step.chordNotes[2] = (n2 == "-") ? "" : n2;
+                           } else {
+                               file.clear(); // Flush EOF errors
+                               step.condMask = 0xFFFF;
+                               step.noteLength = 0;
+                               step.chordType = 0;
+                               step.chordNotes[0] = "";
+                               step.chordNotes[1] = "";
+                               step.chordNotes[2] = "";
+                           }
 
                 StepParams& sp = step.params;
                 file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;

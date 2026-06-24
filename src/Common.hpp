@@ -18,8 +18,6 @@ constexpr int WINDOW_HEIGHT = OLED_HEIGHT * SCALE_FACTOR;
 enum Screen {
     SCREEN_SEQ_1_4,     // 1a: Tracks 1-4 Notes (Page 1)
     SCREEN_SEQ_5_8,     // 1b: Tracks 5-8 Notes (Page 1)
-    SCREEN_TRIG_1_4,    // Retriggers & Conditions 1-4 (Toggled via Z from Page 1)
-    SCREEN_TRIG_5_8,    // Retriggers & Conditions 5-8 (Toggled via Z from Page 1)
     SCREEN_SYNTH,       // Synth / Sampler Engine (Page 2)
     SCREEN_TRACK_PARAMS,// Filter / LFO / FX Sends Page (Page 3)
     SCREEN_PLACEHOLDER, // Dynamic Per-Track Placeholder Page (Page 4)
@@ -293,7 +291,6 @@ struct StepParams {
     }
 };
 
-// --- SEQUENCER STEP STRUCT ---
 struct Step {
     std::string note = "";
     int velocity = 0;           // 0 to 3
@@ -303,6 +300,12 @@ struct Step {
     int retrigger = 0;          // retrigger count (0 to 16)
     int microtiming = 0;        // Microtiming offset (-6 to +6 ticks)
     StepParams params;          // Per-step parameter locks
+
+    // --- Step Properties Popup fields ---
+    uint16_t condMask = 0xFFFF; // Custom loop bars condition bitmask (plays on all loops by default)
+    int noteLength = 0;         // Gate hold duration (0 = AUTO, 1 to 16 steps)
+    int chordType = 0;          // Chord formula (0 = NONE, 1 = MAJOR, etc.)
+    std::string chordNotes[3] = {"", "", ""}; // Recorded custom chord notes
 };
 
 // --- SEQUENCER TRACK STRUCT ---
