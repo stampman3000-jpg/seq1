@@ -9,7 +9,7 @@ constexpr int MAX_GLOBAL_GRAINS = 128;
 // Representing a single active playing grain inside the granular engine
 struct Grain {
     uint32_t startSample = 0;
-    uint32_t currentOffset = 0;
+    float currentOffset = 0.0f;     // CHANGED: From uint32_t to float to prevent pitch truncation
     uint32_t durationSamples = 0;
     float playbackSpeed = 1.0f;
     bool active = false;

@@ -409,11 +409,11 @@ float SamplerVoice::ProcessGranular(const Track& trk, const StepParams& sp) {
     if (sampleBuffer == nullptr || sampleLengthSamples == 0) return 0.0f;
 
     // 1. Process continuous grain-spawning rate using pre-cached interval
-        samplesSinceLastGrain++;
-        if (samplesSinceLastGrain >= cachedSpawnIntervalSamples) {
-            samplesSinceLastGrain = 0;
-            SpawnGrain(trk, sp);
-        }
+    samplesSinceLastGrain++;
+    if (samplesSinceLastGrain >= cachedSpawnIntervalSamples) {
+        samplesSinceLastGrain = 0;
+        SpawnGrain(trk, sp);
+    }
 
     // 2. Process and sum all active grains
     float sumGrains = 0.0f;
@@ -422,25 +422,45 @@ float SamplerVoice::ProcessGranular(const Track& trk, const StepParams& sp) {
     for (int i = 0; i < MAX_GRAINS; ++i) {
         Grain& g = grainPool[i];
         if (g.active) {
-            // Read forward or backward safely depending on active playhead direction
-            int32_t currentIdx = (g.playbackSpeed < 0.0f) ?
-                ((int32_t)g.startSample - (int32_t)g.currentOffset) :
-                ((int32_t)g.startSample + (int32_t)g.currentOffset);
+            // Calculate the exact floating-point read position
+            float readPos = (g.playbackSpeed < 0.0f) ?
+                ((float)g.startSample - g.currentOffset) :
+                ((float)g.startSample + g.currentOffset);
 
-            // Bounds protect inside the sample
-            if (currentIdx < 0) currentIdx = 0;
-            if (currentIdx >= (int32_t)sampleLengthSamples) currentIdx = sampleLengthSamples - 1;
+            // Safe boundary clamping: we clamp up to (length - 1.0001f)
+            // to make sure our index+1 offset remains within legal memory limits.
+            float maxLimit = (float)sampleLengthSamples - 1.0001f;
+            if (maxLimit < 0.0f) maxLimit = 0.0f;
+            if (readPos < 0.0f) readPos = 0.0f;
+            if (readPos > maxLimit) readPos = maxLimit;
 
-            float sample = sampleBuffer[currentIdx] / 32768.0f;
+            // Determine floor index and fractional remainder
+            int32_t idx0 = (int32_t)readPos;
+            int32_t idx1 = idx0 + 1;
+            float frac = readPos - (float)idx0;
+
+            // Defensive safety check
+            if (idx1 >= (int32_t)sampleLengthSamples) {
+                idx1 = sampleLengthSamples - 1;
+            }
+
+            // Read the two closest samples
+            float sample0 = sampleBuffer[idx0] / 32768.0f;
+            float sample1 = sampleBuffer[idx1] / 32768.0f;
+
+            // Perform a smooth linear interpolation between the two points
+            float sample = sample0 + frac * (sample1 - sample0);
 
             // Scale by parabolic window (highly efficient approximation of sine)
-                                float progress = (float)g.currentOffset / g.durationSamples;
-                                float window = 4.0f * progress * (1.0f - progress);
+            float progress = g.currentOffset / (float)g.durationSamples;
+            float window = 4.0f * progress * (1.0f - progress);
 
             sumGrains += sample * window;
 
-            g.currentOffset += (uint32_t)std::abs(g.playbackSpeed);
-            if (g.currentOffset >= g.durationSamples) {
+            // CHANGED: Increment offset using float addition (no longer truncating to uint32_t)
+            g.currentOffset += std::abs(g.playbackSpeed);
+            
+            if (g.currentOffset >= (float)g.durationSamples) {
                 g.active = false; // Grain finished
                 g_globalActiveGrains--; // Decrement global count
             }
@@ -449,7 +469,7 @@ float SamplerVoice::ProcessGranular(const Track& trk, const StepParams& sp) {
     }
 
     // Normalize overlapping grains using Root-Mean-Square scaling to maintain stable volume
-    return activeGrainsCount > 0 ? sumGrains / sqrtf(activeGrainsCount) : 0.0f;
+    return activeGrainsCount > 0 ? sumGrains / sqrtf((float)activeGrainsCount) : 0.0f;
 }
 
 void SamplerVoice::SpawnGrain(const Track& trk, const StepParams& sp) {
@@ -522,7 +542,7 @@ void SamplerVoice::SpawnGrain(const Track& trk, const StepParams& sp) {
 
             g.playbackSpeed = reverse ? -speedFactor : speedFactor;
             g.startSample = baseStart;
-            g.currentOffset = 0;
+            g.currentOffset = 0.0f;
             g.active = true;
             g_globalActiveGrains++; // Increment global budget
             break;
