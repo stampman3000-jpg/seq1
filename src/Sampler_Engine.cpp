@@ -171,8 +171,13 @@ float SamplerVoice::Process(int trackIdx) {
     } else {
         smoothVol += (targetVol - smoothVol) * 0.005f;
     }
-
-    // Process Pitch Decay Sweep
+    // Slew cutoff parameter per-sample to eliminate block-rate zipper noise and step-lock clicks
+        float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
+        if (smoothCutoff < 0.0f) {
+            smoothCutoff = targetCutoff;
+        } else {
+            smoothCutoff += (targetCutoff - smoothCutoff) * 0.004f; // Smooth 5-10ms slew
+        }    // Process Pitch Decay Sweep
     if (pitchModFactor > 1.0f) {
         pitchModFactor = 1.0f + (pitchModFactor - 1.0f) * pitchDecayRate;
     } else {
@@ -299,13 +304,6 @@ float SamplerVoice::Process(int trackIdx) {
                     else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f;
                 }
             }
-        }
-
-        float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
-        if (smoothCutoff < 0.0f) {
-            smoothCutoff = targetCutoff;
-        } else {
-            smoothCutoff += (targetCutoff - smoothCutoff) * 0.1f;
         }
 
         // Modulate the normalized control position (0.0 to 1.0) logarithmically before mapping to Hz

@@ -406,7 +406,14 @@ struct SynthVoice {
             smoothVol1 += (targetVol1 - smoothVol1) * 0.005f;
             smoothVol2 += (targetVol2 - smoothVol2) * 0.005f;
         }
-
+        // Slew cutoff parameter per-sample to eliminate block-rate zipper noise and step-lock clicks
+                float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
+                if (smoothCutoff < 0.0f) {
+                    smoothCutoff = targetCutoff;
+                } else {
+                    smoothCutoff += (targetCutoff - smoothCutoff) * 0.004f; // Smooth 5-10ms slew
+                }
+        
         // --- 1. PROCESS ENVELOPE 1 (Carrier) ---
                 switch (stage1) {
                     case ENV1_ATTACK:  envLevel1 += envAtkRate1; if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; } break;
@@ -542,13 +549,6 @@ struct SynthVoice {
                         else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
                     }
                 }
-            }
-
-            float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
-            if (smoothCutoff < 0.0f) {
-                smoothCutoff = targetCutoff;
-            } else {
-                smoothCutoff += (targetCutoff - smoothCutoff) * 0.1f;
             }
 
             // Modulate the normalized control position (0.0 to 1.0) logarithmically before mapping to Hz
