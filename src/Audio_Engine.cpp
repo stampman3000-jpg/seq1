@@ -945,26 +945,23 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
             }
 
             // Advance track local clocks if a master clock tick occurred
-            if (tickTriggered) {
-                for (int t = 0; t < 8; ++t) {
-                    int nextTick = (tracks[t].localTick + 1) % (tracks[t].stepLength * 6);
-                    
-                    // If the track clock completes a full loop, increment its bar counter
-                    if (nextTick == 0 && tracks[t].localTick >= 0) {
-                        g_trackBarCount[t]++;
-                    }
-                    
-                    tracks[t].localTick = nextTick;
-                }
+                        if (tickTriggered) {
+                            for (int t = 0; t < 8; ++t) {
+                                int nextTick = (tracks[t].localTick + 1) % (tracks[t].stepLength * 6);
+                                
+                                // If the track clock completes a full loop, increment its bar counter
+                                if (nextTick == 0 && tracks[t].localTick >= 0) {
+                                    g_trackBarCount[t]++;
+                                }
+                                
+                                tracks[t].localTick = nextTick;
+                            }
 
-                // Handle bar increments, pattern swaps, and master loop alignments
-                if (g_currentTick == 0) {
-                    for (int t = 0; t < 8; ++t) {
-                        g_trackBarCount[t]++;
-                    }
-
-                    // Quantized downbeat pattern swapper
-                    if (queuedPattern != -1) {
+                            // Handle bar increments, pattern swaps, and master loop alignments
+                            if (g_currentTick == 0) {
+                                
+                                // Quantized downbeat pattern swapper
+                                if (queuedPattern != -1) {
                         SwitchPattern(queuedPattern);
                         queuedPattern = -1; 
                         
