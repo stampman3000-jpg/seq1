@@ -556,7 +556,11 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
 static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, bool isShiftDown, float frameTime) {
     static float keyRepeatTimer = 0.0f;
     bool triggerAction = false;
-    bool anyEditKeyDown = IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
+    
+    // Require either Left or Right Shift to be held for arrow-key parameter editing
+    bool keyboardModifierHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    bool anyEditKeyDown = keyboardModifierHeld &&
+                          (IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT));
 
     if (anyEditKeyDown) {
         if (keyRepeatTimer == 0.0f) {
