@@ -957,11 +957,13 @@ int main() {
         }
 
         // --- DIAGNOSTICS KEYBOARD INTERCEPT ---
-        if (showDiagnostics) {
-            if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
-                showDiagnostics = false;
-                menuFeedback = "DIAGNOSTICS CLOSED";
-            }
+        // --- DIAGNOSTICS KEYBOARD INTERCEPT ---
+                if (showDiagnostics) {
+                    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+                        showDiagnostics = false;
+                        menuFeedback = "DIAGNOSTICS CLOSED";
+                    }
+                    // (The Ctrl + Shift + 9 close check is now cleanly handled by the unified toggle above)
             if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
                 showDiagnostics = false;
                 menuFeedback = "DIAGNOSTICS CLOSED";
@@ -1413,7 +1415,15 @@ int main() {
                 }
             }
         }
-
+        
+        
+        // Ctrl + Shift + 9 (or Cmd + Shift + 9) to toggle the Diagnostics screen
+                if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
+                    showDiagnostics = !showDiagnostics;
+                    menuFeedback = showDiagnostics ? "DIAGNOSTICS OPEN" : "DIAGNOSTICS CLOSED";
+                }
+        
+        
         // Shift + Navigations
         if (isShiftDown && !isCtrlDown) {
             bool triggerAction = false;
