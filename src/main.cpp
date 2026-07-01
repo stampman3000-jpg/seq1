@@ -930,7 +930,7 @@ int main() {
         g_hardwareEncoderClicked = false;
         #endif
 
-        bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) || (encoderTurn != 0);
+        bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         bool isAltDown = IsKeyDown(KEY_X);
         bool isAltHeld = IsKeyDown(KEY_X);
         
