@@ -360,40 +360,61 @@ float SamplerVoice::Process(int trackIdx) {
 float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
     if (sampleBuffer == nullptr || sampleLengthSamples == 0) return 0.0f;
 
-    // Linear mapping from 0..99 parameters to samples (Modulated by LFO)
-        float rawStartVal = GetParam(sp.sampleStart, trk.sampleStart) + modSampStartOffset;
-        float clampedStartVal = std::clamp(rawStartVal, 0.0f, 99.0f);
-        uint32_t startIdx = (uint32_t)((clampedStartVal / 99.0f) * sampleLengthSamples);
+    // 1. Calculate startIdx using SS
+    float rawStartVal = GetParam(sp.sampleStart, trk.sampleStart) + modSampStartOffset;
+    float clampedStartVal = std::clamp(rawStartVal, 0.0f, 99.0f);
+    uint32_t startIdx = (uint32_t)((clampedStartVal / 99.0f) * sampleLengthSamples);
+
+    // 2. Calculate endIdx using Length (SE)
     uint32_t lengthVal = (uint32_t)((GetParam(sp.sampleLength, trk.sampleLength) / 99.0f) * sampleLengthSamples);
     uint32_t endIdx = startIdx + lengthVal;
     if (endIdx > sampleLengthSamples) endIdx = sampleLengthSamples;
 
-    // Pitch speed factor modulated dynamically by envelope, keyboard tracking, and LFO modulation
+    // 3. Define the active range window
+    uint32_t totalRange = endIdx - startIdx;
+
+    // Pitch speed factor calculations...
     float baseSpeed = 32000.0f / 44100.0f;
     float semitoneOffset = notePitchOffset + GetParam(sp.sampleTune, trk.sampleTune) + (GetParam(sp.fine2, trk.fine2) / 100.0f) + modPitchOffset;
     float playbackSpeed = baseSpeed * pitchModFactor * powf(2.0f, semitoneOffset / 12.0f);
 
-    // Apply Slice Divisions if enabled
     int sdiv = trk.sliceDivisions;
     if (sdiv < 1) sdiv = 1;
-    uint32_t totalRange = endIdx - startIdx;
-    uint32_t sliceWidth = totalRange / sdiv;
-    
-    // Choose active slice based on modulated position/start offset
-    int activeSlice = std::clamp((int)(GetParam(sp.grainPosition, trk.grainPosition) + modMorphOffset), 0, 99) % sdiv;
-    uint32_t sliceStart = startIdx + activeSlice * sliceWidth;
-    uint32_t sliceEnd = sliceStart + sliceWidth;
+
+    uint32_t sliceStart = startIdx;
+    uint32_t activeRangeWidth = totalRange;
+
+    // --- GRACEFUL SEPARATION OF SINGLE-SAMPLE vs SLICED SAMPLES ---
+    if (sdiv == 1) {
+        // Continuous Playback: POS behaves as a smooth playhead scrub/offset *inside* your SS and SE bounds!
+        float normPos = std::clamp((float)(GetParam(sp.grainPosition, trk.grainPosition) + modMorphOffset), 0.0f, 99.0f) / 99.0f;
+        uint32_t posOffset = (uint32_t)(normPos * totalRange);
+        
+        sliceStart = startIdx + posOffset;
+        activeRangeWidth = totalRange - posOffset; // Dynamic remaining space for bounds check
+    }
+    else {
+        // Slice Mode (sdiv > 1): Exactly matches your original, loved slicing math!
+        uint32_t sliceWidth = totalRange / sdiv;
+        int activeSlice = std::clamp((int)(GetParam(sp.grainPosition, trk.grainPosition) + modMorphOffset), 0, 99) % sdiv;
+        
+        sliceStart = startIdx + activeSlice * sliceWidth;
+        activeRangeWidth = sliceWidth;
+    }
 
     // --- LOOP END FUNCTIONALITY (LE) ---
-    // Read Loop Start & Loop End parameters (0..99) scaled to the active slice width
-    uint32_t loopStartOffset = (uint32_t)((GetParam(sp.loopStart, trk.loopStart) / 99.0f) * sliceWidth);
-    uint32_t loopEndOffset = (uint32_t)((GetParam(sp.loopEnd, trk.loopEnd) / 99.0f) * sliceWidth);
+    // Loops are now cleanly scaled relative to either the active slice width or the remaining single-sample width
+    uint32_t loopStartOffset = (uint32_t)((GetParam(sp.loopStart, trk.loopStart) / 99.0f) * activeRangeWidth);
+    uint32_t loopEndOffset = (uint32_t)((GetParam(sp.loopEnd, trk.loopEnd) / 99.0f) * activeRangeWidth);
     
-    if (loopEndOffset <= loopStartOffset) loopEndOffset = sliceWidth;
+    if (loopEndOffset <= loopStartOffset) loopEndOffset = activeRangeWidth;
 
     uint32_t boundaryStart = sliceStart;
     uint32_t boundaryEnd = sliceStart + loopEndOffset;
-    if (boundaryEnd > sliceEnd) boundaryEnd = sliceEnd;
+    
+    // Safety guard boundary clamps
+    uint32_t absoluteSliceEnd = sliceStart + activeRangeWidth;
+    if (boundaryEnd > absoluteSliceEnd) boundaryEnd = absoluteSliceEnd;
 
     // Interpolate playhead index
     uint32_t currentFrame = boundaryStart + (uint32_t)playheadPosition;
@@ -408,7 +429,7 @@ float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
     // Wrap loop boundary if LP mode is active
     if (boundaryStart + playheadPosition >= boundaryEnd) {
         if (GetParam(sp.sampleLoop, trk.sampleLoop) == 1) {
-            playheadPosition = (float)loopStartOffset; // Loop exactly back to LS
+            playheadPosition = (float)loopStartOffset;
         } else {
             active = false;
             stage = ENV_IDLE;

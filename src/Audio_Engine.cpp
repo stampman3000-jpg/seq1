@@ -761,6 +761,8 @@ static bool EvaluateCondition(const std::string& cond, int trackIdx) {
 void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     auto startTime = std::chrono::high_resolution_clock::now(); // Record start time
     float* pOutputF = (float*)pOutput;
+    // ADD THIS LINE: Keeps track of where we are in the main buffer
+        ma_uint32 samplesProcessed = 0;
 
     // --- ADD THESE BLOCK-RATE PARAMETER ARRAYS ---
     static int s_finalMem[8]  = {50};
@@ -799,16 +801,12 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
         lastPlayingState = isPlaying;
     }
 
-    for (ma_uint32 i = 0; i < frameCount; ++i) {
-        float mixedSample = 0.0f;
+    while (samplesProcessed < frameCount) {
+           ma_uint32 chunkSize = (frameCount - samplesProcessed < 64) ? (frameCount - samplesProcessed) : 64;
 
-        // Block-rate generator interval trigger (every 64 samples)
-                static uint32_t lfoBlockCounter = 9999; // Force update on first sample
-                lfoBlockCounter++;
-                if (lfoBlockCounter >= 64) {
-                    lfoBlockCounter = 0;
-                    UpdateGlobalLFOs();
-
+        // 1. RUN CHUNK-RATE CALCULATIONS (These execute once per 64 samples)
+                UpdateGlobalLFOs();
+        
                     // Calculate tape parameters once per 64-sample block for all 8 tracks
                     for (int t = 0; t < 8; ++t) {
                         const Track& trk = tracks[t];
@@ -896,7 +894,11 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                         s_finalSms[t]  = std::clamp((int)(GetParam(step.params.tapeSmearSize,  tracks[t].tapeSmearSize) + modTapeSms), 0, 99);
                         s_finalMix[t]  = std::clamp((int)(GetParam(step.params.tapeMix,        tracks[t].tapeMix)       + modTapeMix), 0, 99);
                     }
-                }
+        // 2. NEW INNER SAMPLE LOOP (Processes the 64-sample chunk)
+               for (ma_uint32 i = 0; i < chunkSize; ++i) {
+                   ma_uint32 outIdx = samplesProcessed + i; // Calculated absolute index
+                   float mixedSample = 0.0f;
+        
 
         // Check for external MIDI Start/Stop triggers inside the sample block
         if (g_externalMidiStartTriggered) {
@@ -1339,21 +1341,33 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
         panWetR *= globalPanMix;
 
         // 5. Interleave Left and Right channels into the Stereo Hardware Output Buffer
-        pOutputF[2 * i]     = masterL + reverbWetL + delayWetL + satWetL + panWetL; // Left
-        pOutputF[2 * i + 1] = masterR + reverbWetR + delayWetR + satWetR + panWetR; // Right
-    }
+                pOutputF[2 * outIdx]     = masterL + reverbWetL + delayWetL + satWetL + panWetL; // Left
+                pOutputF[2 * outIdx + 1] = masterR + reverbWetR + delayWetR + satWetR + panWetR; // Right
 
-    // Calculate real-time CPU thread load
-    auto endTime = std::chrono::high_resolution_clock::now();
-    double elapsedSec = std::chrono::duration<double>(endTime - startTime).count();
-    double expectedSec = (double)frameCount / g_sampleRate;
-    float instantCpu = (float)((elapsedSec / expectedSec) * 100.0);
-    if (instantCpu > 100.0f) instantCpu = 100.0f; // Limit clamp to 100%
+            } // 1st BRACE: Closes the inner loop -> for (ma_uint32 i = 0; i < chunkSize; ++i)
 
-    static float s_smoothedCpu = 0.0f;
-    s_smoothedCpu += 0.05f * (instantCpu - s_smoothedCpu); // Leaky integrator smoothing
-    g_audioCpuLoad = s_smoothedCpu;
-}
+            // Advance the offset
+            samplesProcessed += chunkSize;
+
+        } // 2nd BRACE: Closes the outer loop -> while (samplesProcessed < frameCount)
+
+
+        // =========================================================================
+        // THE CODE BELOW IS NOW BACK INSIDE THE CALLBACK FUNCTION BODY:
+        // =========================================================================
+
+        // Calculate real-time CPU thread load
+        auto endTime = std::chrono::high_resolution_clock::now();
+        double elapsedSec = std::chrono::duration<double>(endTime - startTime).count();
+        double expectedSec = (double)frameCount / g_sampleRate;
+        float instantCpu = (float)((elapsedSec / expectedSec) * 100.0);
+        if (instantCpu > 100.0f) instantCpu = 100.0f; // Limit clamp to 100%
+
+        static float s_smoothedCpu = 0.0f;
+        s_smoothedCpu += 0.05f * (instantCpu - s_smoothedCpu); // Leaky integrator smoothing
+        g_audioCpuLoad = s_smoothedCpu;
+
+        } // 3rd BRACE: Closes the entire callback function -> void ma_audio_callback(...)
 // ==========================================
 // PUBLIC CONTROLLER INTERFACE
 // ==========================================

@@ -77,12 +77,22 @@ void runEncoderThread() {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastTurnTime).count();
 
-            if (elapsed > 20) {
+            // 1. Lower the debounce limit to 6ms to capture rapid physical turns
+            if (elapsed > 6) {
+                
+                // 2. Calculate dynamic velocity scaling (Acceleration)
+                int multiplier = 1;
+                if (elapsed < 14) {
+                    multiplier = 5; // Fast spin -> jump by 5
+                } else if (elapsed < 28) {
+                    multiplier = 2; // Moderate spin -> jump by 2
+                }
+
                 lastTurnTime = now;
                 if (dtVal) {
-                    g_encoderTurnQueue.fetch_add(1);
+                    g_encoderTurnQueue.fetch_add(multiplier);
                 } else {
-                    g_encoderTurnQueue.fetch_sub(1);
+                    g_encoderTurnQueue.fetch_sub(multiplier);
                 }
             }
         }
@@ -134,7 +144,10 @@ static void HandlePianoKeysInput(int octaveValue) {
     
     bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
                       IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-    if (isCtrlDown) return;
+    bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+
+    // Return early if control or shift are held down to prevent note overlaps on navigation
+    if (isCtrlDown || isShiftDown) return;
 
     for (int i = 0; i < NUM_NOTES; ++i) {
         std::string noteName = keyboardPiano[i].noteName;
@@ -514,7 +527,7 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         popupEditChange = (encoderTurn > 0) ? 1 : -1;
     } else if (isShiftDown) {
         if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_UP))   popupEditChange = 1;
-        if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_DOWN))    popupEditChange = -1;
+        if (IsKeyPressed(KEY_LEFT) || IsKeyDown(KEY_DOWN))    popupEditChange = -1;
     }
 
     if (stepPopupFocusX == 0) {
@@ -957,13 +970,11 @@ int main() {
         }
 
         // --- DIAGNOSTICS KEYBOARD INTERCEPT ---
-        // --- DIAGNOSTICS KEYBOARD INTERCEPT ---
-                if (showDiagnostics) {
-                    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
-                        showDiagnostics = false;
-                        menuFeedback = "DIAGNOSTICS CLOSED";
-                    }
-                    // (The Ctrl + Shift + 9 close check is now cleanly handled by the unified toggle above)
+        if (showDiagnostics) {
+            if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+                showDiagnostics = false;
+                menuFeedback = "DIAGNOSTICS CLOSED";
+            }
             if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
                 showDiagnostics = false;
                 menuFeedback = "DIAGNOSTICS CLOSED";
@@ -1006,33 +1017,37 @@ int main() {
         }
 
         // --- MODAL POPUPS DISPATCH ---
-        if (lfoPopupOpen) {
-            HandleLfoPopupInputs(encoderTurn, encoderButton, isShiftDown);
-            BeginTextureMode(oledScreen);
-                ClearBackground(BLACK);
-                UIState state = {
-                    currentScreen, selectedTrack, cursorTrack, cursorStep,
-                    currentOctave, tempo, isPlaying, playhead,
-                    synthGridRow, synthGridCol, trackParamsGridCol,
-                    blinkOn, activeNotesString,
-                    systemMenuOpen, systemMenuCursor,
-                    menuFeedback,
-                    systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
-                };
-                DrawFilterLfoPage(state);
-                DrawModulationPopup(state);
-            EndTextureMode();
-            UpdateOled(oledScreen);
-            
-            BeginDrawing();
-                ClearBackground(DARKGRAY);
-                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
-                Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
-                Vector2 origin = { 0.0f, 0.0f };
-                DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
-            EndDrawing();
-            continue;
-        }
+                if (lfoPopupOpen) {
+                    HandleLfoPopupInputs(encoderTurn, encoderButton, isShiftDown);
+                    BeginTextureMode(oledScreen);
+                        ClearBackground(BLACK);
+                        UIState state = {
+                            currentScreen, selectedTrack, cursorTrack, cursorStep,
+                            currentOctave, tempo, isPlaying, playhead,
+                            synthGridRow, synthGridCol, trackParamsGridCol,
+                            blinkOn, activeNotesString,
+                            systemMenuOpen, systemMenuCursor,
+                            menuFeedback,
+                            systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+                        };
+                        DrawFilterLfoPage(state);
+                        DrawModulationPopup(state);
+                    EndTextureMode();
+
+                    // UPLOAD THE NEW CPU PIXELS TO THE GPU TEXTURE FOR MAC RENDER
+                    UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+
+                    UpdateOled(oledScreen);
+                    
+                    BeginDrawing();
+                        ClearBackground(DARKGRAY);
+                        Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
+                        Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                        Vector2 origin = { 0.0f, 0.0f };
+                        DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+                    EndDrawing();
+                    continue;
+                }
 
         if (stepPopupOpen) {
             HandleStepPopupInputs(encoderTurn, encoderButton, isShiftDown);
@@ -1181,10 +1196,7 @@ int main() {
                     }
                 }
             }
-            // Shift + M: Mute
-            if (IsKeyPressed(KEY_M)) {
-                tracks[selectedTrack].muted = !tracks[selectedTrack].muted;
-            }
+            
             // Shift + Backspace: Clear Tracks or Step Lock resets
             if (IsKeyPressed(KEY_BACKSPACE)) {
                 bool isAltHeld = IsKeyDown(KEY_X);
@@ -1210,73 +1222,106 @@ int main() {
                     }
                 }
             }
-
-            // Shift + [1-8]: Pattern Switch triggers
-            int targetPattern = -1;
-            if (IsKeyPressed(KEY_ONE))   targetPattern = 0;
-            if (IsKeyPressed(KEY_TWO))   targetPattern = 1;
-            if (IsKeyPressed(KEY_THREE)) targetPattern = 2;
-            if (IsKeyPressed(KEY_FOUR))  targetPattern = 3;
-            if (IsKeyPressed(KEY_FIVE))  targetPattern = 4;
-            if (IsKeyPressed(KEY_SIX))   targetPattern = 5;
-            if (IsKeyPressed(KEY_SEVEN)) targetPattern = 6;
-            if (IsKeyPressed(KEY_EIGHT)) targetPattern = 7;
-
-            if (targetPattern >= 0) {
-                queuedPattern = targetPattern;
-            }
         }
 
-        // --- TRACK NAVIGATION ([1-8] Keys) ---
-        int numKeyTriggered = -1;
-        if (IsKeyPressed(KEY_ONE))        numKeyTriggered = 0;
-        else if (IsKeyPressed(KEY_TWO))   numKeyTriggered = 1;
-        else if (IsKeyPressed(KEY_THREE)) numKeyTriggered = 2;
-        else if (IsKeyPressed(KEY_FOUR))  numKeyTriggered = 3;
-        else if (IsKeyPressed(KEY_FIVE))  numKeyTriggered = 4;
-        else if (IsKeyPressed(KEY_SIX))   numKeyTriggered = 5;
-        else if (IsKeyPressed(KEY_SEVEN)) numKeyTriggered = 6;
-        else if (IsKeyPressed(KEY_EIGHT)) numKeyTriggered = 7;
+        // --- TRACK MUTE / SOLO CONTROL ENGINE ---
+        // 1. Unshifted M: Toggles mute on the currently selected active track
+        if (IsKeyPressed(KEY_M) && !isShiftDown && !isCtrlDown) {
+            tracks[selectedTrack].muted = !tracks[selectedTrack].muted;
+            menuFeedback = tracks[selectedTrack].muted ? "TRACK MUTED" : "TRACK UNMUTED";
+        }
 
-        if (numKeyTriggered >= 0) {
-            if (isShiftDown && isCtrlDown) {
-                bool isAnyOtherUnmuted = false;
-                for (int t = 0; t < 8; ++t) {
-                    if (t != numKeyTriggered && !tracks[t].muted) {
-                        isAnyOtherUnmuted = true;
-                        break;
-                    }
-                }
-                if (isAnyOtherUnmuted) {
-                    for (int t = 0; t < 8; ++t) tracks[t].muted = (t != numKeyTriggered);
-                    menuFeedback = "TRACK SOLO ACTIVE";
-                } else {
-                    for (int t = 0; t < 8; ++t) tracks[t].muted = false;
-                    menuFeedback = "ALL TRACKS UNMUTED";
-                }
-            }
-            else if (isCtrlDown) {
-                tracks[numKeyTriggered].muted = !tracks[numKeyTriggered].muted;
-                menuFeedback = tracks[numKeyTriggered].muted ? "TRACK MUTED" : "TRACK UNMUTED";
-            }
-            else if (!isShiftDown) {
-                selectedTrack = numKeyTriggered;
-                cursorTrack = numKeyTriggered % 4;
+        // 2. M + Modifiers + Keybed: Targeted Mute or Solo on any track
+        if (IsKeyDown(KEY_M)) {
+            int targetTrk = -1;
+            if (IsKeyPressed(KEY_A))      targetTrk = 0;
+            else if (IsKeyPressed(KEY_S)) targetTrk = 1;
+            else if (IsKeyPressed(KEY_D)) targetTrk = 2;
+            else if (IsKeyPressed(KEY_F)) targetTrk = 3;
+            else if (IsKeyPressed(KEY_G)) targetTrk = 4;
+            else if (IsKeyPressed(KEY_H)) targetTrk = 5;
+            else if (IsKeyPressed(KEY_J)) targetTrk = 6;
+            else if (IsKeyPressed(KEY_K)) targetTrk = 7;
 
-                if (numKeyTriggered < 4) {
-                    if (currentScreen == SCREEN_SEQ_5_8) {
-                        currentScreen = SCREEN_SEQ_1_4;
-                        activeScreenRow = 0;
+            if (targetTrk >= 0) {
+                if (isShiftDown) {
+                    // M + Shift + Track Key: Mute/Unmute target
+                    tracks[targetTrk].muted = !tracks[targetTrk].muted;
+                    menuFeedback = tracks[targetTrk].muted ? "TRACK MUTED" : "TRACK UNMUTED";
+                }
+                else if (isCtrlDown) {
+                    // M + Ctrl + Track Key: Solo target track
+                    bool isAnyOtherUnmuted = false;
+                    for (int t = 0; t < 8; ++t) {
+                        if (t != targetTrk && !tracks[t].muted) {
+                            isAnyOtherUnmuted = true;
+                            break;
+                        }
                     }
-                } else {
-                    if (currentScreen == SCREEN_SEQ_1_4) {
-                        currentScreen = SCREEN_SEQ_5_8;
-                        activeScreenRow = 1;
+                    if (isAnyOtherUnmuted) {
+                        for (int t = 0; t < 8; ++t) {
+                            tracks[t].muted = (t != targetTrk);
+                        }
+                        menuFeedback = "TRACK SOLO ACTIVE";
+                    } else {
+                        for (int t = 0; t < 8; ++t) {
+                            tracks[t].muted = false;
+                        }
+                        menuFeedback = "ALL TRACKS UNMUTED";
                     }
                 }
             }
         }
 
+        // --- PATTERN SWAPPING (Ctrl + ASDFGHJK) ---
+        int targetPattern = -1;
+        if (isCtrlDown && !IsKeyDown(KEY_M)) {
+            if (IsKeyPressed(KEY_A))      targetPattern = 0;
+            else if (IsKeyPressed(KEY_S)) targetPattern = 1;
+            else if (IsKeyPressed(KEY_D)) targetPattern = 2;
+            else if (IsKeyPressed(KEY_F)) targetPattern = 3;
+            else if (IsKeyPressed(KEY_G)) targetPattern = 4;
+            else if (IsKeyPressed(KEY_H)) targetPattern = 5;
+            else if (IsKeyPressed(KEY_J)) targetPattern = 6;
+            else if (IsKeyPressed(KEY_K)) targetPattern = 7;
+        }
+
+        if (targetPattern >= 0) {
+            queuedPattern = targetPattern;
+            menuFeedback = "PATTERN QUEUED";
+        }
+
+        // --- TRACK NAVIGATION (Shift + ASDFGHJK) ---
+        int trackKeyTriggered = -1;
+        if (isShiftDown && !IsKeyDown(KEY_M) && !isCtrlDown) {
+            if (IsKeyPressed(KEY_A))      trackKeyTriggered = 0;
+            else if (IsKeyPressed(KEY_S)) trackKeyTriggered = 1;
+            else if (IsKeyPressed(KEY_D)) trackKeyTriggered = 2;
+            else if (IsKeyPressed(KEY_F)) trackKeyTriggered = 3;
+            else if (IsKeyPressed(KEY_G)) trackKeyTriggered = 4;
+            else if (IsKeyPressed(KEY_H)) trackKeyTriggered = 5;
+            else if (IsKeyPressed(KEY_J)) trackKeyTriggered = 6;
+            else if (IsKeyPressed(KEY_K)) trackKeyTriggered = 7;
+        }
+
+        if (trackKeyTriggered >= 0) {
+            selectedTrack = trackKeyTriggered;
+            cursorTrack = trackKeyTriggered % 4;
+
+            if (trackKeyTriggered < 4) {
+                if (currentScreen == SCREEN_SEQ_5_8) {
+                    currentScreen = SCREEN_SEQ_1_4;
+                    activeScreenRow = 0;
+                }
+            } else {
+                if (currentScreen == SCREEN_SEQ_1_4) {
+                    currentScreen = SCREEN_SEQ_5_8;
+                    activeScreenRow = 1;
+                }
+            }
+        }
+
+        // Shift + Backspace: Clear active page trigs/parameter locks
         if (IsKeyPressed(KEY_BACKSPACE) && isShiftDown && !isCtrlDown) {
             bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
             int startStep = activePage * 16;
@@ -1300,7 +1345,8 @@ int main() {
             }
         }
 
-        if (!isCtrlDown) {
+        // Octave modification via Comma/Period (Only un-shifted)
+        if (!isCtrlDown && !isShiftDown) {
             if (IsKeyPressed(KEY_COMMA)) {
                 currentOctave--;
                 if (currentOctave < 0) currentOctave = 0;
@@ -1311,27 +1357,29 @@ int main() {
             }
         }
 
-        // Copy/Paste clipboard
+        // --- CLIPBOARD COMMANDS (Ctrl+C to Copy, Shift+C to Paste) ---
         if (isCtrlDown) {
             if (IsKeyPressed(KEY_C)) {
                 int activeTrack = (currentScreen == SCREEN_SEQ_5_8) ? cursorTrack + 4 : cursorTrack;
                 copiedStep = tracks[activeTrack].steps[cursorStep];
                 hasCopiedStep = true;
+                menuFeedback = "STEP COPIED";
             }
-            if (IsKeyPressed(KEY_V)) {
-                if (hasCopiedStep) {
-                    int activeTrack = (currentScreen == SCREEN_SEQ_5_8) ? cursorTrack + 4 : cursorTrack;
-                    tracks[activeTrack].steps[cursorStep] = copiedStep;
-                }
+        }
+        
+        if (isShiftDown && IsKeyPressed(KEY_C)) {
+            if (hasCopiedStep) {
+                int activeTrack = (currentScreen == SCREEN_SEQ_5_8) ? cursorTrack + 4 : cursorTrack;
+                tracks[activeTrack].steps[cursorStep] = copiedStep;
+                menuFeedback = "STEP PASTED";
             }
         }
 
-        // BPM Tempo increments
-        if (!isCtrlDown) {
+        // BPM Tempo increments (Shift + Comma/Period)
+        if (!isCtrlDown && isShiftDown) {
             double deltaTempo = 0.0;
             bool triggerTempo = false;
-            bool isTempoKeyDown = IsKeyDown(KEY_EQUAL) || IsKeyDown(KEY_KP_ADD) ||
-                                  IsKeyDown(KEY_MINUS) || IsKeyDown(KEY_KP_SUBTRACT);
+            bool isTempoKeyDown = IsKeyDown(KEY_COMMA) || IsKeyDown(KEY_PERIOD);
 
             if (isTempoKeyDown) {
                 if (tempoRepeatTimer == 0.0f) {
@@ -1351,10 +1399,11 @@ int main() {
             }
 
             if (triggerTempo) {
-                if (IsKeyDown(KEY_EQUAL) || IsKeyDown(KEY_KP_ADD)) deltaTempo = 1.0;
-                if (IsKeyDown(KEY_MINUS) || IsKeyDown(KEY_KP_SUBTRACT)) deltaTempo = -1.0;
+                if (IsKeyDown(KEY_PERIOD)) deltaTempo = 1.0;
+                if (IsKeyDown(KEY_COMMA))  deltaTempo = -1.0;
 
-                if (isShiftDown) {
+                // Hold Alt (X) alongside Shift to jump by 10 BPM
+                if (isAltHeld) {
                     deltaTempo *= 10.0;
                 }
                 tempo += deltaTempo;
@@ -1416,13 +1465,11 @@ int main() {
             }
         }
         
-        
         // Ctrl + Shift + 9 (or Cmd + Shift + 9) to toggle the Diagnostics screen
-                if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
-                    showDiagnostics = !showDiagnostics;
-                    menuFeedback = showDiagnostics ? "DIAGNOSTICS OPEN" : "DIAGNOSTICS CLOSED";
-                }
-        
+        if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
+            showDiagnostics = !showDiagnostics;
+            menuFeedback = showDiagnostics ? "DIAGNOSTICS OPEN" : "DIAGNOSTICS CLOSED";
+        }
         
         // Shift + Navigations
         if (isShiftDown && !isCtrlDown) {
@@ -1703,7 +1750,7 @@ int main() {
                             int maxCol = (synthGridRow == 3) ? 9 : 8;
                             if (synthGridCol < 0) synthGridCol = maxCol;
                         }
-                        if (IsKeyPressed(KEY_RIGHT)) {
+                        if (IsKeyDown(KEY_RIGHT)) {
                             synthGridCol++;
                             int maxCol = (synthGridRow == 3) ? 9 : 8;
                             if (synthGridCol > maxCol) synthGridCol = 0;
