@@ -2,6 +2,7 @@
 #include "Globals.hpp"
 #include <cmath>
 #include <cstdlib>
+#include "Audio_Engine.hpp"
 
 // Import the global modulated LFO matrix populated by the audio callback
 extern float g_globalLFOValues[8][2];
@@ -29,6 +30,12 @@ static double g_sampleRate = 44100.0;
 static float GetEnvTime(int val) {
     float norm = val / 99.0f;
     return 0.0010f * powf(15000.0f, norm * norm * norm);
+}
+
+static inline float MapVolumeToGain(float volVal) {
+    if (volVal <= 0.01f) return 0.0f;
+    float norm = volVal / 99.0f;
+    return norm * norm * norm;
 }
 
 // Fallback helper: uses step overrides if locked (-1), otherwise defaults to track parameters
@@ -167,13 +174,14 @@ float SamplerVoice::Process(int trackIdx) {
     }
 
     // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
-    float targetVol = std::clamp(GetParam(sp.volume, trk.volume) + modVolOffset, 0.0f, 99.0f);
-    if (smoothVol < 0.0f) {
-        smoothVol = targetVol;
-    } else {
-        smoothVol += (targetVol - smoothVol) * 0.005f;
-    }
-
+     float rawTargetVol = std::clamp(GetParam(sp.volume, trk.volume) + modVolOffset, 0.0f, 99.0f);
+     float targetVolGain = VolumeCurve(rawTargetVol); // Mapped using our global LUT
+     if (smoothVol < 0.0f) {
+         smoothVol = targetVolGain;
+     } else {
+         smoothVol += (targetVolGain - smoothVol) * 0.005f;
+     }
+    
     // Slew cutoff parameter per-sample to eliminate block-rate zipper noise and step-lock clicks
     float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
     if (smoothCutoff < 0.0f) {
@@ -190,59 +198,70 @@ float SamplerVoice::Process(int trackIdx) {
     }
 
     // 1. Process Volume Envelope
-    float effectiveSustain = (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) ? envSusLevel : 0.0f;
+     float effectiveSustain = (loopMode == 1 || trk.algorithm == ALGO_GRANULAR) ? envSusLevel : 0.0f;
 
-    switch (stage) {
-        case ENV_ATTACK:
-            envLevel += envAtkRate;
-            if (envLevel >= 1.0f) {
-                envLevel = 1.0f;
-                stage = ENV_DECAY;
-            }
-            break;
-            
-        case ENV_DECAY:
-            envLevel -= envDecRate;
-            if (envLevel <= effectiveSustain) {
-                envLevel = effectiveSustain;
-                if (effectiveSustain == 0.0f) {
-                    stage = ENV_IDLE;
-                    active = false;
-                } else {
-                    stage = ENV_SUSTAIN;
-                }
-            }
-            break;
-            
-        case ENV_SUSTAIN:
-            envLevel = envSusLevel;
-            break;
-            
-        case ENV_RELEASE:
-            envLevel -= envRelRate;
-            if (envLevel <= 0.0f) {
-                envLevel = 0.0f;
-                stage = ENV_IDLE;
-                active = false;
-                for (int i = 0; i < MAX_GRAINS; ++i) {
-                    if (grainPool[i].active) {
-                        grainPool[i].active = false;
-                        g_globalActiveGrains--;
-                    }
-                }
-            }
-            break;
-        default: break;
-    }
+     switch (stage) {
+         case ENV_ATTACK:
+             envLevel += envAtkRate;
+             if (envLevel >= 1.0f) {
+                 envLevel = 1.0f;
+                 stage = ENV_DECAY;
+             }
+             break;
+             
+         case ENV_DECAY:
+             envLevel = effectiveSustain + (envLevel - effectiveSustain) * envDecCoeff;
+             if (envLevel - effectiveSustain <= 0.0001f) {
+                 envLevel = effectiveSustain;
+                 if (effectiveSustain == 0.0f) {
+                     stage = ENV_IDLE;
+                     active = false;
+                 } else {
+                     stage = ENV_SUSTAIN;
+                 }
+             }
+             break;
+             
+         case ENV_SUSTAIN:
+             envLevel = envSusLevel;
+             break;
+             
+         case ENV_RELEASE:
+             envLevel *= envRelCoeff;
+             if (envLevel <= 0.0001f) {
+                 envLevel = 0.0f;
+                 stage = ENV_IDLE;
+                 active = false;
+                 for (int i = 0; i < MAX_GRAINS; ++i) {
+                     if (grainPool[i].active) {
+                         grainPool[i].active = false;
+                         g_globalActiveGrains--;
+                     }
+                 }
+             }
+             break;
+         default: break;
+     }
 
-    // 2. Process Filter Envelope (ADSR)
-    switch (filterStage) {
-        case FLT_ATTACK:  filterEnvLevel += filterAtkRate; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
-        case FLT_DECAY:   filterEnvLevel -= filterDecRate; if (filterEnvLevel <= filterSusLevel) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; } break;
-        case FLT_SUSTAIN: filterEnvLevel = filterSusLevel; break;
-        case FLT_RELEASE: filterEnvLevel -= filterRelRate; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
-        default: break;
-    }
+     // 2. Process Filter Envelope (ADSR)
+     switch (filterStage) {
+         case FLT_ATTACK:
+             filterEnvLevel += filterAtkRate;
+             if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; }
+             break;
+         case FLT_DECAY:
+             filterEnvLevel = filterSusLevel + (filterEnvLevel - filterSusLevel) * filterDecCoeff;
+             if (filterEnvLevel - filterSusLevel <= 0.0001f) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; }
+             break;
+         case FLT_SUSTAIN:
+             filterEnvLevel = filterSusLevel;
+             break;
+         case FLT_RELEASE:
+             filterEnvLevel *= filterRelCoeff;
+             if (filterEnvLevel <= 0.0001f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; }
+             break;
+         default: break;
+     }
 
     // 3. Block-Rate SVF Coefficients Update (Every 64 Samples)
     filterUpdateCounter++;
@@ -260,13 +279,17 @@ float SamplerVoice::Process(int trackIdx) {
         float invSampleRate = 1.0f / (float)g_sampleRate;
 
         envAtkRate = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
-        envDecRate = invSampleRate / GetEnvTime(GetParam(sp.decay, trk.decay));
-        envRelRate = invSampleRate / GetEnvTime(GetParam(sp.release, trk.release));
+        float decTime = GetEnvTime(GetParam(sp.decay, trk.decay));
+        envDecCoeff = expf(-6.9078f / ((float)g_sampleRate * decTime));
+        float relTime = GetEnvTime(GetParam(sp.release, trk.release));
+        envRelCoeff = expf(-6.9078f / ((float)g_sampleRate * relTime));
         envSusLevel = GetParam(sp.sustain, trk.sustain) / 99.0f;
 
         filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
-        filterDecRate = invSampleRate / GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
-        filterRelRate = invSampleRate / GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
+        float fDecTime = GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
+        filterDecCoeff = expf(-6.9078f / ((float)g_sampleRate * fDecTime));
+        float fRelTime = GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
+        filterRelCoeff = expf(-6.9078f / ((float)g_sampleRate * fRelTime));
         filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
 
         // Reset mod offsets
@@ -344,8 +367,8 @@ float SamplerVoice::Process(int trackIdx) {
     }
 
     // 5. Pump the sampler volume to 4.5x to match the synths (utilizing smoothed volume)
-    float boosted = sampleOut * envLevel * (smoothVol / 99.0f) * 4.5f;
-
+     float boosted = sampleOut * envLevel * smoothVol * 4.5f;
+    
     // 6. Warm cubic soft-clipper protects against digital clipping
     if (boosted > 1.0f)  boosted = 1.0f;
     if (boosted < -1.0f) boosted = -1.0f;

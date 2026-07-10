@@ -9,3 +9,4 @@ void ShutdownAudioEngine();
 void TriggerVoiceLive(int trackIdx, int midiNote, int velocity);
 void ReleaseVoiceLive(int trackIdx, int midiNote);
 bool IsSynthVoiceActive(int trackIdx, int voiceIdx);
+float VolumeCurve(float value0to99);

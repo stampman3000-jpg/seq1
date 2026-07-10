@@ -1549,13 +1549,14 @@ void DrawPlaceholderPage(const UIState& state) {
                 DrawPixelRectLines(fieldX, fieldY, fieldW, fieldH, WHITE);
                 
                 // Draw typed string (Uppercase alphabet is fully supported in 3x5 font now)
-                Draw3x5String(state.typingBuffer, fieldX + 4, fieldY + 3, WHITE);
+                                Draw3x5String(state.typingBuffer, fieldX + 4, fieldY + 3, WHITE);
 
-                // Draw animated blinking text cursor (Line)
-                if (state.blinkOn) {
-                    int cursorOffset = fieldX + 4 + (state.typingCursor * 4);
-                    DrawPixelLine(cursorOffset, fieldY + 2, cursorOffset, fieldY + 7, WHITE);
-                }
+                                // Draw high-visibility underline cursor under the active editing character slot
+                                if (state.blinkOn) {
+                                    int cursorOffset = fieldX + 4 + (state.typingCursor * 4);
+                                    // Draw a 3-pixel wide line directly under the active slot inside the field box
+                                    DrawPixelLine(cursorOffset, fieldY + 8, cursorOffset + 2, fieldY + 8, WHITE);
+                                }
             }
 
             // Render interactive bottom toast confirmation message

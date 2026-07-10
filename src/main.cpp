@@ -14,6 +14,11 @@
 #include "OledDriver.hpp"
 #include <unistd.h>
 
+
+// Static safe character set for on-screen retro text scrolling
+static const char kCharSet[] = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+constexpr int kCharSetSize = sizeof(kCharSet) - 1; // 39 characters
+
 // =========================================================================
 // FILE-SCOPE STATIC GLOBAL VARIABLES
 // =========================================================================
@@ -25,6 +30,11 @@ static int currentOctave = 4;
 static int activeScreenRow = 0;
 static Step copiedStep;
 static bool hasCopiedStep = false;
+
+// Unified action key helper mapping Space and Enter/Return to a single key event
+static inline bool IsActionKeyPressed() {
+    return IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
+}
 
 #if defined(__linux__)
 #include <sys/mman.h>
@@ -170,8 +180,11 @@ static void HandlePianoKeysInput(int octaveValue) {
 }
 
 // Handles inputs and directory scanning while inside the Modal System Menu
-static void HandleSystemMenuInputs(int menuDir) {
+static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
     if (systemMenuState == 0) {
+        // ==========================================
+        // SUBMENU 0: MAIN SYSTEM DIRECTORY LIST
+        // ==========================================
         if (menuDir == -1) {
             systemMenuCursor--;
             if (systemMenuCursor < 0) systemMenuCursor = 6;
@@ -182,7 +195,7 @@ static void HandleSystemMenuInputs(int menuDir) {
             if (systemMenuCursor > 6) systemMenuCursor = 0;
             menuFeedback = "";
         }
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        if (IsActionKeyPressed()) {
             bool isSaveOption = (systemMenuCursor == 0 || systemMenuCursor == 2 || systemMenuCursor == 4);
             if (isSaveOption) {
                 systemMenuState = 2;
@@ -203,6 +216,9 @@ static void HandleSystemMenuInputs(int menuDir) {
         }
     }
     else if (systemMenuState == 1) {
+        // ==========================================
+        // SUBMENU 1: FILE BROWSER (Loading named files)
+        // ==========================================
         if (!g_fileList.empty()) {
             if (menuDir == -1) {
                 fileBrowserCursor--;
@@ -212,7 +228,7 @@ static void HandleSystemMenuInputs(int menuDir) {
                 fileBrowserCursor++;
                 if (fileBrowserCursor >= (int)g_fileList.size()) fileBrowserCursor = 0;
             }
-            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+            if (IsActionKeyPressed()) {
                 if (systemMenuCursor == 6) {
                     saveSlotCursor = fileBrowserCursor;
                     systemMenuState = 2;
@@ -237,6 +253,9 @@ static void HandleSystemMenuInputs(int menuDir) {
         }
     }
     else if (systemMenuState == 2) {
+        // ==========================================
+        // SUBMENU 2: SAVE/POOL SLOT SELECTOR
+        // ==========================================
         int maxSlots = (systemMenuCursor == 0 || systemMenuCursor == 6) ? 16 : ((systemMenuCursor == 2) ? 128 : 1024);
         
         if (menuDir == -1) {
@@ -247,7 +266,7 @@ static void HandleSystemMenuInputs(int menuDir) {
             fileBrowserCursor++;
             if (fileBrowserCursor >= maxSlots) fileBrowserCursor = 0;
         }
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        if (IsActionKeyPressed()) {
             if (systemMenuCursor == 6) {
                 std::string selectedFile = "";
                 if (saveSlotCursor >= 0 && saveSlotCursor < (int)g_fileList.size()) {
@@ -260,61 +279,81 @@ static void HandleSystemMenuInputs(int menuDir) {
                 }
                 systemMenuState = 0;
             } else {
-                systemMenuState = 3;
-                g_typingBuffer = "";
-                g_typingCursor = 0;
-            }
+                            systemMenuState = 3;
+                            g_typingBuffer = std::string(15, ' '); // 15 completely blank spaces
+                            g_typingCursor = 0;                   // Reset cursor to index 0
+                        }
         }
         if (IsKeyPressed(KEY_BACKSPACE) || IsKeyPressed(KEY_ESCAPE)) {
             systemMenuState = 0;
         }
     }
     else if (systemMenuState == 3) {
-        int key = GetCharPressed();
-        while (key > 0) {
-            key = toupper(key);
-            bool isSafeChar = (key >= 'A' && key <= 'Z') || (key >= '0' && key <= '9') ||
-                              (key == '_') || (key == '-');
-            if (isSafeChar && g_typingBuffer.length() < 15) {
-                g_typingBuffer.insert(g_typingCursor, 1, (char)key);
-                g_typingCursor++;
-            }
-            key = GetCharPressed();
-        }
-
-        if (IsKeyPressed(KEY_BACKSPACE)) {
-            if (g_typingCursor > 0 && !g_typingBuffer.empty()) {
-                g_typingBuffer.erase(g_typingCursor - 1, 1);
-                g_typingCursor--;
-            }
-        }
-
+        // ==========================================
+        // SUBMENU 3: SCROLLING TEXT SELECTOR
+        // ==========================================
+        
+        // 1. Left/Right Navigation moves the cursor slot (0 to 14)
         if (IsKeyPressed(KEY_LEFT)) {
             g_typingCursor--;
-            if (g_typingCursor < 0) g_typingCursor = 0;
+            if (g_typingCursor < 0) g_typingCursor = (int)g_typingBuffer.length() - 1; // Wrap to end
         }
         if (IsKeyPressed(KEY_RIGHT)) {
             g_typingCursor++;
-            if (g_typingCursor > (int)g_typingBuffer.length()) g_typingCursor = (int)g_typingBuffer.length();
+            if (g_typingCursor >= (int)g_typingBuffer.length()) g_typingCursor = 0; // Wrap to start
+        }
+
+        // 2. Up/Down or Encoder Turn scrolls characters at the active slot
+        int charChange = 0;
+        if (menuDir == -1)    charChange = -1; // Arrow UP scrolls forward
+        if (menuDir == 1)     charChange = 1;  // Arrow DOWN scrolls backward
+        if (encoderTurn != 0) charChange = (encoderTurn > 0) ? 1 : -1; // Encoder turn support
+
+        if (charChange != 0 && g_typingCursor >= 0 && g_typingCursor < (int)g_typingBuffer.length()) {
+            char curChar = g_typingBuffer[g_typingCursor];
+            int charIdx = 0;
+            // Find current character index in our safe charset
+            for (int i = 0; i < kCharSetSize; ++i) {
+                if (kCharSet[i] == curChar) {
+                    charIdx = i;
+                    break;
+                }
+            }
+            // Increment/wrap character index
+            charIdx += charChange;
+            if (charIdx < 0) charIdx = kCharSetSize - 1;
+            if (charIdx >= kCharSetSize) charIdx = 0;
+            
+            g_typingBuffer[g_typingCursor] = kCharSet[charIdx];
         }
 
         if (IsKeyPressed(KEY_ESCAPE)) {
-            systemMenuState = 2;
+            systemMenuState = 2; // Go back to slot selection
         }
 
-        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        // 3. Confirm Selection on Action Key (Space or Enter)
+        if (IsActionKeyPressed()) {
             if (!g_typingBuffer.empty()) {
+                // Trim trailing spaces cleanly before writing file to disk
+                std::string finalName = g_typingBuffer;
+                size_t end = finalName.find_last_not_of(' ');
+                finalName = (end == std::string::npos) ? "" : finalName.substr(0, end + 1);
+
+                if (finalName.empty()) {
+                    finalName = "UNTITLED"; // Fallback default
+                }
+
                 bool success = false;
                 int activeSlotNum = fileBrowserCursor + 1;
                 
-                if (systemMenuCursor == 0)      success = SaveProject(activeSlotNum, g_typingBuffer);
-                else if (systemMenuCursor == 2) success = SavePattern(activePattern, activeSlotNum, g_typingBuffer);
-                else if (systemMenuCursor == 4) success = SaveSoundPreset(selectedTrack, activeSlotNum, g_typingBuffer);
+                if (systemMenuCursor == 0)      success = SaveProject(activeSlotNum, finalName);
+                else if (systemMenuCursor == 2) success = SavePattern(activePattern, activeSlotNum, finalName);
+                else if (systemMenuCursor == 4) success = SaveSoundPreset(selectedTrack, activeSlotNum, finalName);
 
                 if (success) menuFeedback = "SAVED SUCCESSFULLY!";
                 else         menuFeedback = "SAVE FAILED!";
             }
-            systemMenuState = 0;
+            systemMenuState = 0; // Close system menu on completion
         }
     }
 }
@@ -436,9 +475,15 @@ static void HandleLfoPopupInputs(int encoderTurn, bool encoderButton, bool isShi
     }
 }
 
-// Handles input events inside the Step Utility Sub-Popup (Z Trigger)
+/// Handles input events inside the Step Utility Sub-Popup (Z Trigger)
 static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
-    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_Z)) {
+    // Detect if Control/Command is held down inside this scope
+    bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
+                      IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+    bool isCtrlXPressed = isCtrlDown && IsKeyPressed(KEY_X);
+
+    // Close on Escape or the Ctrl+X toggle macro (unifying Enter/Return to act as Space instead)
+    if (IsKeyPressed(KEY_ESCAPE) || isCtrlXPressed) {
         stepPopupOpen = false;
         menuFeedback = "POPUP CLOSED";
         return;
@@ -538,7 +583,8 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         }
         else if (stepPopupFocusY == 1) {
             bool shiftArrowPressed = isShiftDown && (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT));
-            if (shiftArrowPressed || IsKeyPressed(KEY_SPACE) || (encoderTurn != 0 && encoderButton)) {
+            // Unify SPACE and ENTER: we use IsActionKeyPressed() here instead of IsKeyPressed(KEY_SPACE)
+            if (shiftArrowPressed || IsActionKeyPressed() || (encoderTurn != 0 && encoderButton)) {
                 if (stepPopupCondCol < 8) {
                     step.condMask ^= (1 << stepPopupCondCol);
                 } else {
@@ -557,7 +603,8 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         if (popupEditChange != 0) {
             step.chordType = std::clamp(step.chordType + popupEditChange, 0, 6);
         }
-        if (IsKeyPressed(KEY_SPACE) || (encoderTurn != 0 && encoderButton)) {
+        // Unify SPACE and ENTER: we use IsActionKeyPressed() here instead of IsKeyPressed(KEY_SPACE)
+        if (IsActionKeyPressed() || (encoderTurn != 0 && encoderButton)) {
             if (step.chordType == 0) {
                 ToggleStepChordNote(step, stepPopupChordKey);
             }
@@ -931,8 +978,9 @@ int main() {
         #endif
 
         bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-        bool isAltDown = IsKeyDown(KEY_X);
-        bool isAltHeld = IsKeyDown(KEY_X);
+                // Exclude Control modifier to prevent Ctrl+X step-popup triggers from writing parameter locks
+                bool isAltDown = IsKeyDown(KEY_X) && !isCtrlDown;
+                bool isAltHeld = IsKeyDown(KEY_X) && !isCtrlDown;
         
         #if defined(__linux__)
         if (isCtrlDown && isAltDown && IsKeyPressed(KEY_GRAVE)) {
@@ -1107,8 +1155,7 @@ int main() {
                 menuRepeatTimer = 0.0f;
             }
 
-            HandleSystemMenuInputs(menuDir);
-            
+            HandleSystemMenuInputs(menuDir, encoderTurn);
             // --- DRAW TO CPU FRAMEBUFFER ---
             CpuClearBackground(BLACK);
             CpuDrawLine(0, 7, OLED_WIDTH, 7, WHITE);
@@ -1153,9 +1200,15 @@ int main() {
         HandlePianoKeysInput(currentOctave);
 
         // --- GLOBAL KEY COMMAND PROCESSING ---
-        if (IsKeyPressed(KEY_SPACE)) {
-            isPlaying = !isPlaying;
-        }
+                if (IsActionKeyPressed()) {
+                    // Check if we are selecting LFO rows on the parameters page to prevent play/stop triggers
+                    bool isLfoRowSelected = (currentScreen == SCREEN_TRACK_PARAMS && (synthGridRow == 2 || synthGridRow == 4));
+
+                    // Only toggle transport if we aren't in menus, popups, or selecting modal pages
+                    if (!systemMenuOpen && !lfoPopupOpen && !stepPopupOpen && !isLfoRowSelected) {
+                        isPlaying = !isPlaying;
+                    }
+                }
 
         // Delete Step (Backspace)
         if (IsKeyPressed(KEY_BACKSPACE) && !isShiftDown && !isCtrlDown) {
@@ -1184,7 +1237,7 @@ int main() {
                 }
             }
             // Shift + R: Switch Engine Algorithm Mode
-            if (IsKeyPressed(KEY_R)) {
+            if (IsKeyPressed(KEY_W)) {
                 if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
                     tracks[selectedTrack].algorithm = (tracks[selectedTrack].algorithm == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
                 } else {
@@ -1451,19 +1504,19 @@ int main() {
             }
         }
 
-        // Toggle Step Popup Open (Z Hotkey)
-        if (IsKeyPressed(KEY_Z)) {
-            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
-                stepPopupOpen = !stepPopupOpen;
-                menuFeedback = stepPopupOpen ? "STEP POPUP OPEN" : "STEP POPUP CLOSED";
-                if (stepPopupOpen) {
-                    stepPopupFocusX = 0;
-                    stepPopupFocusY = 0;
-                    stepPopupCondCol = 0;
-                    stepPopupChordKey = 0;
+        // Toggle Step Popup Open (Ctrl/Cmd + X Hotkey)
+                if (isCtrlDown && IsKeyPressed(KEY_X)) {
+                    if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
+                        stepPopupOpen = !stepPopupOpen;
+                        menuFeedback = stepPopupOpen ? "STEP POPUP OPEN" : "STEP POPUP CLOSED";
+                        if (stepPopupOpen) {
+                            stepPopupFocusX = 0;
+                            stepPopupFocusY = 0;
+                            stepPopupCondCol = 0;
+                            stepPopupChordKey = 0;
+                        }
+                    }
                 }
-            }
-        }
         
         // Ctrl + Shift + 9 (or Cmd + Shift + 9) to toggle the Diagnostics screen
         if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
@@ -1717,19 +1770,19 @@ int main() {
                 }
             }
             else if (currentScreen == SCREEN_TRACK_PARAMS) {
-                if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
-                    if (synthGridRow == 2) {
-                        lfoPopupOpen = true;
-                        lfoPopupLfoIdx = 0;
-                        lfoPopupSlot = 0;
-                        lfoPopupField = 0;
-                    } else if (synthGridRow == 4) {
-                        lfoPopupOpen = true;
-                        lfoPopupLfoIdx = 1;
-                        lfoPopupSlot = 0;
-                        lfoPopupField = 0;
-                    }
-                }
+                            if (IsActionKeyPressed()) {
+                                if (synthGridRow == 2) {
+                                    lfoPopupOpen = true;
+                                    lfoPopupLfoIdx = 0;
+                                    lfoPopupSlot = 0;
+                                    lfoPopupField = 0;
+                                } else if (synthGridRow == 4) {
+                                    lfoPopupOpen = true;
+                                    lfoPopupLfoIdx = 1;
+                                    lfoPopupSlot = 0;
+                                    lfoPopupField = 0;
+                                }
+                            }
 
                 if (triggerNav) {
                     bool isAltHeld = IsKeyDown(KEY_X);

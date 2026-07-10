@@ -141,6 +141,12 @@ static void UpdateGlobalLFOs() {
         }
     }
 }
+// Maps linear 0..99 volume parameters to a cubic gain curve
+static inline float MapVolumeToGain(float volVal) {
+    if (volVal <= 0.01f) return 0.0f;
+    float norm = volVal / 99.0f;
+    return norm * norm * norm; // Cubic curve mimics decibel projection
+}
 
 // Converts a 0..99 value to an exponential time duration in seconds.
 static float GetEnvTime(int val) {
@@ -155,10 +161,35 @@ static float ApplySaturation(float input, float drive) {
     if (driven < -1.0f) driven = -1.0f;
     return driven - (driven * driven * driven) / 3.0f;
 }
+// --- PERCEPTUAL VOLUME LOOKUP TABLE (LUT) ---
+constexpr int kVolCurveSize = 128;
+float g_volCurveLUT[kVolCurveSize]; // Shared global array
 
+// Populate the exponential dB fader curve once at startup
+void InitVolumeCurve() {
+    constexpr float kMinDb = -40.0f; // Lower to -50.0f or -60.0f for more attenuation
+    for (int i = 0; i < kVolCurveSize; ++i) {
+        float norm = (float)i / (kVolCurveSize - 1);
+        float db = kMinDb * (1.0f - norm);
+        g_volCurveLUT[i] = powf(10.0f, db / 20.0f);
+    }
+}
+
+// Cheap, sample-rate safe lookup with linear interpolation
+float VolumeCurve(float value0to99) {
+    if (value0to99 <= 0.0f) return 0.0f; // Hard zero at fader 0 prevents bleed
+    
+    float norm = std::clamp(value0to99, 0.0f, 99.0f) / 99.0f;
+    float pos = norm * (kVolCurveSize - 1);
+    int idx = (int)pos;
+    float frac = pos - (float)idx;
+    int idxNext = std::min(idx + 1, kVolCurveSize - 1);
+    
+    return g_volCurveLUT[idx] + frac * (g_volCurveLUT[idxNext] - g_volCurveLUT[idx]);
+}
 struct SynthVoice {
     bool choking = false;
-        float chokeVolume = 1.0f;
+    float chokeVolume = 1.0f;
     
     float phase1 = 0.0f;
     float phase2 = 0.0f;
@@ -168,23 +199,24 @@ struct SynthVoice {
     bool active = false;
 
     // Smooth parameter states to eliminate transition clicks
-        float smoothCutoff = -1.0f;
-        float smoothMorph1 = -1.0f;
-        float smoothMorph2 = -1.0f;
-        float smoothVol1 = -1.0f;
-        float smoothVol2 = -1.0f;
+    float smoothCutoff = -1.0f;
+    float smoothMorph1 = -1.0f;
+    float smoothMorph2 = -1.0f;
+    float smoothVol1 = -1.0f;
+    float smoothVol1Raw = -1.0f; // Track-normalized 0..1 for drive coupling
+    float smoothVol2 = -1.0f;
 
     // Virtual Auto-Gate States
-        uint32_t gateTimerSamples = 0;
-        bool useGateTimer = false;
+    uint32_t gateTimerSamples = 0;
+    bool useGateTimer = false;
     
-        // Voice-local thread-safe random seed state
-        uint32_t randomSeed = 0x12345678u;
+    // Voice-local thread-safe random seed state
+    uint32_t randomSeed = 0x12345678u;
     // Warm Analog Emulation States
-            float osc1Drift = 0.0f;
-            float osc2Drift = 0.0f;
-            float osc1LPState = 0.0f;
-            float osc2LPState = 0.0f;
+    float osc1Drift = 0.0f;
+    float osc2Drift = 0.0f;
+    float osc1LPState = 0.0f;
+    float osc2LPState = 0.0f;
 
     // Running modulation offsets evaluated at block-rate
     float modCutoffOffset = 0.0f;
@@ -228,40 +260,40 @@ struct SynthVoice {
     enum EnvStage2 { ENV2_IDLE, ENV2_ATTACK, ENV2_DECAY, ENV2_SUSTAIN, ENV2_RELEASE } stage2 = ENV2_IDLE;
     
     // Cached envelope increment rates and levels calculated at block rate
-        float envAtkRate1 = 0.0f;
-        float envDecRate1 = 0.0f;
-        float envRelRate1 = 0.0f;
-        float envSusLevel1 = 0.0f;
+    float envAtkRate1 = 0.0f;
+    float envDecCoeff1 = 1.0f;
+    float envRelCoeff1 = 1.0f;
+    float envSusLevel1 = 0.0f;
 
-        float envAtkRate2 = 0.0f;
-        float envDecRate2 = 0.0f;
-        float envRelRate2 = 0.0f;
-        float envSusLevel2 = 0.0f;
+    float envAtkRate2 = 0.0f;
+    float envDecCoeff2 = 1.0f;
+    float envRelCoeff2 = 1.0f;
+    float envSusLevel2 = 0.0f;
 
-        float noiseAtkRate = 0.0f;
-        float noiseDecRate = 0.0f;
-        uint32_t noiseHoldSamples = 0;
+    float noiseAtkRate = 0.0f;
+    float noiseDecRate = 0.0f;
+    uint32_t noiseHoldSamples = 0;
 
-        float filterAtkRate = 0.0f;
-        float filterDecRate = 0.0f;
-        float filterRelRate = 0.0f;
-        float filterSusLevel = 0.0f;
+    float filterAtkRate = 0.0f;
+    float filterDecCoeff = 1.0f;
+    float filterRelCoeff = 1.0f;
+    float filterSusLevel = 0.0f;
     
     void Choke() {
-            choking = true;
-            chokeVolume = 1.0f;
-        }
+        choking = true;
+        chokeVolume = 1.0f;
+    }
     
     void Trigger(float targetFreq, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0) {
-                baseFreq = targetFreq;
-                active = true;
-                stage1 = ENV1_ATTACK;
-            stage2 = ENV2_ATTACK;
-            lastModOutput = 0.0f; // Flush feedback buffer on note trigger
-            envLevel1 = 0.0f;
-            envLevel2 = 0.0f;
-            choking = false;     // Reset choke flags so note plays cleanly
-            chokeVolume = 1.0f;
+        baseFreq = targetFreq;
+        active = true;
+        stage1 = ENV1_ATTACK;
+        stage2 = ENV2_ATTACK;
+        lastModOutput = 0.0f; // Flush feedback buffer on note trigger
+        envLevel1 = 0.0f;
+        envLevel2 = 0.0f;
+        choking = false;     // Reset choke flags so note plays cleanly
+        chokeVolume = 1.0f;
 
         // Map velocity steps (1..3) to linear scaling (0.33 to 1.0)
         velocityScale = (velocity == 1) ? 0.33f : ((velocity == 2) ? 0.66f : 1.0f);
@@ -294,45 +326,46 @@ struct SynthVoice {
         filter.reset();
 
         // Reset smooth state flags to trigger instant snapping on first process frame
-                smoothCutoff = -1.0f;
-                smoothMorph1 = -1.0f;
-                smoothMorph2 = -1.0f;
-                smoothVol1 = -1.0f;
-                smoothVol2 = -1.0f;
+        smoothCutoff = -1.0f;
+        smoothMorph1 = -1.0f;
+        smoothMorph2 = -1.0f;
+        smoothVol1 = -1.0f;
+        smoothVol1Raw = -1.0f;
+        smoothVol2 = -1.0f;
         
         // Reset analog emulation filters and drifts on note trigger
-                        osc1Drift = 0.0f;
-                        osc2Drift = 0.0f;
-                        osc1LPState = 0.0f;
-                        osc2LPState = 0.0f;
+        osc1Drift = 0.0f;
+        osc2Drift = 0.0f;
+        osc1LPState = 0.0f;
+        osc2LPState = 0.0f;
         
-                // Seed voice-local random generator uniquely based on trigger properties
-                randomSeed = 0x12345678u + (uint32_t)(targetFreq * 100.0f);
+        // Seed voice-local random generator uniquely based on trigger properties
+        randomSeed = 0x12345678u + (uint32_t)(targetFreq * 100.0f);
 
         // Reset mod offsets
-                modCutoffOffset = 0.0f;
-                modResOffset = 0.0f;
-                modVol1Offset = 0.0f;
-                modVol2Offset = 0.0f;
-                modMorph1Offset = 0.0f;
-                modMorph2Offset = 0.0f;
-                modPitchOffset = 0.0f;
+        modCutoffOffset = 0.0f;
+        modResOffset = 0.0f;
+        modVol1Offset = 0.0f;
+        modVol2Offset = 0.0f;
+        modMorph1Offset = 0.0f;
+        modMorph2Offset = 0.0f;
+        modPitchOffset = 0.0f;
 
         // Auto-Gate Timer Initialization
-                       if (isSeq) {
-                           double tickLengthSeconds = 2.5 / tempo;
-                           uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
-                           uint32_t samplesPerStep = samplesPerTick * 6;
-                           
-                           // Hold for noteLength steps (subtracting 15% step decay interval for release spacing)
-                           float holdStepsCount = (noteLength == 0) ? 0.85f : ((float)noteLength - 0.15f);
-                           gateTimerSamples = (uint32_t)(samplesPerStep * holdStepsCount);
-                           useGateTimer = true;
-                       } else {
-                           useGateTimer = false;
-                           gateTimerSamples = 0;
-                       }
-                   }
+        if (isSeq) {
+            double tickLengthSeconds = 2.5 / tempo;
+            uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
+            uint32_t samplesPerStep = samplesPerTick * 6;
+            
+            // Hold for noteLength steps (subtracting 15% step decay interval for release spacing)
+            float holdStepsCount = (noteLength == 0) ? 0.85f : ((float)noteLength - 0.15f);
+            gateTimerSamples = (uint32_t)(samplesPerStep * holdStepsCount);
+            useGateTimer = true;
+        } else {
+            useGateTimer = false;
+            gateTimerSamples = 0;
+        }
+    }
 
     void Release() {
         if (stage1 != ENV1_IDLE) stage1 = ENV1_RELEASE;
@@ -344,63 +377,81 @@ struct SynthVoice {
         // Release Filter Envelope
         if (filterStage != FLT_IDLE) filterStage = FLT_RELEASE;
     }
+    // Polynomial band-limited step correction helper
+        static inline float blep(float t, float dt) {
+            if (t < dt) {
+                float x = t / dt - 1.0f;
+                return -x * x;
+            } else if (t > 1.0f - dt) {
+                float x = (t - 1.0f) / dt + 1.0f;
+                return x * x;
+            }
+            return 0.0f;
+        }    // Process a single wave slice dynamically (expects normalized phase in [0, 1))
+    float ProcessWave(float normPhase, float dt, int morph) {
+        // Wrap normalized phase to [0.0, 1.0)
+        while (normPhase >= 1.0f) normPhase -= 1.0f;
+        while (normPhase < 0.0f)  normPhase += 1.0f;
 
-    // Process a single wave slice dynamically (expects normalized phase in [0, 1))
-        float ProcessWave(float normPhase, int morph) {
-            // Wrap normalized phase to [0.0, 1.0)
-            while (normPhase >= 1.0f) normPhase -= 1.0f;
-            while (normPhase < 0.0f)  normPhase += 1.0f;
+        // Scale by 2*PI only at the moment of sine calculation
+        float sineSample = sinf(normPhase * 6.2831853f);
+        
+        float triSample = 0.0f;
+        if (normPhase < 0.25f)      triSample = normPhase * 4.0f;
+        else if (normPhase < 0.75f) triSample = 2.0f - (normPhase * 4.0f);
+        else                        triSample = (normPhase * 4.0f) - 4.0f;
 
-            // Scale by 2*PI only at the moment of sine calculation
-            float sineSample = sinf(normPhase * 6.2831853f);
-            
-            float triSample = 0.0f;
-            if (normPhase < 0.25f)      triSample = normPhase * 4.0f;
-            else if (normPhase < 0.75f) triSample = 2.0f - (normPhase * 4.0f);
-            else                        triSample = (normPhase * 4.0f) - 4.0f;
+        // Band-limit the Saw wave (step of +2.0 at wrap point)
+        float naiveSaw = 1.0f - (normPhase * 2.0f);
+        float sawSample = naiveSaw + blep(normPhase, dt);
 
-            float sawSample = 1.0f - (normPhase * 2.0f);
-            float sqrSample = (normPhase < 0.5f) ? 0.5f : -0.5f;
+        // Band-limit the Square wave (step of +1.0 at 0.0, and -1.0 at 0.5)
+        float naiveSqr = (normPhase < 0.5f) ? 0.5f : -0.5f;
+        float phaseSquare2 = normPhase + 0.5f;
+        if (phaseSquare2 >= 1.0f) phaseSquare2 -= 1.0f; // Symmetrical wrap
+        
+        float sqrSample = naiveSqr + 0.5f * blep(normPhase, dt) - 0.5f * blep(phaseSquare2, dt);
 
-            if (morph < 33) {
-                float t = morph / 33.0f;
-                return (1.0f - t) * sineSample + t * triSample;
-            } else if (morph < 66) {
-                float t = (morph - 33) / 33.0f;
-                return (1.0f - t) * triSample + t * sawSample;
-            } else {
-                float t = (morph - 66) / 33.0f;
-                return (1.0f - t) * sawSample + t * sqrSample;
+        if (morph < 33) {
+            float t = morph / 33.0f;
+            return (1.0f - t) * sineSample + t * triSample;
+        } else if (morph < 66) {
+            float t = (morph - 33) / 33.0f;
+            return (1.0f - t) * triSample + t * sawSample;
+        } else {
+            float t = (morph - 66) / 33.0f;
+            return (1.0f - t) * sawSample + t * sqrSample;
+        }
+    }
+
+    float Process(int trackIdx) {
+        if (stage1 == ENV1_IDLE && stage2 == ENV2_IDLE && noiseStage == NOISE_IDLE && filterStage == FLT_IDLE) return 0.0f;
+
+        // 1. Process the Auto-Gate Timer (Tells the ADSR to release)
+        if (useGateTimer) {
+            if (gateTimerSamples > 0) {
+                gateTimerSamples--;
+                if (gateTimerSamples == 0) {
+                    Release();
+                    useGateTimer = false;
+                }
             }
         }
-    float Process(int trackIdx) {
-                if (stage1 == ENV1_IDLE && stage2 == ENV2_IDLE && noiseStage == NOISE_IDLE && filterStage == FLT_IDLE) return 0.0f;
 
-                // 1. Process the Auto-Gate Timer (Tells the ADSR to release)
-                if (useGateTimer) {
-                    if (gateTimerSamples > 0) {
-                        gateTimerSamples--;
-                        if (gateTimerSamples == 0) {
-                            Release();
-                            useGateTimer = false;
-                        }
-                    }
-                }
-
-                // 2. Fast crossfade choke ramp (Prevents clicks on sudden overlaps)
-                if (choking) {
-                    chokeVolume -= 1.0f / 256.0f;
-                    if (chokeVolume <= 0.0f) {
-                        chokeVolume = 0.0f;
-                        active = false;
-                        choking = false;
-                        stage1 = ENV1_IDLE;
-                        stage2 = ENV2_IDLE;
-                        noiseStage = NOISE_IDLE;
-                        filterStage = FLT_IDLE;
-                        return 0.0f;
-                    }
-                }
+        // 2. Fast crossfade choke ramp (Prevents clicks on sudden overlaps)
+        if (choking) {
+            chokeVolume -= 1.0f / 256.0f;
+            if (chokeVolume <= 0.0f) {
+                chokeVolume = 0.0f;
+                active = false;
+                choking = false;
+                stage1 = ENV1_IDLE;
+                stage2 = ENV2_IDLE;
+                noiseStage = NOISE_IDLE;
+                filterStage = FLT_IDLE;
+                return 0.0f;
+            }
+        }
 
         const Track& trk = tracks[trackIdx];
         const StepParams& sp = trk.steps[playhead].params; // Parameter overrides on the active step
@@ -411,87 +462,133 @@ struct SynthVoice {
         };
 
         // Resolve active Analog value contextually (Reuses fmFeedback parameter in Parallel mode)
-                int analogVal = GetParam(sp.fmFeedback, trk.fmFeedback);
-                float analogAmount = (trk.algorithm == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.0f;
+        int analogVal = GetParam(sp.fmFeedback, trk.fmFeedback);
+        float analogAmount = (trk.algorithm == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.0f;
         
         // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
         // Combine base parameters with LFO modulation offsets (clamped to safe ranges)
         float targetMorph1 = std::clamp(GetParam(sp.morph, trk.morph) + modMorph1Offset, 0.0f, 99.0f);
         float targetMorph2 = std::clamp(GetParam(sp.morph2, trk.morph2) + modMorph2Offset, 0.0f, 99.0f);
-        float targetVol1 = std::clamp(GetParam(sp.volume, trk.volume) + modVol1Offset, 0.0f, 99.0f);
-        float targetVol2 = std::clamp(GetParam(sp.volume2, trk.volume2) + modVol2Offset, 0.0f, 99.0f);
+        
+        // Resolve Oscillator 1 targets
+        float targetVol1Val = std::clamp(GetParam(sp.volume, trk.volume) + modVol1Offset, 0.0f, 99.0f);
+        float targetVol1Gain = VolumeCurve(targetVol1Val); // Perceptual volume LUT lookup
+        float targetVol1Raw  = targetVol1Val / 99.0f;       // Raw normalized 0..1 for drive coupling
+
+        // Resolve Oscillator 2 targets contextually
+        float targetVol2Val = std::clamp(GetParam(sp.volume2, trk.volume2) + modVol2Offset, 0.0f, 99.0f);
+        float targetVol2Gain = (trk.algorithm == ALGO_CARRIER_MOD)
+            ? (targetVol2Val / 99.0f)                      // Raw 0..1 in FM mode to protect sweet spot
+            : VolumeCurve(targetVol2Val);                  // Perceptual volume LUT in Parallel mode
 
         if (smoothMorph1 < 0.0f) {
             smoothMorph1 = targetMorph1;
             smoothMorph2 = targetMorph2;
-            smoothVol1 = targetVol1;
-            smoothVol2 = targetVol2;
+            smoothVol1 = targetVol1Gain;
+            smoothVol1Raw = targetVol1Raw;
+            smoothVol2 = targetVol2Gain;
         } else {
             smoothMorph1 += (targetMorph1 - smoothMorph1) * 0.005f;
             smoothMorph2 += (targetMorph2 - smoothMorph2) * 0.005f;
-            smoothVol1 += (targetVol1 - smoothVol1) * 0.005f;
-            smoothVol2 += (targetVol2 - smoothVol2) * 0.005f;
+            smoothVol1 += (targetVol1Gain - smoothVol1) * 0.005f;
+            smoothVol1Raw += (targetVol1Raw - smoothVol1Raw) * 0.005f;
+            smoothVol2 += (targetVol2Gain - smoothVol2) * 0.005f;
         }
+
         // Slew cutoff parameter per-sample to eliminate block-rate zipper noise and step-lock clicks
-                float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
-                if (smoothCutoff < 0.0f) {
-                    smoothCutoff = targetCutoff;
-                } else {
-                    smoothCutoff += (targetCutoff - smoothCutoff) * 0.004f; // Smooth 5-10ms slew
-                }
+        float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + modCutoffOffset, 0.0f, 99.0f);
+        if (smoothCutoff < 0.0f) {
+            smoothCutoff = targetCutoff;
+        } else {
+            smoothCutoff += (targetCutoff - smoothCutoff) * 0.004f; // Smooth 5-10ms slew
+        }
         
         // --- 1. PROCESS ENVELOPE 1 (Carrier) ---
-                switch (stage1) {
-                    case ENV1_ATTACK:  envLevel1 += envAtkRate1; if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; } break;
-                    case ENV1_DECAY:   envLevel1 -= envDecRate1; if (envLevel1 <= envSusLevel1) { envLevel1 = envSusLevel1; stage1 = ENV1_SUSTAIN; } break;
-                    case ENV1_SUSTAIN: envLevel1 = envSusLevel1; break;
-                    case ENV1_RELEASE: envLevel1 -= envRelRate1; if (envLevel1 <= 0.0f) { envLevel1 = 0.0f; stage1 = ENV1_IDLE; } break;
-                    default: break;
-                }
+        switch (stage1) {
+            case ENV1_ATTACK:
+                envLevel1 += envAtkRate1;
+                if (envLevel1 >= 1.0f) { envLevel1 = 1.0f; stage1 = ENV1_DECAY; }
+                break;
+            case ENV1_DECAY:
+                envLevel1 = envSusLevel1 + (envLevel1 - envSusLevel1) * envDecCoeff1;
+                if (envLevel1 - envSusLevel1 <= 0.0001f) { envLevel1 = envSusLevel1; stage1 = ENV1_SUSTAIN; }
+                break;
+            case ENV1_SUSTAIN:
+                envLevel1 = envSusLevel1;
+                break;
+            case ENV1_RELEASE:
+                envLevel1 *= envRelCoeff1;
+                if (envLevel1 <= 0.0001f) { envLevel1 = 0.0f; stage1 = ENV1_IDLE; }
+                break;
+            default: break;
+        }
+
         // --- 2. PROCESS ENVELOPE 2 (Modulator) ---
-                switch (stage2) {
-                    case ENV2_ATTACK:  envLevel2 += envAtkRate2; if (envLevel2 >= 1.0f) { envLevel2 = 1.0f; stage2 = ENV2_DECAY; } break;
-                    case ENV2_DECAY:   envLevel2 -= envDecRate2; if (envLevel2 <= envSusLevel2) { envLevel2 = envSusLevel2; stage2 = ENV2_SUSTAIN; } break;
-                    case ENV2_SUSTAIN: envLevel2 = envSusLevel2; break;
-                    case ENV2_RELEASE: envLevel2 -= envRelRate2; if (envLevel2 <= 0.0f) { envLevel2 = 0.0f; stage2 = ENV2_IDLE; } break;
-                    default: break;
-                }
+        switch (stage2) {
+            case ENV2_ATTACK:
+                envLevel2 += envAtkRate2;
+                if (envLevel2 >= 1.0f) { envLevel2 = 1.0f; stage2 = ENV2_DECAY; }
+                break;
+            case ENV2_DECAY:
+                envLevel2 = envSusLevel2 + (envLevel2 - envSusLevel2) * envDecCoeff2;
+                if (envLevel2 - envSusLevel2 <= 0.0001f) { envLevel2 = envSusLevel2; stage2 = ENV2_SUSTAIN; }
+                break;
+            case ENV2_SUSTAIN:
+                envLevel2 = envSusLevel2;
+                break;
+            case ENV2_RELEASE:
+                envLevel2 *= envRelCoeff2;
+                if (envLevel2 <= 0.0001f) { envLevel2 = 0.0f; stage2 = ENV2_IDLE; }
+                break;
+            default: break;
+        }
 
         // --- 3. PROCESS NOISE GENERATOR AHD ENVELOPE ---
-                switch (noiseStage) {
-                    case NOISE_ATTACK:
-                        noiseEnvLevel += noiseAtkRate;
-                        if (noiseEnvLevel >= 1.0f) {
-                            noiseEnvLevel = 1.0f;
-                            noiseStage = NOISE_HOLD;
-                            noiseHoldCounter = 0;
-                        }
-                        break;
-                    case NOISE_HOLD:
-                        noiseHoldCounter++;
-                        if (noiseHoldCounter >= noiseHoldSamples) {
-                            noiseStage = NOISE_DECAY;
-                        }
-                        break;
-                    case NOISE_DECAY:
-                        noiseEnvLevel -= noiseDecRate;
-                        if (noiseEnvLevel <= 0.0f) {
-                            noiseEnvLevel = 0.0f;
-                            noiseStage = NOISE_IDLE;
-                        }
-                        break;
-                    default:
-                        break;
+        switch (noiseStage) {
+            case NOISE_ATTACK:
+                noiseEnvLevel += noiseAtkRate;
+                if (noiseEnvLevel >= 1.0f) {
+                    noiseEnvLevel = 1.0f;
+                    noiseStage = NOISE_HOLD;
+                    noiseHoldCounter = 0;
                 }
+                break;
+            case NOISE_HOLD:
+                noiseHoldCounter++;
+                if (noiseHoldCounter >= noiseHoldSamples) {
+                    noiseStage = NOISE_DECAY;
+                }
+                break;
+            case NOISE_DECAY:
+                noiseEnvLevel -= noiseDecRate;
+                if (noiseEnvLevel <= 0.0f) {
+                    noiseEnvLevel = 0.0f;
+                    noiseStage = NOISE_IDLE;
+                }
+                break;
+            default:
+                break;
+        }
 
         // --- 4. PROCESS FILTER ENVELOPE (ADSR) ---
-                switch (filterStage) {
-                    case FLT_ATTACK:  filterEnvLevel += filterAtkRate; if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; } break;
-                    case FLT_DECAY:   filterEnvLevel -= filterDecRate; if (filterEnvLevel <= filterSusLevel) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; } break;
-                    case FLT_SUSTAIN: filterEnvLevel = filterSusLevel; break;
-                    case FLT_RELEASE: filterEnvLevel -= filterRelRate; if (filterEnvLevel <= 0.0f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; } break;
-                    default: break;
-                }
+        switch (filterStage) {
+            case FLT_ATTACK:
+                filterEnvLevel += filterAtkRate;
+                if (filterEnvLevel >= 1.0f) { filterEnvLevel = 1.0f; filterStage = FLT_DECAY; }
+                break;
+            case FLT_DECAY:
+                filterEnvLevel = filterSusLevel + (filterEnvLevel - filterSusLevel) * filterDecCoeff;
+                if (filterEnvLevel - filterSusLevel <= 0.0001f) { filterEnvLevel = filterSusLevel; filterStage = FLT_SUSTAIN; }
+                break;
+            case FLT_SUSTAIN:
+                filterEnvLevel = filterSusLevel;
+                break;
+            case FLT_RELEASE:
+                filterEnvLevel *= filterRelCoeff;
+                if (filterEnvLevel <= 0.0001f) { filterEnvLevel = 0.0f; filterStage = FLT_IDLE; }
+                break;
+            default: break;
+        }
 
         // --- 5. PROCESS REAL-TIME PITCH DECAY SWEEP ---
         if (pitchModFactor > 1.0f) {
@@ -502,39 +599,46 @@ struct SynthVoice {
 
         // --- 6. BLOCK-RATE SVF COEFFICIENTS UPDATE (Every 64 Samples) ---
         filterUpdateCounter++;
-                if (filterUpdateCounter >= 64) {
-                    filterUpdateCounter = 0;
-                    // Update slow-moving pitch drift (slop)
-                                        if (analogAmount > 0.0f) {
-                                            float rawNoise1 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
-                                            float rawNoise2 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
-                                            osc1Drift = osc1Drift * 0.92f + rawNoise1 * 0.08f;
-                                            osc2Drift = osc2Drift * 0.92f + rawNoise2 * 0.08f;
-                                        } else {
-                                            osc1Drift = 0.0f;
-                                            osc2Drift = 0.0f;
-                                        }
-                    // Recalculate envelope parameters at block rate instead of per sample
-                    float invSampleRate = 1.0f / (float)g_sampleRate;
+        if (filterUpdateCounter >= 64) {
+            filterUpdateCounter = 0;
+            // Update slow-moving pitch drift (slop)
+            if (analogAmount > 0.0f) {
+                float rawNoise1 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
+                float rawNoise2 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
+                osc1Drift = osc1Drift * 0.92f + rawNoise1 * 0.08f;
+                osc2Drift = osc2Drift * 0.92f + rawNoise2 * 0.08f;
+            } else {
+                osc1Drift = 0.0f;
+                osc2Drift = 0.0f;
+            }
+            // Recalculate envelope parameters at block rate instead of per sample
+            float invSampleRate = 1.0f / (float)g_sampleRate;
 
-                    envAtkRate1 = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
-                    envDecRate1 = invSampleRate / GetEnvTime(GetParam(sp.decay, trk.decay));
-                    envRelRate1 = invSampleRate / GetEnvTime(GetParam(sp.release, trk.release));
-                    envSusLevel1 = GetParam(sp.sustain, trk.sustain) / 99.0f;
+            envAtkRate1 = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
+            float decTime1 = GetEnvTime(GetParam(sp.decay, trk.decay));
+            envDecCoeff1 = expf(-6.9078f / ((float)g_sampleRate * decTime1));
+            float relTime1 = GetEnvTime(GetParam(sp.release, trk.release));
+            envRelCoeff1 = expf(-6.9078f / ((float)g_sampleRate * relTime1));
+            envSusLevel1 = GetParam(sp.sustain, trk.sustain) / 99.0f;
 
-                    envAtkRate2 = invSampleRate / GetEnvTime(GetParam(sp.attack2, trk.attack2));
-                    envDecRate2 = invSampleRate / GetEnvTime(GetParam(sp.decay2, trk.decay2));
-                    envRelRate2 = invSampleRate / GetEnvTime(GetParam(sp.release2, trk.release2));
-                    envSusLevel2 = GetParam(sp.sustain2, trk.sustain2) / 99.0f;
+            envAtkRate2 = invSampleRate / GetEnvTime(GetParam(sp.attack2, trk.attack2));
+            float decTime2 = GetEnvTime(GetParam(sp.decay2, trk.decay2));
+            envDecCoeff2 = expf(-6.9078f / ((float)g_sampleRate * decTime2));
+            float relTime2 = GetEnvTime(GetParam(sp.release2, trk.release2));
+            envRelCoeff2 = expf(-6.9078f / ((float)g_sampleRate * relTime2));
+            envSusLevel2 = GetParam(sp.sustain2, trk.sustain2) / 99.0f;
 
-                    noiseAtkRate = invSampleRate / GetEnvTime(GetParam(sp.noiseAttack, trk.noiseAttack));
-                    noiseDecRate = invSampleRate / GetEnvTime(GetParam(sp.noiseDecay, trk.noiseDecay));
-                    noiseHoldSamples = (uint32_t)(GetEnvTime(GetParam(sp.noiseHold, trk.noiseHold)) * g_sampleRate);
+            noiseAtkRate = invSampleRate / GetEnvTime(GetParam(sp.noiseAttack, trk.noiseAttack));
+            noiseDecRate = invSampleRate / GetEnvTime(GetParam(sp.noiseDecay, trk.noiseDecay));
+            noiseHoldSamples = (uint32_t)(GetEnvTime(GetParam(sp.noiseHold, trk.noiseHold)) * g_sampleRate);
 
-                    filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
-                    filterDecRate = invSampleRate / GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
-                    filterRelRate = invSampleRate / GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
-                    filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
+            filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
+            float fDecTime = GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
+            filterDecCoeff = expf(-6.9078f / ((float)g_sampleRate * fDecTime));
+            float fRelTime = GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
+            filterRelCoeff = expf(-6.9078f / ((float)g_sampleRate * fRelTime));
+            filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
+            
             // Reset mod offsets
             modCutoffOffset = 0.0f;
             modResOffset = 0.0f;
@@ -580,15 +684,15 @@ struct SynthVoice {
             }
 
             // Modulate the normalized control position (0.0 to 1.0) logarithmically before mapping to Hz
-                        float normCut = smoothCutoff / 99.0f;
-                        int dptVal = GetParam(sp.filterEnvDepth, trk.filterEnvDepth);
-                        float envMod = filterEnvLevel * (dptVal / 99.0f);
+            float normCut = smoothCutoff / 99.0f;
+            int dptVal = GetParam(sp.filterEnvDepth, trk.filterEnvDepth);
+            float envMod = filterEnvLevel * (dptVal / 99.0f);
 
-                        // Blend base cutoff and envelope modulation in the normalized control domain
-                        float finalNormCut = std::clamp(normCut + envMod, 0.0f, 1.0f);
+            // Blend base cutoff and envelope modulation in the normalized control domain
+            float finalNormCut = std::clamp(normCut + envMod, 0.0f, 1.0f);
 
-                        // Quartic mapping of modulated cutoff (15Hz to 16000Hz)
-                        float finalCutoffHz = 15.0f + (finalNormCut * finalNormCut * finalNormCut * finalNormCut) * 15985.0f;
+            // Quartic mapping of modulated cutoff (15Hz to 16000Hz)
+            float finalCutoffHz = 15.0f + (finalNormCut * finalNormCut * finalNormCut * finalNormCut) * 15985.0f;
             float resNorm = std::clamp(GetParam(sp.filterResonance, trk.filterResonance) + modResOffset, 0.0f, 99.0f) / 99.0f;
 
             // Recalculate SVF coefficients
@@ -602,113 +706,103 @@ struct SynthVoice {
         float finalSample = 0.0f;
 
         if (trk.algorithm == ALGO_PARALLEL) {
-                            // ==========================================
-                            // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
-                            // ==========================================
-                            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
-                            float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
+            // ==========================================
+            // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
+            // ==========================================
+            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
+            float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
 
-                            float freq1AnalogScale = 1.0f;
-                            float freq2AnalogScale = 1.0f;
+            float freq1AnalogScale = 1.0f;
+            float freq2AnalogScale = 1.0f;
 
             if (analogAmount > 0.0f) {
-                                    // 1. Apply random pitch slop (drift)
-                                    freq1AnalogScale += osc1Drift * analogAmount * 0.0022f;
-                                    freq2AnalogScale += osc2Drift * analogAmount * 0.0022f;
-                                    
-                                    // 2. Apply static detune offset
-                                    freq2AnalogScale += analogAmount * 0.00042f;
+                // 1. Apply random pitch slop (drift)
+                freq1AnalogScale += osc1Drift * analogAmount * 0.0022f;
+                freq2AnalogScale += osc2Drift * analogAmount * 0.0022f;
+                
+                // 2. Apply static detune offset
+                freq2AnalogScale += analogAmount * 0.00042f;
 
-                                    // 3. Apply Differential Keyboard Tracking Error (Oscillator Divergence)
-                                    // Calculate how many octaves the note is away from center C4 (261.63 Hz)
-                                    float octavesFromCenter = log2f(baseFreq / 261.63f);
-
-                                    // As you play further from C4, Osc 1 drifts slightly sharp, and Osc 2 flat.
-                                    // At 100% Analog, this creates up to ~0.08% divergence per octave (~1.5 cents).
+                // 3. Apply Differential Keyboard Tracking Error (Oscillator Divergence)
+                float octavesFromCenter = log2f(baseFreq / 261.63f);
                 float trackingDivergence = octavesFromCenter * analogAmount * 0.005f;
-                                    freq1AnalogScale += trackingDivergence;
-                                    freq2AnalogScale -= trackingDivergence;
-                                }
+                freq1AnalogScale += trackingDivergence;
+                freq2AnalogScale -= trackingDivergence;
+            }
 
-                                float finalFreq1 = freq1 * freq1AnalogScale;
-                                float finalFreq2 = freq2 * freq2AnalogScale;
+            float finalFreq1 = freq1 * freq1AnalogScale;
+            float finalFreq2 = freq2 * freq2AnalogScale;
 
-                                float rawOsc1 = ProcessWave(phase1, (int)smoothMorph1);
-                                float rawOsc2 = ProcessWave(phase2, (int)smoothMorph2);
+            float dt1 = finalFreq1 / (float)g_sampleRate;
+            float dt2 = finalFreq2 / (float)g_sampleRate;
 
-                                // Apply 1-pole low pass filter waveform softening (old 100% softening occurs at ~75%)
-                                if (analogAmount > 0.0f) {
-                                    float lpCoeff = 1.0f - (analogAmount * 0.75f); // Transitions down to 0.25 (darker, warmer)
-                                    osc1LPState += lpCoeff * (rawOsc1 - osc1LPState);
-                                    osc2LPState += lpCoeff * (rawOsc2 - osc2LPState);
-                                    rawOsc1 = osc1LPState;
-                                    rawOsc2 = osc2LPState;
-                                }
+            float rawOsc1 = ProcessWave(phase1, dt1, (int)smoothMorph1);
+            float rawOsc2 = ProcessWave(phase2, dt2, (int)smoothMorph2);
 
-                            float drive = 1.0f + (smoothVol1 / 33.0f);
-                            float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
+            // Apply 1-pole low pass filter waveform softening
+            if (analogAmount > 0.0f) {
+                float lpCoeff = 1.0f - (analogAmount * 0.75f);
+                osc1LPState += lpCoeff * (rawOsc1 - osc1LPState);
+                osc2LPState += lpCoeff * (rawOsc2 - osc2LPState);
+                rawOsc1 = osc1LPState;
+                rawOsc2 = osc2LPState;
+            }
 
-                            float osc1 = saturatedOsc1 * envLevel1 * (smoothVol1 / 99.0f);
-                            float osc2 = rawOsc2 * envLevel2 * (smoothVol2 / 99.0f);
+            float drive = 1.0f + (smoothVol1Raw * 3.0f);
+            float saturatedOsc1 = ApplySaturation(rawOsc1, drive);
 
-                            finalSample = (osc1 + osc2) * 0.5f;
+            float osc1 = saturatedOsc1 * envLevel1 * smoothVol1;
+            float osc2 = rawOsc2 * envLevel2 * smoothVol2;
 
-                            // Normalized phase increments: no multiplication by 2*PI needed!
-                            phase1 += finalFreq1 / (float)g_sampleRate;
-                            phase2 += finalFreq2 / (float)g_sampleRate;
-                        }
+            finalSample = (osc1 + osc2) * 0.5f;
+
+            phase1 += finalFreq1 / (float)g_sampleRate;
+            phase2 += finalFreq2 / (float)g_sampleRate;
+        }
         else {
-                            // ==========================================
-                            // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
-                            // ==========================================
-                            // MODULATOR DETUNING: Divided by 2000.0f instead of 100.0f.
-                            // This turns fine2 into a true micro-tuning detune (+/- 0.05 max ratio offset) rather
-                            // than jumping intervals, and prevents startup dissonance from the default fine2=15.
-                            float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 2000.0f);
-                            if (ratio < 0.05f) ratio = 0.05f;
-                            float freq2 = freq1 * ratio;
+            // ==========================================
+            // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
+            // ==========================================
+            float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 2000.0f);
+            if (ratio < 0.05f) ratio = 0.05f;
+            float freq2 = freq1 * ratio;
 
-                            // Modulator self-feedback: scaled by 1/(2*PI) so feedback scale simplifies to exactly 0.5!
-                            float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 0.5f;
-                            float feedbackPhase = phase2 + lastModOutput * feedbackScale;
+            float dt1 = freq1 / (float)g_sampleRate;
+            float dt2 = freq2 / (float)g_sampleRate;
 
-                            // Compute Modulator dry shape
-                            float modDry = ProcessWave(feedbackPhase, (int)smoothMorph2) * envLevel2;
-                            lastModOutput = modDry;
+            float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 0.5f;
+            float feedbackPhase = phase2 + lastModOutput * feedbackScale;
 
-                            // CUBIC INDEX SCALING: Stretches out the lower 50% of the slider.
-                            // This gives high-precision resolution to dial in sweet bells and mellow brass (0.0 to 1.5 radians),
-                            // while still allowing the top of the dial to scream up to the maximum of 8.0 radians.
-                            float normIdx = smoothVol2 / 99.0f;
-                            float index = normIdx * normIdx * normIdx * 1.2732395f;
+            float modDry = ProcessWave(feedbackPhase, dt2, (int)smoothMorph2) * envLevel2;
+            lastModOutput = modDry;
 
-                    // Modulate Carrier phase
-                    float modulatedPhase1 = phase1 + modDry * index;
-                    float carrier = ProcessWave(modulatedPhase1, (int)smoothMorph1) * envLevel1 * (smoothVol1 / 99.0f);
+            float index = smoothVol2 * smoothVol2 * smoothVol2 * 1.2732395f;
 
-                    finalSample = carrier;
+            float modulatedPhase1 = phase1 + modDry * index;
+            float carrier = ProcessWave(modulatedPhase1, dt1, (int)smoothMorph1) * envLevel1 * smoothVol1;
 
-                    // Normalized phase increments
-                    phase1 += freq1 / (float)g_sampleRate;
-                    phase2 += freq2 / (float)g_sampleRate;
-                }
+            finalSample = carrier;
+
+            phase1 += freq1 / (float)g_sampleRate;
+            phase2 += freq2 / (float)g_sampleRate;
+        }
 
         // Wrap normalized phases
-                if (phase1 >= 1.0f) phase1 -= 1.0f;
-                if (phase2 >= 1.0f) phase2 -= 1.0f;
+        if (phase1 >= 1.0f) phase1 -= 1.0f;
+        if (phase2 >= 1.0f) phase2 -= 1.0f;
 
         // --- 8. PROCESS WHITE NOISE TRANSIENT ---
         float rawNoise = FastRandFloat(randomSeed) * 2.0f - 1.0f;
-        float scaledNoise = rawNoise * noiseEnvLevel * (GetParam(sp.noiseVolume, trk.noiseVolume) / 99.0f);
+        float scaledNoise = rawNoise * noiseEnvLevel * VolumeCurve(GetParam(sp.noiseVolume, trk.noiseVolume));
 
         // Mix noise with synthesized waves BEFORE filter stage
         float combinedSignal = finalSample + scaledNoise;
         int fType = GetParam(sp.filterType, trk.filterType);
 
         // --- 9. RUN THROUGH SILKY STATE-VARIABLE FILTER (SVF) ---
-                float targetMasterVol = GetParam(sp.masterVolume, trk.masterVolume) / 99.0f; // <--- Add this line
-                       return filter.process(combinedSignal, fType, analogAmount) * velocityScale * chokeVolume * targetMasterVol; // <--- Multiply here
-           }
+        float targetMasterVol = VolumeCurve(GetParam(sp.masterVolume, trk.masterVolume));
+        return filter.process(combinedSignal, fType, analogAmount) * velocityScale * chokeVolume * targetMasterVol;
+    }
 };
 
 // 8 Synth Tracks, each polyphonic by 4 voices
@@ -1372,6 +1466,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
 // PUBLIC CONTROLLER INTERFACE
 // ==========================================
 void InitAudioEngine() {
+    InitVolumeCurve();
     ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
     deviceConfig.playback.format   = ma_format_f32;
     deviceConfig.playback.channels = 2; // Stereo
@@ -1609,3 +1704,4 @@ bool IsSynthVoiceActive(int trackIdx, int voiceIdx) {
     if (trackIdx < 0 || trackIdx >= 8 || voiceIdx < 0 || voiceIdx >= 4) return false;
     return g_trackVoices[trackIdx][voiceIdx].active;
 }
+

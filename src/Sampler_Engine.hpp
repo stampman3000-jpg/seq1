@@ -48,15 +48,15 @@ struct SamplerVoice {
     uint32_t randomSeed = 0x12345678;
     
     // Cached envelope increment rates and levels calculated at block rate
-        float envAtkRate = 0.0f;
-        float envDecRate = 0.0f;
-        float envRelRate = 0.0f;
-        float envSusLevel = 0.0f;
+         float envAtkRate = 0.0f;
+         float envDecCoeff = 1.0f; // New multiplier
+         float envRelCoeff = 1.0f; // New multiplier
+         float envSusLevel = 0.0f;
 
-        float filterAtkRate = 0.0f;
-        float filterDecRate = 0.0f;
-        float filterRelRate = 0.0f;
-        float filterSusLevel = 0.0f;
+         float filterAtkRate = 0.0f;
+         float filterDecCoeff = 1.0f; // New multiplier
+         float filterRelCoeff = 1.0f; // New multiplier
+         float filterSusLevel = 0.0f;
     
     // Envelope 1 (Volume Envelope matching Page 3)
     float envLevel = 0.0f;
