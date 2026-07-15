@@ -5,6 +5,15 @@
 #include <filesystem>
 #include <vector>
 
+// Helper utility to safely read optional parameters from older files without breaking the file stream
+template <typename T>
+static void SafeRead(std::ifstream& file, T& val, T defaultVal) {
+    if (!(file >> val)) {
+        file.clear(); // Clears any fail/EOF flags so the stream can keep reading
+        val = defaultVal; // Fall back to a safe default value
+    }
+}
+
 int selectedTrack = 0;
 std::atomic<bool> g_useExternalMidiClock(false);
 std::atomic<int> g_externalMidiTicksQueued(0);
@@ -717,21 +726,33 @@ bool LoadSoundPreset(int trackIdx, const std::string& filename) {
     file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
     file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
     file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-    if (!(file >> trk.masterVolume)) trk.masterVolume = 99; // <--- ADD THIS LINE (Safe fallback)
-    // Load Tape Buffer parameters
-    file >> trk.tapeMemory >> trk.tapeHeads >> trk.tapeSpread >> trk.tapeSpeed
-         >> trk.tapeTether >> trk.tapeDrift >> trk.tapeDriftRate >> trk.tapeFeedback
-         >> trk.tapeFbSpread >> trk.tapeFbSource >> trk.tapeFreeze >> trk.tapeSmearRate
-         >> trk.tapeSmearSize >> trk.tapeMix;
+    // Safely load the Master Volume with fallback
+                SafeRead(file, trk.masterVolume, 99);
 
-    // Load Poly/Mono Voice Mode
-    file >> trk.polyMode;
+                // Safely load all Tape Buffer parameters with safe defaults
+                SafeRead(file, trk.tapeMemory, 50);
+                SafeRead(file, trk.tapeHeads, 1);
+                SafeRead(file, trk.tapeSpread, 0);
+                SafeRead(file, trk.tapeSpeed, 74);
+                SafeRead(file, trk.tapeTether, 99);
+                SafeRead(file, trk.tapeDrift, 10);
+                SafeRead(file, trk.tapeDriftRate, 20);
+                SafeRead(file, trk.tapeFeedback, 30);
+                SafeRead(file, trk.tapeFbSpread, 10);
+                SafeRead(file, trk.tapeFbSource, 0);
+                SafeRead(file, trk.tapeFreeze, 0);
+                SafeRead(file, trk.tapeSmearRate, 0);
+                SafeRead(file, trk.tapeSmearSize, 40);
+                SafeRead(file, trk.tapeMix, 0);
 
-    // Load referenced Sample Slot and Name
-    file >> trk.sampleSlot;
-    std::string sampleName;
-    file >> sampleName;
+                // Safely load Poly Mode
+                SafeRead(file, trk.polyMode, 1);
 
+                // Safely load referenced Sample Slot and Name
+                SafeRead(file, trk.sampleSlot, 0);
+                std::string sampleName;
+                SafeRead(file, sampleName, std::string("Empty"));
+    
     if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
         if (g_samplePool[trk.sampleSlot].name != sampleName) {
             LoadSampleToPool(trk.sampleSlot, sampleName);
@@ -880,45 +901,57 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
         file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
         file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
         file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-        if (!(file >> trk.masterVolume)) trk.masterVolume = 99;
-        
-        // Load Tape Buffer track defaults
-        file >> trk.tapeMemory >> trk.tapeHeads >> trk.tapeSpread >> trk.tapeSpeed
-             >> trk.tapeTether >> trk.tapeDrift >> trk.tapeDriftRate >> trk.tapeFeedback
-             >> trk.tapeFbSpread >> trk.tapeFbSource >> trk.tapeFreeze >> trk.tapeSmearRate
-             >> trk.tapeSmearSize >> trk.tapeMix;
 
-        // Load Poly/Mono Voice Mode
-        file >> trk.polyMode;
+        // Safely load the Master Volume default
+        SafeRead(file, trk.masterVolume, 99);
+        
+        // Safely load all Tape Buffer track default settings
+        SafeRead(file, trk.tapeMemory, 50);
+        SafeRead(file, trk.tapeHeads, 1);
+        SafeRead(file, trk.tapeSpread, 0);
+        SafeRead(file, trk.tapeSpeed, 74);
+        SafeRead(file, trk.tapeTether, 99);
+        SafeRead(file, trk.tapeDrift, 10);
+        SafeRead(file, trk.tapeDriftRate, 20);
+        SafeRead(file, trk.tapeFeedback, 30);
+        SafeRead(file, trk.tapeFbSpread, 10);
+        SafeRead(file, trk.tapeFbSource, 0);
+        SafeRead(file, trk.tapeFreeze, 0);
+        SafeRead(file, trk.tapeSmearRate, 0);
+        SafeRead(file, trk.tapeSmearSize, 40);
+        SafeRead(file, trk.tapeMix, 0);
+
+        // Safely load Poly Mode default
+        SafeRead(file, trk.polyMode, 1);
 
         for (int s = 0; s < 32; ++s) {
-                    Step& step = trk.steps[s];
-                    file >> step.note; if (step.note == "-") step.note = "";
-                    file >> step.velocity;
+            Step& step = trk.steps[s];
+            file >> step.note; if (step.note == "-") step.note = "";
+            file >> step.velocity;
             file >> step.condition; step.condition = ""; // Force clean legacy text triggers
-                    file >> step.retrigger;
-                    file >> step.microtiming; // Load microtiming
+            file >> step.retrigger;
+            file >> step.microtiming; // Load microtiming
 
-                    std::string tempMask, tempLen, tempChord;
-                    if (file >> tempMask >> tempLen >> tempChord) {
-                        step.condMask = (uint16_t)std::stoul(tempMask);
-                        step.noteLength = std::stoi(tempLen);
-                        step.chordType = std::stoi(tempChord);
+            std::string tempMask, tempLen, tempChord;
+            if (file >> tempMask >> tempLen >> tempChord) {
+                step.condMask = (uint16_t)std::stoul(tempMask);
+                step.noteLength = std::stoi(tempLen);
+                step.chordType = std::stoi(tempChord);
 
-                        std::string n0, n1, n2;
-                        file >> n0 >> n1 >> n2;
-                        step.chordNotes[0] = (n0 == "-") ? "" : n0;
-                        step.chordNotes[1] = (n1 == "-") ? "" : n1;
-                        step.chordNotes[2] = (n2 == "-") ? "" : n2;
-                    } else {
-                        file.clear(); // Flush EOF errors
-                        step.condMask = 0xFFFF;
-                        step.noteLength = 0;
-                        step.chordType = 0;
-                        step.chordNotes[0] = "";
-                        step.chordNotes[1] = "";
-                        step.chordNotes[2] = "";
-                    }
+                std::string n0, n1, n2;
+                file >> n0 >> n1 >> n2;
+                step.chordNotes[0] = (n0 == "-") ? "" : n0;
+                step.chordNotes[1] = (n1 == "-") ? "" : n1;
+                step.chordNotes[2] = (n2 == "-") ? "" : n2;
+            } else {
+                file.clear(); // Flush EOF errors
+                step.condMask = 0xFFFF;
+                step.noteLength = 0;
+                step.chordType = 0;
+                step.chordNotes[0] = "";
+                step.chordNotes[1] = "";
+                step.chordNotes[2] = "";
+            }
 
             StepParams& sp = step.params;
             file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;
@@ -931,23 +964,33 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
             file >> sp.lfo1Wave >> sp.lfo1Speed >> sp.lfo1Depth >> sp.lfo1Trigger >> sp.lfo1Sync >> sp.lfo1Dest;
             file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync >> sp.lfo2Dest;
             file >> sp.reverbSend >> sp.delaySend >> sp.saturationSend >> sp.autoPanSend;
-            file >> sp.sampleSlot; // Load step-locked sample slot [2]
-            if (!(file >> sp.masterVolume)) sp.masterVolume = -1;
             
-            // Load step-locked Tape Buffer parameters
-            file >> sp.tapeMemory >> sp.tapeHeads >> sp.tapeSpread >> sp.tapeSpeed
-                 >> sp.tapeTether >> sp.tapeDrift >> sp.tapeDriftRate >> sp.tapeFeedback
-                 >> sp.tapeFbSpread >> sp.tapeFbSource >> sp.tapeFreeze >> sp.tapeSmearRate
-                 >> sp.tapeSmearSize >> sp.tapeMix;
+            // Safely load step overrides (fallback to -1 means "no parameter lock")
+            SafeRead(file, sp.sampleSlot, -1);
+            SafeRead(file, sp.masterVolume, -1);
+            
+            SafeRead(file, sp.tapeMemory, -1);
+            SafeRead(file, sp.tapeHeads, -1);
+            SafeRead(file, sp.tapeSpread, -1);
+            SafeRead(file, sp.tapeSpeed, -1);
+            SafeRead(file, sp.tapeTether, -1);
+            SafeRead(file, sp.tapeDrift, -1);
+            SafeRead(file, sp.tapeDriftRate, -1);
+            SafeRead(file, sp.tapeFeedback, -1);
+            SafeRead(file, sp.tapeFbSpread, -1);
+            SafeRead(file, sp.tapeFbSource, -1);
+            SafeRead(file, sp.tapeFreeze, -1);
+            SafeRead(file, sp.tapeSmearRate, -1);
+            SafeRead(file, sp.tapeSmearSize, -1);
+            SafeRead(file, sp.tapeMix, -1);
 
-            // Load step-locked Poly/Mono Voice Mode
-            file >> sp.polyMode;
-        }
+            SafeRead(file, sp.polyMode, -1);
+        } // end of step loop
 
-        // Load track-default Sample Slot and Name
-        file >> trk.sampleSlot;
+        // Safely load default Sample Slot and Name
+        SafeRead(file, trk.sampleSlot, 0);
         std::string sampleName;
-        file >> sampleName;
+        SafeRead(file, sampleName, std::string("Empty"));
 
         if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
             if (g_samplePool[trk.sampleSlot].name != sampleName) {
@@ -959,7 +1002,7 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
         if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
         if (trk.sampleLength < 1)   trk.sampleLength = 99;
         if (trk.loopEnd < 1)        trk.loopEnd = 99;
-    }
+    } // end of track (t) loop
 
     // Force flush RAM tracks back to screen if we are loading into the currently active slot
     if (patternIdx == activePattern) {
@@ -1145,16 +1188,28 @@ bool LoadProject(const std::string& filename) {
             file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
             file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
             file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-            if (!(file >> trk.masterVolume)) trk.masterVolume = 99;
             
-            // Load Tape Buffer track defaults
-            file >> trk.tapeMemory >> trk.tapeHeads >> trk.tapeSpread >> trk.tapeSpeed
-                 >> trk.tapeTether >> trk.tapeDrift >> trk.tapeDriftRate >> trk.tapeFeedback
-                 >> trk.tapeFbSpread >> trk.tapeFbSource >> trk.tapeFreeze >> trk.tapeSmearRate
-                 >> trk.tapeSmearSize >> trk.tapeMix;
+            // Safely load the Master Volume default
+            SafeRead(file, trk.masterVolume, 99);
+            
+            // Safely load all Tape Buffer track default settings
+            SafeRead(file, trk.tapeMemory, 50);
+            SafeRead(file, trk.tapeHeads, 1);
+            SafeRead(file, trk.tapeSpread, 0);
+            SafeRead(file, trk.tapeSpeed, 74);
+            SafeRead(file, trk.tapeTether, 99);
+            SafeRead(file, trk.tapeDrift, 10);
+            SafeRead(file, trk.tapeDriftRate, 20);
+            SafeRead(file, trk.tapeFeedback, 30);
+            SafeRead(file, trk.tapeFbSpread, 10);
+            SafeRead(file, trk.tapeFbSource, 0);
+            SafeRead(file, trk.tapeFreeze, 0);
+            SafeRead(file, trk.tapeSmearRate, 0);
+            SafeRead(file, trk.tapeSmearSize, 40);
+            SafeRead(file, trk.tapeMix, 0);
 
-            // Load Poly/Mono Voice Mode
-            file >> trk.polyMode;
+            // Safely load Poly Mode default
+            SafeRead(file, trk.polyMode, 1);
 
             for (int s = 0; s < 32; ++s) {
                 Step& step = trk.steps[s];
@@ -1165,25 +1220,25 @@ bool LoadProject(const std::string& filename) {
                 file >> step.microtiming; // Load microtiming
                 
                 std::string tempMask, tempLen, tempChord;
-                           if (file >> tempMask >> tempLen >> tempChord) {
-                               step.condMask = (uint16_t)std::stoul(tempMask);
-                               step.noteLength = std::stoi(tempLen);
-                               step.chordType = std::stoi(tempChord);
+                if (file >> tempMask >> tempLen >> tempChord) {
+                    step.condMask = (uint16_t)std::stoul(tempMask);
+                    step.noteLength = std::stoi(tempLen);
+                    step.chordType = std::stoi(tempChord);
 
-                               std::string n0, n1, n2;
-                               file >> n0 >> n1 >> n2;
-                               step.chordNotes[0] = (n0 == "-") ? "" : n0;
-                               step.chordNotes[1] = (n1 == "-") ? "" : n1;
-                               step.chordNotes[2] = (n2 == "-") ? "" : n2;
-                           } else {
-                               file.clear(); // Flush EOF errors
-                               step.condMask = 0xFFFF;
-                               step.noteLength = 0;
-                               step.chordType = 0;
-                               step.chordNotes[0] = "";
-                               step.chordNotes[1] = "";
-                               step.chordNotes[2] = "";
-                           }
+                    std::string n0, n1, n2;
+                    file >> n0 >> n1 >> n2;
+                    step.chordNotes[0] = (n0 == "-") ? "" : n0;
+                    step.chordNotes[1] = (n1 == "-") ? "" : n1;
+                    step.chordNotes[2] = (n2 == "-") ? "" : n2;
+                } else {
+                    file.clear(); // Flush EOF errors
+                    step.condMask = 0xFFFF;
+                    step.noteLength = 0;
+                    step.chordType = 0;
+                    step.chordNotes[0] = "";
+                    step.chordNotes[1] = "";
+                    step.chordNotes[2] = "";
+                }
 
                 StepParams& sp = step.params;
                 file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;
@@ -1195,24 +1250,35 @@ bool LoadProject(const std::string& filename) {
                 file >> sp.filterAttack >> sp.filterDecay >> sp.filterSustain >> sp.filterRelease;
                 file >> sp.lfo1Wave >> sp.lfo1Speed >> sp.lfo1Depth >> sp.lfo1Trigger >> sp.lfo1Sync >> sp.lfo1Dest;
                 file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync >> sp.lfo2Dest;
-                file >> sp.reverbSend >> sp.delaySend >> sp.saturationSend >> sp.autoPanSend;
-                file >> sp.sampleSlot; // Load step-locked sample slot [2]
-                if (!(file >> sp.masterVolume)) sp.masterVolume = -1;
-                
-                // Load step-locked Tape Buffer parameters
-                file >> sp.tapeMemory >> sp.tapeHeads >> sp.tapeSpread >> sp.tapeSpeed
-                     >> sp.tapeTether >> sp.tapeDrift >> sp.tapeDriftRate >> sp.tapeFeedback
-                     >> sp.tapeFbSpread >> sp.tapeFbSource >> sp.tapeFreeze >> sp.tapeSmearRate
-                     >> sp.tapeSmearSize >> sp.tapeMix;
+                SafeRead(file, sp.reverbSend, -1);
+                SafeRead(file, sp.delaySend, -1);
+                SafeRead(file, sp.saturationSend, -1);
+                SafeRead(file, sp.autoPanSend, -1);
+                SafeRead(file, sp.sampleSlot, -1);
 
-                // Load step-locked Poly/Mono Voice Mode
-                file >> sp.polyMode;
-            }
+                // Safely load step overrides (fallback to -1 means "no parameter lock")
+                SafeRead(file, sp.tapeMemory, -1);
+                SafeRead(file, sp.tapeHeads, -1);
+                SafeRead(file, sp.tapeSpread, -1);
+                SafeRead(file, sp.tapeSpeed, -1);
+                SafeRead(file, sp.tapeTether, -1);
+                SafeRead(file, sp.tapeDrift, -1);
+                SafeRead(file, sp.tapeDriftRate, -1);
+                SafeRead(file, sp.tapeFeedback, -1);
+                SafeRead(file, sp.tapeFbSpread, -1);
+                SafeRead(file, sp.tapeFbSource, -1);
+                SafeRead(file, sp.tapeFreeze, -1);
+                SafeRead(file, sp.tapeSmearRate, -1);
+                SafeRead(file, sp.tapeSmearSize, -1);
+                SafeRead(file, sp.tapeMix, -1);
 
-            // Load track-default Sample Slot and Name
-            file >> trk.sampleSlot;
+                SafeRead(file, sp.polyMode, -1);
+            } // end of step (s) loop
+
+            // Safely load default Sample Slot and Name
+            SafeRead(file, trk.sampleSlot, 0);
             std::string sampleName;
-            file >> sampleName;
+            SafeRead(file, sampleName, std::string("Empty"));
 
             if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
                 if (g_samplePool[trk.sampleSlot].name != sampleName) {
@@ -1224,8 +1290,8 @@ bool LoadProject(const std::string& filename) {
             if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
             if (trk.sampleLength < 1)   trk.sampleLength = 99;
             if (trk.loopEnd < 1)        trk.loopEnd = 99;
-        }
-    }
+        } // end of track (t) loop
+    } // end of pattern (p) loop
 
     // Force load the active pattern data into global rendering array
     for (int t = 0; t < 8; ++t) {
@@ -1234,7 +1300,6 @@ bool LoadProject(const std::string& filename) {
 
     return true;
 }
-
 // Thread-safe memory swapper performs a pattern swap in RAM
 void SwitchPattern(int newPatternIndex) {
     if (newPatternIndex < 0 || newPatternIndex >= 8) return;

@@ -1473,7 +1473,8 @@ void InitAudioEngine() {
     deviceConfig.sampleRate        = (ma_uint32)g_sampleRate;
     deviceConfig.dataCallback      = ma_audio_callback;
     
-    deviceConfig.periodSizeInMilliseconds = 50; // <--- CHANGED to 50ms for stable Pi playback
+    deviceConfig.periodSizeInFrames = 512;
+        deviceConfig.periodSizeInMilliseconds = 0;
 
     // Initialize delay lines with device sample rate on launch [2]
     g_masterDelay.init((float)g_sampleRate);
