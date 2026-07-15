@@ -1168,12 +1168,57 @@ int main() {
             }
         }
 
-        // Tab to trigger system menu
-        if (IsKeyPressed(KEY_TAB)) {
-            systemMenuOpen = !systemMenuOpen;
-            systemMenuState = 0;
-            menuFeedback = "";
-        }
+        // --- SMART TAB BUTTON MANAGER (MENU / SAFE SHUTDOWN) ---
+                static float tabHoldTimer = 0.0f;
+                static bool tabWasDown = false;
+
+                if (IsKeyDown(KEY_TAB)) {
+                    tabHoldTimer += GetFrameTime();
+                    tabWasDown = true;
+
+                    // Start showing visual countdown feedback after 1 second of holding
+                    if (tabHoldTimer >= 1.0f) {
+                        int remaining = 3 - (int)tabHoldTimer;
+                        if (remaining < 1) remaining = 1;
+                        
+                        char shutBuf[64];
+                        snprintf(shutBuf, sizeof(shutBuf), "SHUTDOWN IN %d...", remaining);
+                        menuFeedback = shutBuf;
+                    }
+                    
+                    // Trigger safe shutdown once held for a full 3 seconds
+                    if (tabHoldTimer >= 3.0f) {
+                        #if defined(__linux__)
+                        // Unload all active hardware drivers cleanly to prevent card corruption
+                        ShutdownOled();
+                        ShutdownAudioEngine();
+                        ShutdownMidi();
+                        std::cout << "[SYSTEM] Safe system shutdown initiated by TAB hold..." << std::endl;
+                        
+                        // Instruct Linux to safely power down the Raspberry Pi
+                        std::system("sudo shutdown -h now");
+                        #else
+                        menuFeedback = "MAC SHUTDOWN SIMULATED";
+                        tabHoldTimer = 0.0f;
+                        tabWasDown = false;
+                        #endif
+                    }
+                } else {
+                    if (tabWasDown) {
+                        // Key was just released!
+                        if (tabHoldTimer < 0.5f) {
+                            // Short Press: Toggle the standard System Menu
+                            systemMenuOpen = !systemMenuOpen;
+                            systemMenuState = 0;
+                            menuFeedback = systemMenuOpen ? "SYSTEM MENU OPEN" : "";
+                        } else {
+                            // Long Press aborted: Clear countdown and return to normal
+                            menuFeedback = "";
+                        }
+                        tabHoldTimer = 0.0f;
+                        tabWasDown = false;
+                    }
+                }
       
         // Ctrl + . (Ctrl + Full Stop) to toggle the Performance Popup
                 if (isCtrlDown && IsKeyPressed(KEY_PERIOD)) {
