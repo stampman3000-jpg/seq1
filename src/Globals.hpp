@@ -77,6 +77,13 @@ extern std::string g_typingBuffer;
 extern int g_typingCursor;
 extern std::vector<std::string> g_fileList;
 
+// Global Performance FX Popup variables
+extern bool perfPopupOpen;
+extern int perfFilterCutoff;
+extern int perfFilterResonance;
+extern int perfFilterType;   // 0 = LPF, 1 = HPF, 2 = BPF
+extern int activeStutterKey; // -1 if inactive, 0..7 if a stutter pad is pressed
+
 // Functions
 const char* GetTrackName(int trackIndex);
 void InitializeTracks();

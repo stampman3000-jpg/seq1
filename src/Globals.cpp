@@ -69,6 +69,13 @@ std::string g_typingBuffer = "";
 int g_typingCursor = 0;
 std::vector<std::string> g_fileList;
 
+// Initialize Global Performance FX states
+bool perfPopupOpen = false;
+int perfFilterCutoff = 99;   // Start fully open (clean bypass)
+int perfFilterResonance = 10; // Low resonance by default
+int perfFilterType = 0;      // Low-Pass by default
+int activeStutterKey = -1;   // -1 means no stutter active
+
 // Instantiate the global sample pool
 SampleAsset g_samplePool[16];
 const char* menuFeedback = "";
@@ -335,6 +342,7 @@ void InitializeTracks() {
         tracks[t].saturationSend = 0;
         tracks[t].masterVolume = 99;
         tracks[t].autoPanSend = 0;
+        tracks[t].glideTime = 0;
         tracks[t].muted = false;
     }
 
@@ -584,6 +592,7 @@ void ResetTrackToDefault(int t) {
         tracks[t].saturationSend = 0;
     tracks[t].autoPanSend = 0;
     tracks[t].masterVolume = 99;
+    tracks[t].glideTime = 0;
     tracks[t].muted = false;
 }
 

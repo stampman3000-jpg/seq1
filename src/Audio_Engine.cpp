@@ -16,6 +16,32 @@ static bool g_audioInitialized = false;
 
 static const double g_sampleRate = 44100.0;
 
+// --- MASTER PERFORMANCE FX DSP STATES ---
+#define STUTTER_BUF_SIZE 176400 // 4 seconds of stereo buffer at 44.1kHz
+static float g_stutterBufferL[STUTTER_BUF_SIZE] = { 0.0f };
+static float g_stutterBufferR[STUTTER_BUF_SIZE] = { 0.0f };
+static uint32_t g_stutterWritePtr = 0;
+
+static bool g_lastStutterActive = false;
+static int g_lastStutterKey = -1;
+static uint32_t g_stutterCapturePtr = 0;
+static float g_stutterPlayhead = 0.0f;
+
+static SvfFilter g_masterPerfFilterL;
+static SvfFilter g_masterPerfFilterR;
+
+// Stutter rhythmic subdivisions mapping to divFactors
+static const float stutterDivFactors[8] = {
+    1.0f,       // 1/1 beat
+    0.5f,       // 1/2 beat
+    0.25f,      // 1/4 beat
+    0.125f,     // 1/8 beat
+    0.166667f,  // 1/12 beat (eighth triplet)
+    0.0625f,    // 1/16 beat
+    0.083333f,  // 1/24 beat (sixteenth triplet)
+    0.03125f    // 1/32 beat
+};
+
 // Global thread-safe modulated output buffer populated at block rate
 float g_globalLFOValues[8][2] = { 0.0f };
 
@@ -284,16 +310,44 @@ struct SynthVoice {
         chokeVolume = 1.0f;
     }
     
-    void Trigger(float targetFreq, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0) {
-        baseFreq = targetFreq;
-        active = true;
-        stage1 = ENV1_ATTACK;
-        stage2 = ENV2_ATTACK;
-        lastModOutput = 0.0f; // Flush feedback buffer on note trigger
-        envLevel1 = 0.0f;
-        envLevel2 = 0.0f;
-        choking = false;     // Reset choke flags so note plays cleanly
-        chokeVolume = 1.0f;
+    void Trigger(float targetFreq, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0, int glideTimeVal = 0) {
+            // --- FIXED ACID LEGATO GLIDE CHECK ---
+            // A note is only legato if the voice is active AND currently making sound (not idle/silent)
+            bool isLegato = active && (stage1 != ENV1_IDLE) && (glideTimeVal > 0);
+
+            if (isLegato) {
+                baseFreq = targetFreq; // Set the new pitch destination
+                choking = false;      // Cancel any voice choking
+                chokeVolume = 1.0f;   // Reset choke gain to full
+                
+                // Re-trigger velocity scaling and auto-gate timers for the new note
+                velocityScale = (velocity == 1) ? 0.33f : ((velocity == 2) ? 0.66f : 1.0f);
+
+                if (isSeq) {
+                    double tickLengthSeconds = 2.5 / tempo;
+                    uint32_t samplesPerTick = (uint32_t)(tickLengthSeconds * g_sampleRate);
+                    uint32_t samplesPerStep = samplesPerTick * 6;
+                    
+                    float holdStepsCount = (noteLength == 0) ? 0.85f : ((float)noteLength - 0.15f);
+                    gateTimerSamples = (uint32_t)(samplesPerStep * holdStepsCount);
+                    useGateTimer = true;
+                }
+                return; // Exit early to prevent envelope re-triggering!
+            }
+
+            // --- NORMAL DETACHED TRIGGER ---
+            if (stage1 == ENV1_IDLE || !active) {
+                currentFreq = targetFreq; // Start glide from target pitch if triggering from silence
+            }
+            baseFreq = targetFreq;
+            active = true;
+            stage1 = ENV1_ATTACK;
+            stage2 = ENV2_ATTACK;
+            lastModOutput = 0.0f; // Flush feedback buffer on note trigger
+            envLevel1 = 0.0f;
+            envLevel2 = 0.0f;
+            choking = false;     // Reset choke flags so note plays cleanly
+            chokeVolume = 1.0f;
 
         // Map velocity steps (1..3) to linear scaling (0.33 to 1.0)
         velocityScale = (velocity == 1) ? 0.33f : ((velocity == 2) ? 0.66f : 1.0f);
@@ -699,9 +753,23 @@ struct SynthVoice {
             filter.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
         }
 
-        // --- 7. FREQUENCY CALCULATIONS ---
-        float semitoneOffset1 = GetParam(sp.coarse, trk.coarse) + (GetParam(sp.fine, trk.fine) / 100.0f);
-        float freq1 = baseFreq * pitchModFactor * powf(2.0f, (semitoneOffset1 + modPitchOffset) / 12.0f); // Modulated by pitch envelope
+        // --- 7. FREQUENCY CALCULATIONS & PORTAMENTO ---
+                int glideVal = GetParam(sp.glideTime, trk.glideTime);
+                if (glideVal > 0) {
+                    // Cubic scaling maps 1..99 control to a highly musical 1ms to 2.5s curve
+                    float normGlide = glideVal / 99.0f;
+                    float glideTimeSec = 0.001f + (normGlide * normGlide * normGlide) * 2.5f;
+                    float glideCoeff = 1.0f / (glideTimeSec * g_sampleRate);
+                    
+                    if (glideCoeff > 1.0f) glideCoeff = 1.0f;
+                    
+                    currentFreq += glideCoeff * (baseFreq - currentFreq);
+                } else {
+                    currentFreq = baseFreq; // Snap instantly if glide is off
+                }
+
+                float semitoneOffset1 = GetParam(sp.coarse, trk.coarse) + (GetParam(sp.fine, trk.fine) / 100.0f);
+                float freq1 = currentFreq * pitchModFactor * powf(2.0f, (semitoneOffset1 + modPitchOffset) / 12.0f); // Modulated by pitch envelope
 
         float finalSample = 0.0f;
 
@@ -855,10 +923,8 @@ static bool EvaluateCondition(const std::string& cond, int trackIdx) {
 void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
     auto startTime = std::chrono::high_resolution_clock::now(); // Record start time
     float* pOutputF = (float*)pOutput;
-    // ADD THIS LINE: Keeps track of where we are in the main buffer
-        ma_uint32 samplesProcessed = 0;
+    ma_uint32 samplesProcessed = 0;
 
-    // --- ADD THESE BLOCK-RATE PARAMETER ARRAYS ---
     static int s_finalMem[8]  = {50};
     static int s_finalHds[8]  = {1};
     static int s_finalSpr[8]  = {0};
@@ -874,16 +940,13 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     static int s_finalSms[8]  = {40};
     static int s_finalMix[8]  = {0};
 
-    // 1 Tick = 60.0 / (tempo * 24.0) = 2.5 / tempo seconds
     double tickLengthSeconds = 2.5 / tempo;
     ma_uint32 samplesPerTick = (ma_uint32)(tickLengthSeconds * g_sampleRate);
     ma_uint32 samplesPerStep = samplesPerTick * 6;
 
-    // Track active sequencer state transition to prevent live playing choke on STOP
     static bool lastPlayingState = false;
     if (isPlaying != lastPlayingState) {
         if (!isPlaying) {
-            // Just stopped: cleanly release all voices exactly once
             for (int t = 0; t < 8; ++t) {
                 for (int v = 0; v < 4; ++v) {
                     g_trackVoices[t][v].Release();
@@ -896,572 +959,567 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     }
 
     while (samplesProcessed < frameCount) {
-           ma_uint32 chunkSize = (frameCount - samplesProcessed < 64) ? (frameCount - samplesProcessed) : 64;
+        ma_uint32 chunkSize = (frameCount - samplesProcessed < 64) ? (frameCount - samplesProcessed) : 64;
 
-        // 1. RUN CHUNK-RATE CALCULATIONS (These execute once per 64 samples)
-                UpdateGlobalLFOs();
+        UpdateGlobalLFOs();
         
-                    // Calculate tape parameters once per 64-sample block for all 8 tracks
-                    for (int t = 0; t < 8; ++t) {
-                        const Track& trk = tracks[t];
-                        
-                        // Helper lambda to safely obtain active step params
-                        int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
-                        if (currentStepIdx < 0) currentStepIdx = 0; // Safety guard
-                        const Step& step = trk.steps[currentStepIdx];
+        for (int t = 0; t < 8; ++t) {
+            const Track& trk = tracks[t];
+            int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+            if (currentStepIdx < 0) currentStepIdx = 0;
+            const Step& step = trk.steps[currentStepIdx];
 
-                        float modTapeMem = 0.0f;
-                        float modTapeHds = 0.0f;
-                        float modTapeSpr = 0.0f;
-                        float modTapeSpd = 0.0f;
-                        float modTapeTet = 0.0f;
-                        float modTapeDrf = 0.0f;
-                        float modTapeDrt = 0.0f;
-                        float modTapeFdb = 0.0f;
-                        float modTapeFsp = 0.0f;
-                        float modTapeFsc = 0.0f;
-                        float modTapeFrz = 0.0f;
-                        float modTapeSmr = 0.0f;
-                        float modTapeSms = 0.0f;
-                        float modTapeMix = 0.0f;
+            float modTapeMem = 0.0f;
+            float modTapeHds = 0.0f;
+            float modTapeSpr = 0.0f;
+            float modTapeSpd = 0.0f;
+            float modTapeTet = 0.0f;
+            float modTapeDrf = 0.0f;
+            float modTapeDrt = 0.0f;
+            float modTapeFdb = 0.0f;
+            float modTapeFsp = 0.0f;
+            float modTapeFsc = 0.0f;
+            float modTapeFrz = 0.0f;
+            float modTapeSmr = 0.0f;
+            float modTapeSms = 0.0f;
+            float modTapeMix = 0.0f;
 
-                        for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
-                            const Track& srcTrk = tracks[srcTrkIdx];
-                            for (int s = 0; s < 3; ++s) {
-                                // LFO 1 Slot Taps
-                                {
-                                    const ModSlot& m = srcTrk.lfo1Slots[s];
-                                    if (m.destType == 1 && m.destTrack == t) {
-                                        float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
-                                        if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
-                                        else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
-                                    }
-                                }
-                                // LFO 2 Slot Taps
-                                {
-                                    const ModSlot& m = srcTrk.lfo2Slots[s];
-                                    if (m.destType == 1 && m.destTrack == t) {
-                                        float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
-                                        if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
-                                        else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
-                                        else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
-                                    }
-                                }
-                            }
+            for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
+                const Track& srcTrk = tracks[srcTrkIdx];
+                for (int s = 0; s < 3; ++s) {
+                    {
+                        const ModSlot& m = srcTrk.lfo1Slots[s];
+                        if (m.destType == 1 && m.destTrack == t) {
+                            float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
+                            if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
+                            else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
                         }
-
-                        s_finalMem[t]  = std::clamp((int)(GetParam(step.params.tapeMemory,     tracks[t].tapeMemory)    + modTapeMem), 0, 99);
-                        s_finalHds[t]  = std::clamp((int)(GetParam(step.params.tapeHeads,      tracks[t].tapeHeads)     + modTapeHds), 1, 4);
-                        s_finalSpr[t]  = std::clamp((int)(GetParam(step.params.tapeSpread,     tracks[t].tapeSpread)    + modTapeSpr), 0, 99);
-                        s_finalSpd[t]  = std::clamp((int)(GetParam(step.params.tapeSpeed,      tracks[t].tapeSpeed)     + modTapeSpd), 0, 99);
-                        s_finalTet[t]  = std::clamp((int)(GetParam(step.params.tapeTether,     tracks[t].tapeTether)    + modTapeTet), 0, 99);
-                        s_finalDrf[t]  = std::clamp((int)(GetParam(step.params.tapeDrift,      tracks[t].tapeDrift)     + modTapeDrf), 0, 99);
-                        s_finalDrt[t]  = std::clamp((int)(GetParam(step.params.tapeDriftRate,  tracks[t].tapeDriftRate) + modTapeDrt), 0, 99);
-                        s_finalFdb[t]  = std::clamp((int)(GetParam(step.params.tapeFeedback,   tracks[t].tapeFeedback)  + modTapeFdb), 0, 99);
-                        s_finalFsp[t]  = std::clamp((int)(GetParam(step.params.tapeFbSpread,   tracks[t].tapeFbSpread)  + modTapeFsp), 0, 99);
-                        s_finalFsc[t]  = std::clamp((int)(GetParam(step.params.tapeFbSource,   tracks[t].tapeFbSource)  + modTapeFsc), 0, 99);
-                        s_finalFrz[t]  = std::clamp((int)(GetParam(step.params.tapeFreeze,     tracks[t].tapeFreeze)    + modTapeFrz), 0, 99);
-                        s_finalSmr[t]  = std::clamp((int)(GetParam(step.params.tapeSmearRate,  tracks[t].tapeSmearRate) + modTapeSmr), 0, 99);
-                        s_finalSms[t]  = std::clamp((int)(GetParam(step.params.tapeSmearSize,  tracks[t].tapeSmearSize) + modTapeSms), 0, 99);
-                        s_finalMix[t]  = std::clamp((int)(GetParam(step.params.tapeMix,        tracks[t].tapeMix)       + modTapeMix), 0, 99);
                     }
-        // 2. NEW INNER SAMPLE LOOP (Processes the 64-sample chunk)
-               for (ma_uint32 i = 0; i < chunkSize; ++i) {
-                   ma_uint32 outIdx = samplesProcessed + i; // Calculated absolute index
-                   float mixedSample = 0.0f;
-        
+                    {
+                        const ModSlot& m = srcTrk.lfo2Slots[s];
+                        if (m.destType == 1 && m.destTrack == t) {
+                            float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
+                            if (m.destParam == DEST_TAPE_MEM)        modTapeMem += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_HDS)   modTapeHds += modVal * 3.0f;
+                            else if (m.destParam == DEST_TAPE_SPR)   modTapeSpr += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_SPD)   modTapeSpd += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_TET)   modTapeTet += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_DRF)   modTapeDrf += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_DRT)   modTapeDrt += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FDB)   modTapeFdb += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FSP)   modTapeFsp += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FSC)   modTapeFsc += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_FRZ)   modTapeFrz += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_SMR)   modTapeSmr += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_SMS)   modTapeSms += modVal * 99.0f;
+                            else if (m.destParam == DEST_TAPE_MIX)   modTapeMix += modVal * 99.0f;
+                        }
+                    }
+                }
+            }
 
-        // Check for external MIDI Start/Stop triggers inside the sample block
-        if (g_externalMidiStartTriggered) {
-            g_externalMidiStartTriggered = false;
-            g_currentTick = -1;
-            isPlaying = true;
+            s_finalMem[t]  = std::clamp((int)(GetParam(step.params.tapeMemory,     tracks[t].tapeMemory)    + modTapeMem), 0, 99);
+            s_finalHds[t]  = std::clamp((int)(GetParam(step.params.tapeHeads,      tracks[t].tapeHeads)     + modTapeHds), 1, 4);
+            s_finalSpr[t]  = std::clamp((int)(GetParam(step.params.tapeSpread,     tracks[t].tapeSpread)    + modTapeSpr), 0, 99);
+            s_finalSpd[t]  = std::clamp((int)(GetParam(step.params.tapeSpeed,      tracks[t].tapeSpeed)     + modTapeSpd), 0, 99);
+            s_finalTet[t]  = std::clamp((int)(GetParam(step.params.tapeTether,     tracks[t].tapeTether)    + modTapeTet), 0, 99);
+            s_finalDrf[t]  = std::clamp((int)(GetParam(step.params.tapeDrift,      tracks[t].tapeDrift)     + modTapeDrf), 0, 99);
+            s_finalDrt[t]  = std::clamp((int)(GetParam(step.params.tapeDriftRate,  tracks[t].tapeDriftRate) + modTapeDrt), 0, 99);
+            s_finalFdb[t]  = std::clamp((int)(GetParam(step.params.tapeFeedback,   tracks[t].tapeFeedback)  + modTapeFdb), 0, 99);
+            s_finalFsp[t]  = std::clamp((int)(GetParam(step.params.tapeFbSpread,   tracks[t].tapeFbSpread)  + modTapeFsp), 0, 99);
+            s_finalFsc[t]  = std::clamp((int)(GetParam(step.params.tapeFbSource,   tracks[t].tapeFbSource)  + modTapeFsc), 0, 99);
+            s_finalFrz[t]  = std::clamp((int)(GetParam(step.params.tapeFreeze,     tracks[t].tapeFreeze)    + modTapeFrz), 0, 99);
+            s_finalSmr[t]  = std::clamp((int)(GetParam(step.params.tapeSmearRate,  tracks[t].tapeSmearRate) + modTapeSmr), 0, 99);
+            s_finalSms[t]  = std::clamp((int)(GetParam(step.params.tapeSmearSize,  tracks[t].tapeSmearSize) + modTapeSms), 0, 99);
+            s_finalMix[t]  = std::clamp((int)(GetParam(step.params.tapeMix,        tracks[t].tapeMix)       + modTapeMix), 0, 99);
         }
-        if (g_externalMidiStopTriggered) {
-            g_externalMidiStopTriggered = false;
-            isPlaying = false;
+
+        // --- CHUNK-RATE MASTER PERFORMANCE FILTER UPDATE ---
+        static int lastPerfCutoff = -1;
+        static int lastPerfRes = -1;
+        static int lastPerfType = -1;
+
+        if (perfFilterCutoff != lastPerfCutoff || perfFilterResonance != lastPerfRes || perfFilterType != lastPerfType) {
+            lastPerfCutoff = perfFilterCutoff;
+            lastPerfRes = perfFilterResonance;
+            lastPerfType = perfFilterType;
+
+            float normCut = perfFilterCutoff / 99.0f;
+            float finalCutoffHz = 15.0f + (normCut * normCut * normCut * normCut) * 15985.0f;
+            float resNorm = perfFilterResonance / 99.0f;
+
+            g_masterPerfFilterL.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
+            g_masterPerfFilterR.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
         }
 
-        if (isPlaying) {
-            bool tickTriggered = false;
+        for (ma_uint32 i = 0; i < chunkSize; ++i) {
+            ma_uint32 outIdx = samplesProcessed + i;
 
-            // Resolve active master length ticks (0 represents INF, fallback to 192 ticks)
-            int masterTicksLimit = (masterLength == 0) ? 192 : (masterLength * 6);
+            if (g_externalMidiStartTriggered) {
+                g_externalMidiStartTriggered = false;
+                g_currentTick = -1;
+                isPlaying = true;
+            }
+            if (g_externalMidiStopTriggered) {
+                g_externalMidiStopTriggered = false;
+                isPlaying = false;
+            }
 
-            if (g_useExternalMidiClock) {
-                // Consume asynchronous external MIDI clock tick (24 PPQN)
-                if (g_externalMidiTicksQueued > 0) {
-                    g_externalMidiTicksQueued--; // Consume one queued tick
-                    
+            if (isPlaying) {
+                bool tickTriggered = false;
+                int masterTicksLimit = (masterLength == 0) ? 192 : (masterLength * 6);
+
+                if (g_useExternalMidiClock) {
+                    if (g_externalMidiTicksQueued > 0) {
+                        g_externalMidiTicksQueued--;
+                        if (g_currentTick == -1) {
+                            g_currentTick = 0;
+                            g_tickSampleAccumulator = 0;
+                        } else {
+                            g_currentTick = (g_currentTick + 1) % masterTicksLimit;
+                        }
+                        tickTriggered = true;
+                    }
+                } else {
                     if (g_currentTick == -1) {
                         g_currentTick = 0;
                         g_tickSampleAccumulator = 0;
+                        tickTriggered = true;
                     } else {
-                        g_currentTick = (g_currentTick + 1) % masterTicksLimit;
+                        g_tickSampleAccumulator++;
+                        if (g_tickSampleAccumulator >= samplesPerTick) {
+                            g_tickSampleAccumulator = 0;
+                            g_currentTick = (g_currentTick + 1) % masterTicksLimit;
+                            tickTriggered = true;
+                        }
                     }
-                    tickTriggered = true;
+                }
+
+                if (tickTriggered) {
+                    for (int t = 0; t < 8; ++t) {
+                        int nextTick = (tracks[t].localTick + 1) % (tracks[t].stepLength * 6);
+                        if (nextTick == 0 && tracks[t].localTick >= 0) {
+                            g_trackBarCount[t]++;
+                        }
+                        tracks[t].localTick = nextTick;
+                    }
+
+                    if (g_currentTick == 0) {
+                        if (queuedPattern != -1) {
+                            SwitchPattern(queuedPattern);
+                            queuedPattern = -1;
+                            for (int t = 0; t < 8; ++t) {
+                                tracks[t].localTick = -1;
+                                g_trackBarCount[t] = 0;
+                            }
+                        } else if (masterLength > 0) {
+                            for (int t = 0; t < 8; ++t) {
+                                tracks[t].localTick = -1;
+                                g_trackBarCount[t] = 0;
+                            }
+                        }
+                    }
+                }
+
+                playhead = (tracks[selectedTrack].localTick / 6) % tracks[selectedTrack].stepLength;
+
+                if (tickTriggered) {
+                    for (int t = 0; t < 8; ++t) {
+                        if (tracks[t].muted) continue;
+
+                        for (int s = 0; s < tracks[t].stepLength; ++s) {
+                            const Step& step = tracks[t].steps[s];
+                            int triggerTick = (s * 6 + step.microtiming);
+                            int localLengthTicks = tracks[t].stepLength * 6;
+                            
+                            triggerTick = triggerTick % localLengthTicks;
+                            if (triggerTick < 0) triggerTick += localLengthTicks;
+
+                            if (triggerTick == tracks[t].localTick) {
+                                if (step.velocity > 0 && !step.note.empty()) {
+                                    int cycleLength = 1;
+                                    for (int c = 0; c < 8; ++c) {
+                                        if (step.condMask & (1 << (8 + c))) {
+                                            cycleLength = c + 1;
+                                            break;
+                                        }
+                                    }
+                                    int currentCycleIdx = g_trackBarCount[t] % cycleLength;
+                                    bool maskActive = (step.condMask & (1 << currentCycleIdx)) != 0;
+
+                                    if (maskActive) {
+                                        int midiNoteRoot = NoteToMidi(step.note);
+                                        if (midiNoteRoot >= 0) {
+                                            std::vector<int> midiNotesToTrigger;
+                                            midiNotesToTrigger.push_back(midiNoteRoot);
+
+                                            if (step.chordType > 0) {
+                                                std::vector<int> chordOffsets;
+                                                if (step.chordType == 1)      chordOffsets = {4, 7};
+                                                else if (step.chordType == 2) chordOffsets = {3, 7};
+                                                else if (step.chordType == 3) chordOffsets = {5, 7};
+                                                else if (step.chordType == 4) chordOffsets = {4, 7, 10};
+                                                else if (step.chordType == 5) chordOffsets = {4, 7, 11};
+                                                else if (step.chordType == 6) chordOffsets = {3, 7, 10};
+                                                for (int offset : chordOffsets) {
+                                                    midiNotesToTrigger.push_back(midiNoteRoot + offset);
+                                                }
+                                            } else {
+                                                for (int k = 0; k < 3; ++k) {
+                                                    if (!step.chordNotes[k].empty()) {
+                                                        int extraMidi = NoteToMidi(step.chordNotes[k]);
+                                                        if (extraMidi >= 0) midiNotesToTrigger.push_back(extraMidi);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            int depth = (step.params.pitchSweepDepth == -1) ? tracks[t].pitchSweepDepth : step.params.pitchSweepDepth;
+                                            int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
+                                            int glide = (step.params.glideTime == -1) ? tracks[t].glideTime : step.params.glideTime; // Resolve Glide Time
+
+                                            int finalPolyMode = GetParam(step.params.polyMode, tracks[t].polyMode);
+                                            if (finalPolyMode < 1) finalPolyMode = 1;
+                                            if (finalPolyMode > 4) finalPolyMode = 4;
+
+                                            int notesCount = std::min((int)midiNotesToTrigger.size(), finalPolyMode);
+
+                                            for (int n = 0; n < notesCount; ++n) {
+                                                int midiNote = midiNotesToTrigger[n];
+                                                float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
+
+                                                if (tracks[t].engineType == ENGINE_SYNTH) {
+                                                    g_trackVoiceIndex[t] = g_trackVoiceIndex[t] % finalPolyMode;
+                                                    int targetIdx = g_trackVoiceIndex[t];
+
+                                                    if (g_trackVoices[t][targetIdx].active) {
+                                                        g_trackVoices[t][targetIdx].Choke();
+                                                    }
+                                                    g_trackVoices[t][targetIdx].Trigger(freq, depth, time, step.velocity, true, step.noteLength, glide); // Pass Glide Time
+                                                    g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % finalPolyMode;
+                                                } else {
+                                                    int slot = GetParam(step.params.sampleSlot, tracks[t].sampleSlot);
+                                                    const int16_t* buffer = g_samplePool[slot].pcmData.data();
+                                                    uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
+                                                    float noteOffset = (float)(midiNote - 60);
+
+                                                    g_samplerVoiceIndex[t] = g_samplerVoiceIndex[t] % finalPolyMode;
+                                                    int targetIdx = g_samplerVoiceIndex[t];
+
+                                                    if (g_samplerVoices[t][targetIdx].active) {
+                                                        g_samplerVoices[t][targetIdx].Choke();
+                                                    }
+                                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength);
+                                                    g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % finalPolyMode;
+                                                }
+                                            }
+
+                                            if (step.retrigger > 1) {
+                                                ActiveRetrig& ar = g_activeRetrigs[t];
+                                                ar.midiNote = midiNoteRoot;
+                                                ar.remainingTriggers = step.retrigger - 1;
+                                                ar.sampleInterval = samplesPerStep / step.retrigger;
+                                                ar.sampleCounter = 0;
+                                                ar.velocity = step.velocity;
+                                            } else {
+                                                g_activeRetrigs[t].remainingTriggers = 0;
+                                            }
+                                        }
+                                    }
+                                } else if (step.velocity == 0 && !step.note.empty()) {
+                                    if (tracks[t].engineType == ENGINE_SYNTH) {
+                                        for (int v = 0; v < 4; ++v) {
+                                            if (g_trackVoices[t][v].triggeredBySequencer) {
+                                                g_trackVoices[t][v].Release();
+                                            }
+                                        }
+                                    } else {
+                                        for (int v = 0; v < 4; ++v) {
+                                            if (g_samplerVoices[t][v].triggeredBySequencer) {
+                                                g_samplerVoices[t][v].Release();
+                                            }
+                                        }
+                                    }
+                                    g_activeRetrigs[t].remainingTriggers = 0;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (int t = 0; t < 8; ++t) {
+                    ActiveRetrig& ar = g_activeRetrigs[t];
+                    if (ar.remainingTriggers > 0 && !tracks[t].muted) {
+                        ar.sampleCounter++;
+                        if (ar.sampleCounter >= ar.sampleInterval) {
+                            ar.sampleCounter = 0;
+                            ar.remainingTriggers--;
+
+                            if (ar.midiNote >= 0) {
+                                float freq = 440.0f * powf(2.0f, (ar.midiNote - 69.0f) / 12.0f);
+                                int currentStepIdx = (tracks[t].localTick / 6) % tracks[t].stepLength;
+                                const Step& step = tracks[t].steps[currentStepIdx];
+                                int depth = (step.params.pitchSweepDepth == -1) ? tracks[t].pitchSweepDepth : step.params.pitchSweepDepth;
+                                int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
+                                int glide = (step.params.glideTime == -1) ? tracks[t].glideTime : step.params.glideTime; // Resolve Glide Time
+
+                                if (tracks[t].engineType == ENGINE_SYNTH) {
+                                    g_trackVoices[t][g_trackVoiceIndex[t]].Release();
+                                    g_trackVoices[t][g_trackVoiceIndex[t]].Trigger(freq, depth, time, ar.velocity, true, 0, glide); // Pass Glide Time
+                                    g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % 4;
+                                } else {
+                                    int slot = (step.params.sampleSlot == -1) ? tracks[t].sampleSlot : step.params.sampleSlot;
+                                    const int16_t* buffer = g_samplePool[slot].pcmData.data();
+                                    uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
+                                    float noteOffset = (float)(ar.midiNote - 60);
+
+                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Release();
+                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, ar.velocity, true);
+                                    g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % 4;
+                                }
+                            }
+                        }
+                    }
                 }
             } else {
-                // Run off internal sample accumulator
-                if (g_currentTick == -1) {
-                    g_currentTick = 0;
-                    g_tickSampleAccumulator = 0;
-                    tickTriggered = true;
-                } else {
-                    g_tickSampleAccumulator++;
-                    if (g_tickSampleAccumulator >= samplesPerTick) {
-                        g_tickSampleAccumulator = 0;
-                        g_currentTick = (g_currentTick + 1) % masterTicksLimit;
-                        tickTriggered = true;
-                    }
+                g_tickSampleAccumulator = 0;
+                g_currentTick = -1;
+                for (int t = 0; t < 8; ++t) {
+                    tracks[t].localTick = -1;
+                    g_trackBarCount[t] = 0;
                 }
             }
 
-            // Advance track local clocks if a master clock tick occurred
-                        if (tickTriggered) {
-                            for (int t = 0; t < 8; ++t) {
-                                int nextTick = (tracks[t].localTick + 1) % (tracks[t].stepLength * 6);
-                                
-                                // If the track clock completes a full loop, increment its bar counter
-                                if (nextTick == 0 && tracks[t].localTick >= 0) {
-                                    g_trackBarCount[t]++;
-                                }
-                                
-                                tracks[t].localTick = nextTick;
-                            }
+            float masterDryMono = 0.0f;
+            float delaySendBusMono = 0.0f;
+            float satSendBusMono = 0.0f;
+            float reverbSendBusMono = 0.0f;
+            float autoPanSendBusMono = 0.0f;
 
-                            // Handle bar increments, pattern swaps, and master loop alignments
-                            if (g_currentTick == 0) {
-                                
-                                // Quantized downbeat pattern swapper
-                                if (queuedPattern != -1) {
-                        SwitchPattern(queuedPattern);
-                        queuedPattern = -1; 
-                        
-                        // Flush all track clocks and bar counts on swap
-                        for (int t = 0; t < 8; ++t) {
-                            tracks[t].localTick = -1;
-                            g_trackBarCount[t] = 0; 
-                        }
-                    } else if (masterLength > 0) {
-                        // Scenario A: Aligned Polymeter (Pattern Reset)
-                        // Reset track clocks and bar counts back on master downbeat
-                        for (int t = 0; t < 8; ++t) {
-                            tracks[t].localTick = -1;
-                            g_trackBarCount[t] = 0; 
-                        }
-                    }
-                }
-            }
-
-            // Keep the global visual playhead updated (0 to 31) representing the active track's view
-            playhead = (tracks[selectedTrack].localTick / 6) % tracks[selectedTrack].stepLength;
-
-            // 1. Check for active note triggers at the beginning of a tick
-                     if (tickTriggered) {
-                         for (int t = 0; t < 8; ++t) {
-                             if (tracks[t].muted) continue;
-
-                             for (int s = 0; s < tracks[t].stepLength; ++s) {
-                                 const Step& step = tracks[t].steps[s];
-
-                                 int triggerTick = (s * 6 + step.microtiming);
-                                 int localLengthTicks = tracks[t].stepLength * 6;
-                                 
-                                 triggerTick = triggerTick % localLengthTicks;
-                                 if (triggerTick < 0) triggerTick += localLengthTicks;
-
-                                 if (triggerTick == tracks[t].localTick) {
-                                     if (step.velocity > 0 && !step.note.empty()) {
-                                         // 1. Extract the denominator cycle length M (bits 8 to 15)
-                                                                     int cycleLength = 1;
-                                                                     for (int c = 0; c < 8; ++c) {
-                                                                         if (step.condMask & (1 << (8 + c))) {
-                                                                             cycleLength = c + 1;
-                                                                             break;
-                                                                         }
-                                                                     }
-
-                                                                     // 2. Determine current cycle relative to active loop count
-                                                                     int currentCycleIdx = g_trackBarCount[t] % cycleLength;
-
-                                                                     // 3. Verify if current cycle is enabled in the top row (bits 0 to 7)
-                                                                     bool maskActive = (step.condMask & (1 << currentCycleIdx)) != 0;
-
-                                         if (maskActive) {
-                                             int midiNoteRoot = NoteToMidi(step.note);
-                                             if (midiNoteRoot >= 0) {
-                                                 // Build the note indices list
-                                                 std::vector<int> midiNotesToTrigger;
-                                                 midiNotesToTrigger.push_back(midiNoteRoot);
-
-                                                 if (step.chordType > 0) {
-                                                     std::vector<int> chordOffsets;
-                                                     if (step.chordType == 1)      chordOffsets = {4, 7};      // Major
-                                                     else if (step.chordType == 2) chordOffsets = {3, 7};      // Minor
-                                                     else if (step.chordType == 3) chordOffsets = {5, 7};      // Sus4
-                                                     else if (step.chordType == 4) chordOffsets = {4, 7, 10};  // Dom7
-                                                     else if (step.chordType == 5) chordOffsets = {4, 7, 11};  // Maj7
-                                                     else if (step.chordType == 6) chordOffsets = {3, 7, 10};  // Min7
-                                                     for (int offset : chordOffsets) {
-                                                         midiNotesToTrigger.push_back(midiNoteRoot + offset);
-                                                     }
-                                                 } else {
-                                                     for (int k = 0; k < 3; ++k) {
-                                                         if (!step.chordNotes[k].empty()) {
-                                                             int extraMidi = NoteToMidi(step.chordNotes[k]);
-                                                             if (extraMidi >= 0) midiNotesToTrigger.push_back(extraMidi);
-                                                         }
-                                                     }
-                                                 }
-                                                 
-                                                 int depth = (step.params.pitchSweepDepth == -1) ? tracks[t].pitchSweepDepth : step.params.pitchSweepDepth;
-                                                 int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
-
-                                                 int finalPolyMode = GetParam(step.params.polyMode, tracks[t].polyMode);
-                                                 if (finalPolyMode < 1) finalPolyMode = 1;
-                                                 if (finalPolyMode > 4) finalPolyMode = 4;
-
-                                                 int notesCount = std::min((int)midiNotesToTrigger.size(), finalPolyMode);
-
-                                                 for (int n = 0; n < notesCount; ++n) {
-                                                     int midiNote = midiNotesToTrigger[n];
-                                                     float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
-
-                                                     if (tracks[t].engineType == ENGINE_SYNTH) {
-                                                         g_trackVoiceIndex[t] = g_trackVoiceIndex[t] % finalPolyMode;
-                                                         int targetIdx = g_trackVoiceIndex[t];
-
-                                                         if (g_trackVoices[t][targetIdx].active) {
-                                                             g_trackVoices[t][targetIdx].Choke();
-                                                         }
-                                                         g_trackVoices[t][targetIdx].Trigger(freq, depth, time, step.velocity, true, step.noteLength);
-                                                         g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % finalPolyMode;
-                                                     } else {
-                                                         int slot = GetParam(step.params.sampleSlot, tracks[t].sampleSlot);
-                                                         const int16_t* buffer = g_samplePool[slot].pcmData.data();
-                                                         uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
-                                                         float noteOffset = (float)(midiNote - 60);
-
-                                                         g_samplerVoiceIndex[t] = g_samplerVoiceIndex[t] % finalPolyMode;
-                                                         int targetIdx = g_samplerVoiceIndex[t];
-
-                                                         if (g_samplerVoices[t][targetIdx].active) {
-                                                             g_samplerVoices[t][targetIdx].Choke();
-                                                         }
-                                                         g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength);
-                                                         g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % finalPolyMode;
-                                                     }
-                                                 }
-
-                                                 // Set up ratchet queue (ratchets repeat the root note)
-                                                 if (step.retrigger > 1) {
-                                                     ActiveRetrig& ar = g_activeRetrigs[t];
-                                                     ar.midiNote = midiNoteRoot;
-                                                     ar.remainingTriggers = step.retrigger - 1;
-                                                     ar.sampleInterval = samplesPerStep / step.retrigger;
-                                                     ar.sampleCounter = 0;
-                                                     ar.velocity = step.velocity;
-                                                 } else {
-                                                     g_activeRetrigs[t].remainingTriggers = 0;
-                                                 }
-                                             }
-                                         }
-                                     } else if (step.velocity == 0 && !step.note.empty()) {
-                                         // Explicit Gate Off / Release
-                                         if (tracks[t].engineType == ENGINE_SYNTH) {
-                                             for (int v = 0; v < 4; ++v) {
-                                                 if (g_trackVoices[t][v].triggeredBySequencer) {
-                                                     g_trackVoices[t][v].Release();
-                                                 }
-                                             }
-                                         } else {
-                                             for (int v = 0; v < 4; ++v) {
-                                                 if (g_samplerVoices[t][v].triggeredBySequencer) {
-                                                     g_samplerVoices[t][v].Release();
-                                                 }
-                                             }
-                                         }
-                                         g_activeRetrigs[t].remainingTriggers = 0;
-                                     }
-                                 }
-                             }
-                         }
-                     }
-
-            // 2. Update and execute active sample-accurate retriggers
             for (int t = 0; t < 8; ++t) {
-                ActiveRetrig& ar = g_activeRetrigs[t];
-                if (ar.remainingTriggers > 0 && !tracks[t].muted) {
-                    ar.sampleCounter++;
-                    if (ar.sampleCounter >= ar.sampleInterval) {
-                        ar.sampleCounter = 0;
-                        ar.remainingTriggers--;
-
-                        if (ar.midiNote >= 0) {
-                            float freq = 440.0f * powf(2.0f, (ar.midiNote - 69.0f) / 12.0f);
-                            
-                            // Retrieve active step context to resolve step-locked pitch sweeps on ratchets
-                            int currentStepIdx = (tracks[t].localTick / 6) % tracks[t].stepLength;
-                            const Step& step = tracks[t].steps[currentStepIdx];
-                            int depth = (step.params.pitchSweepDepth == -1) ? tracks[t].pitchSweepDepth : step.params.pitchSweepDepth;
-                            int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
-
-                            if (tracks[t].engineType == ENGINE_SYNTH) {
-                                g_trackVoices[t][g_trackVoiceIndex[t]].Release();
-                                g_trackVoices[t][g_trackVoiceIndex[t]].Trigger(freq, depth, time, ar.velocity, true); // Set isSeq = true
-                                g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % 4; // Clamped to 4
-                            } else {
-                                int slot = (step.params.sampleSlot == -1) ? tracks[t].sampleSlot : step.params.sampleSlot;
-                                const int16_t* buffer = g_samplePool[slot].pcmData.data();
-                                uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
-
-                                // Calculate keyboard pitch tracking offset relative to root note C4 (MIDI 60)
-                                float noteOffset = (float)(ar.midiNote - 60);
-
-                                g_samplerVoices[t][g_samplerVoiceIndex[t]].Release();
-                                g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, ar.velocity, true); // Set isSeq = true
-                                g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % 4; // Clamped to 4
-                            }
-                        }
+                if (tracks[t].muted) {
+                    for (int v = 0; v < 4; ++v) {
+                        g_trackVoices[t][v].Release();
+                        g_samplerVoices[t][v].Release();
                     }
+                    continue;
                 }
-            }
 
-        } else {
-            // Sequencer is stopped: reset counters, but do NOT release voices (keeps live play active) [2]
-            g_tickSampleAccumulator = 0;
-            g_currentTick = -1;
-            for (int t = 0; t < 8; ++t) {
-                tracks[t].localTick = -1;
-                g_trackBarCount[t] = 0; // Keep bar counts reset on stop
-            }
-        }
-
-        // --- PRO-GRADE SEND-BUS ROUTING PIPELINE ---
-        float masterDryMono = 0.0f;
-        float delaySendBusMono = 0.0f;
-        float satSendBusMono = 0.0f;
-        float reverbSendBusMono = 0.0f;
-        float autoPanSendBusMono = 0.0f;
-
-        // Render and sum active outputs dynamically across all 4 polyphonic voices
-        for (int t = 0; t < 8; ++t) {
-            if (tracks[t].muted) {
+                float trackSampleSum = 0.0f;
                 for (int v = 0; v < 4; ++v) {
-                    g_trackVoices[t][v].Release();
-                    g_samplerVoices[t][v].Release();
+                    if (tracks[t].engineType == ENGINE_SYNTH) {
+                        trackSampleSum += g_trackVoices[t][v].Process(t);
+                    } else {
+                        trackSampleSum += g_samplerVoices[t][v].Process(t);
+                    }
                 }
-                continue;
+                
+                float normalTrackSum = trackSampleSum * 0.25f;
+                int currentStepIdx = (tracks[t].localTick / 6) % tracks[t].stepLength;
+                if (currentStepIdx < 0) currentStepIdx = 0;
+                const Step& step = tracks[t].steps[currentStepIdx];
+
+                float processedSum = tracks[t].tapeFX.process(
+                                normalTrackSum,
+                                s_finalMem[t], s_finalHds[t], s_finalSpr[t], s_finalSpd[t], s_finalTet[t],
+                                s_finalDrf[t], s_finalDrt[t], s_finalFdb[t], s_finalFsp[t], s_finalFsc[t],
+                                s_finalFrz[t], s_finalSmr[t], s_finalSms[t], s_finalMix[t],
+                                g_sampleRate
+                            );
+
+                masterDryMono += processedSum;
+
+                int delSendVal = GetParam(step.params.delaySend, tracks[t].delaySend);
+                float delSendNorm = (float)delSendVal / 99.0f;
+                delaySendBusMono += processedSum * delSendNorm;
+
+                int satSendVal = GetParam(step.params.saturationSend, tracks[t].saturationSend);
+                float satSendNorm = (float)satSendVal / 99.0f;
+                satSendBusMono += processedSum * satSendNorm;
+
+                int revSendVal = GetParam(step.params.reverbSend, tracks[t].reverbSend);
+                float revSendNorm = (float)revSendVal / 99.0f;
+                reverbSendBusMono += processedSum * revSendNorm;
+
+                int panSendVal = GetParam(step.params.autoPanSend, tracks[t].autoPanSend);
+                float panSendNorm = (float)panSendVal / 99.0f;
+                autoPanSendBusMono += processedSum * panSendNorm;
             }
 
-            float trackSampleSum = 0.0f;
-            for (int v = 0; v < 4; ++v) {
-                if (tracks[t].engineType == ENGINE_SYNTH) {
-                    trackSampleSum += g_trackVoices[t][v].Process(t);
-                } else {
-                    trackSampleSum += g_samplerVoices[t][v].Process(t);
+            float masterL = (masterDryMono / 8.0f) * 0.5f;
+            float masterR = (masterDryMono / 8.0f) * 0.5f;
+
+            float delaySendL = (delaySendBusMono / 8.0f) * 0.5f;
+            float delaySendR = (delaySendBusMono / 8.0f) * 0.5f;
+
+            float satSendL = (satSendBusMono / 8.0f) * 0.5f;
+            float satSendR = (satSendBusMono / 8.0f) * 0.5f;
+
+            float reverbSendL = (reverbSendBusMono / 8.0f) * 0.5f;
+            float reverbSendR = (reverbSendBusMono / 8.0f) * 0.5f;
+
+            float panSendL = (autoPanSendBusMono / 8.0f) * 0.5f;
+            float panSendR = (autoPanSendBusMono / 8.0f) * 0.5f;
+
+            float revMixMod = 0.0f;
+            float delMixMod = 0.0f;
+            float satMixMod = 0.0f;
+            float panMixMod = 0.0f;
+
+            for (int t = 0; t < 8; ++t) {
+                for (int s = 0; s < 3; ++s) {
+                    if (tracks[t].lfo1Slots[s].destType == 2) {
+                        float modVal = g_globalLFOValues[t][0] * (tracks[t].lfo1Slots[s].depth / 99.0f);
+                        if (tracks[t].lfo1Slots[s].destParam == DEST_REV_MIX)       revMixMod += modVal;
+                        else if (tracks[t].lfo1Slots[s].destParam == DEST_DEL_MIX)  delMixMod += modVal;
+                        else if (tracks[t].lfo1Slots[s].destParam == DEST_SAT_MIX)  satMixMod += modVal;
+                        else if (tracks[t].lfo1Slots[s].destParam == DEST_PAN_MIX)  panMixMod += modVal;
+                    }
+                    if (tracks[t].lfo2Slots[s].destType == 2) {
+                        float modVal = g_globalLFOValues[t][1] * (tracks[t].lfo2Slots[s].depth / 99.0f);
+                        if (tracks[t].lfo2Slots[s].destParam == DEST_REV_MIX)       revMixMod += modVal;
+                        else if (tracks[t].lfo2Slots[s].destParam == DEST_DEL_MIX)  delMixMod += modVal;
+                        else if (tracks[t].lfo2Slots[s].destParam == DEST_SAT_MIX)  satMixMod += modVal;
+                        else if (tracks[t].lfo2Slots[s].destParam == DEST_PAN_MIX)  panMixMod += modVal;
+                    }
                 }
             }
-            
-            // Normalize polyphony sum to prevent digital clipping
-            float normalTrackSum = trackSampleSum * 0.25f;
 
-            // Retrieve active step overrides
-            int currentStepIdx = (tracks[t].localTick / 6) % tracks[t].stepLength;
-            if (currentStepIdx < 0) currentStepIdx = 0; // Safety guard
-            const Step& step = tracks[t].steps[currentStepIdx];
+            float reverbWetL = 0.0f;
+            float reverbWetR = 0.0f;
+            g_masterReverb.process(
+                reverbSendL, reverbSendR, reverbWetL, reverbWetR,
+                (float)globalFX.reverbDecay / 99.0f,
+                (float)globalFX.reverbSize / 99.0f,
+                (float)globalFX.reverbPredelay / 99.0f,
+                1.0f,
+                (float)g_sampleRate
+            );
+            float globalRevMix = std::clamp(((float)globalFX.reverbMix / 99.0f) + revMixMod, 0.0f, 1.0f);
+            reverbWetL *= globalRevMix;
+            reverbWetR *= globalRevMix;
 
-            
+            float delayWetL = 0.0f;
+            float delayWetR = 0.0f;
+            g_masterDelay.process(
+                delaySendL, delaySendR, delayWetL, delayWetR,
+                (float)globalFX.delayTime / 99.0f,
+                (float)globalFX.delayFeedback / 99.0f,
+                globalFX.delayPingPong,
+                1.0f,
+                (float)g_sampleRate
+            );
+            float globalDelayMixNorm = std::clamp(((float)globalFX.delayMix / 99.0f) + delMixMod, 0.0f, 1.0f);
+            delayWetL *= globalDelayMixNorm;
+            delayWetR *= globalDelayMixNorm;
 
-            float processedSum = tracks[t].tapeFX.process(
-                            normalTrackSum,
-                            s_finalMem[t], s_finalHds[t], s_finalSpr[t], s_finalSpd[t], s_finalTet[t],
-                            s_finalDrf[t], s_finalDrt[t], s_finalFdb[t], s_finalFsp[t], s_finalFsc[t],
-                            s_finalFrz[t], s_finalSmr[t], s_finalSms[t], s_finalMix[t],
-                            g_sampleRate
-                        );
+            float satWetL = 0.0f;
+            float satWetR = 0.0f;
+            g_masterCompressor.process(
+                satSendL, satSendR, satWetL, satWetR,
+                (float)globalFX.satLevel / 99.0f,
+                (float)globalFX.satSymmetry / 99.0f,
+                (float)globalFX.satOverdrive / 99.0f,
+                1.0f,
+                (float)g_sampleRate
+            );
+            float globalSatMixNorm = std::clamp(((float)globalFX.satMix / 99.0f) + satMixMod, 0.0f, 1.0f);
+            satWetL *= globalSatMixNorm;
+            satWetR *= globalSatMixNorm;
 
-            // 1. Accumulate Dry Master Bus (Using the modulated processed output)
-            masterDryMono += processedSum;
+            float panWetL = 0.0f;
+            float panWetR = 0.0f;
+            g_masterTornado.process(
+                panSendL, panSendR, panWetL, panWetR,
+                (float)globalFX.autoPanTime / 99.0f,
+                (float)globalFX.autoPanFeedback / 99.0f,
+                (float)globalFX.autoPanWidth / 99.0f,
+                1.0f,
+                (float)g_sampleRate
+            );
+            float globalPanMix = std::clamp(((float)globalFX.autoPanMix / 99.0f) + panMixMod, 0.0f, 1.0f);
+            panWetL *= globalPanMix;
+            panWetR *= globalPanMix;
 
-            // 2. Tap and Accumulate Delay Send Bus
-            int delSendVal = GetParam(step.params.delaySend, tracks[t].delaySend);
-            float delSendNorm = (float)delSendVal / 99.0f;
-            delaySendBusMono += processedSum * delSendNorm;
+            // --- MASTER MIX SUM ---
+            float finalL = masterL + reverbWetL + delayWetL + satWetL + panWetL;
+            float finalR = masterR + reverbWetR + delayWetR + satWetR + panWetR;
 
-            // 3. Tap and Accumulate Saturation Send Bus
-            int satSendVal = GetParam(step.params.saturationSend, tracks[t].saturationSend);
-            float satSendNorm = (float)satSendVal / 99.0f;
-            satSendBusMono += processedSum * satSendNorm;
+            float outL = finalL;
+            float outR = finalR;
 
-            // 4. Tap and Accumulate Reverb Send Bus
-            int revSendVal = GetParam(step.params.reverbSend, tracks[t].reverbSend);
-            float revSendNorm = (float)revSendVal / 99.0f;
-            reverbSendBusMono += processedSum * revSendNorm;
+            // --- MASTER BEAT REPEAT (MOMENTARY LOOPING) ---
+            if (activeStutterKey >= 0 && activeStutterKey <= 7) {
+                double beatLenSec = 60.0 / tempo;
+                uint32_t samplesPerBeat = (uint32_t)(beatLenSec * g_sampleRate);
+                uint32_t loopLen = (uint32_t)(stutterDivFactors[activeStutterKey] * samplesPerBeat);
+                
+                if (loopLen < 32) loopLen = 32;
+                if (loopLen >= STUTTER_BUF_SIZE) loopLen = STUTTER_BUF_SIZE - 1;
 
-            // 5. Tap and Accumulate Auto-Pan/Tornado Send Bus
-            int panSendVal = GetParam(step.params.autoPanSend, tracks[t].autoPanSend);
-            float panSendNorm = (float)panSendVal / 99.0f;
-            autoPanSendBusMono += processedSum * panSendNorm;
-        }
-
-        // --- STEREO SPLITTING & MASTER SUMMING STAGE ---
-        float masterL = (masterDryMono / 8.0f) * 0.5f;
-        float masterR = (masterDryMono / 8.0f) * 0.5f;
-
-        float delaySendL = (delaySendBusMono / 8.0f) * 0.5f;
-        float delaySendR = (delaySendBusMono / 8.0f) * 0.5f;
-
-        float satSendL = (satSendBusMono / 8.0f) * 0.5f;
-        float satSendR = (satSendBusMono / 8.0f) * 0.5f;
-
-        float reverbSendL = (reverbSendBusMono / 8.0f) * 0.5f;
-        float reverbSendR = (reverbSendBusMono / 8.0f) * 0.5f;
-
-        float panSendL = (autoPanSendBusMono / 8.0f) * 0.5f;
-        float panSendR = (autoPanSendBusMono / 8.0f) * 0.5f;
-
-        // --- PROCESS STEREO MASTER FX GROUP (SENDS Matrix) ---
-
-        // --- EVALUATE GLOBAL LFO MODULATIONS ON MASTER FX SENDS ---
-        float revMixMod = 0.0f;
-        float delMixMod = 0.0f;
-        float satMixMod = 0.0f;
-        float panMixMod = 0.0f;
-
-        for (int t = 0; t < 8; ++t) {
-            for (int s = 0; s < 3; ++s) {
-                // LFO 1
-                if (tracks[t].lfo1Slots[s].destType == 2) {
-                    float modVal = g_globalLFOValues[t][0] * (tracks[t].lfo1Slots[s].depth / 99.0f);
-                    if (tracks[t].lfo1Slots[s].destParam == DEST_REV_MIX)       revMixMod += modVal;
-                    else if (tracks[t].lfo1Slots[s].destParam == DEST_DEL_MIX)  delMixMod += modVal;
-                    else if (tracks[t].lfo1Slots[s].destParam == DEST_SAT_MIX)  satMixMod += modVal;
-                    else if (tracks[t].lfo1Slots[s].destParam == DEST_PAN_MIX)  panMixMod += modVal;
+                if (!g_lastStutterActive || activeStutterKey != g_lastStutterKey) {
+                    if (!g_lastStutterActive) {
+                        g_stutterCapturePtr = (g_stutterWritePtr >= loopLen) ?
+                                              (g_stutterWritePtr - loopLen) :
+                                              (g_stutterWritePtr + STUTTER_BUF_SIZE - loopLen);
+                    }
+                    g_stutterPlayhead = 0.0f;
+                    g_lastStutterActive = true;
+                    g_lastStutterKey = activeStutterKey;
                 }
-                // LFO 2
-                if (tracks[t].lfo2Slots[s].destType == 2) {
-                    float modVal = g_globalLFOValues[t][1] * (tracks[t].lfo2Slots[s].depth / 99.0f);
-                    if (tracks[t].lfo2Slots[s].destParam == DEST_REV_MIX)       revMixMod += modVal;
-                    else if (tracks[t].lfo2Slots[s].destParam == DEST_DEL_MIX)  delMixMod += modVal;
-                    else if (tracks[t].lfo2Slots[s].destParam == DEST_SAT_MIX)  satMixMod += modVal;
-                    else if (tracks[t].lfo2Slots[s].destParam == DEST_PAN_MIX)  panMixMod += modVal;
+
+                uint32_t readIdx = (g_stutterCapturePtr + (uint32_t)g_stutterPlayhead) % STUTTER_BUF_SIZE;
+                outL = g_stutterBufferL[readIdx];
+                outR = g_stutterBufferR[readIdx];
+
+                g_stutterPlayhead += 1.0f;
+                if (g_stutterPlayhead >= (float)loopLen) {
+                    g_stutterPlayhead = 0.0f;
                 }
+            } else {
+                g_stutterBufferL[g_stutterWritePtr] = finalL;
+                g_stutterBufferR[g_stutterWritePtr] = finalR;
+                g_stutterWritePtr = (g_stutterWritePtr + 1) % STUTTER_BUF_SIZE;
+                
+                g_lastStutterActive = false;
+                g_lastStutterKey = -1;
             }
-        }
 
-        // 1. Process Reverb Stage (Waves)
-        float reverbWetL = 0.0f;
-        float reverbWetR = 0.0f;
-        g_masterReverb.process(
-            reverbSendL, reverbSendR, reverbWetL, reverbWetR,
-            (float)globalFX.reverbDecay / 99.0f,
-            (float)globalFX.reverbSize / 99.0f,
-            (float)globalFX.reverbPredelay / 99.0f,
-            1.0f, // 100% wet send
-            (float)g_sampleRate
-        );
-        float globalRevMix = std::clamp(((float)globalFX.reverbMix / 99.0f) + revMixMod, 0.0f, 1.0f);
-        reverbWetL *= globalRevMix;
-        reverbWetR *= globalRevMix;
+            // --- MASTER PERFORMANCE FILTER ---
+            if (perfFilterCutoff < 99 || perfFilterType != 0) {
+                outL = g_masterPerfFilterL.process(outL, perfFilterType);
+                outR = g_masterPerfFilterR.process(outR, perfFilterType);
+            }
 
-        // 2. Process Stereo Delay Stage (Rain with optional Ping-Pong)
-        float delayWetL = 0.0f;
-        float delayWetR = 0.0f;
-        g_masterDelay.process(
-            delaySendL, delaySendR, delayWetL, delayWetR,
-            (float)globalFX.delayTime / 99.0f,
-            (float)globalFX.delayFeedback / 99.0f,
-            globalFX.delayPingPong,
-            1.0f, // 100% wet send
-            (float)g_sampleRate
-        );
-        float globalDelayMixNorm = std::clamp(((float)globalFX.delayMix / 99.0f) + delMixMod, 0.0f, 1.0f);
-        delayWetL *= globalDelayMixNorm;
-        delayWetR *= globalDelayMixNorm;
+            pOutputF[2 * outIdx]     = outL;
+            pOutputF[2 * outIdx + 1] = outR;
 
-        // 3. Process Saturated Bus Glue Compressor Stage (Sun)
-        float satWetL = 0.0f;
-        float satWetR = 0.0f;
-        g_masterCompressor.process(
-            satSendL, satSendR, satWetL, satWetR,
-            (float)globalFX.satLevel / 99.0f,
-            (float)globalFX.satSymmetry / 99.0f,
-            (float)globalFX.satOverdrive / 99.0f, // TGT
-            1.0f, // 100% wet send
-            (float)g_sampleRate
-        );
-        float globalSatMixNorm = std::clamp(((float)globalFX.satMix / 99.0f) + satMixMod, 0.0f, 1.0f);
-        satWetL *= globalSatMixNorm;
-        satWetR *= globalSatMixNorm;
+        } // End of i (chunkSize) loop
 
-        // 4. Process Swirling Tornado Chorus & Auto-Pan Stage (Tornado)
-        float panWetL = 0.0f;
-        float panWetR = 0.0f;
-        g_masterTornado.process(
-            panSendL, panSendR, panWetL, panWetR,
-            (float)globalFX.autoPanTime / 99.0f,
-            (float)globalFX.autoPanFeedback / 99.0f,
-            (float)globalFX.autoPanWidth / 99.0f,
-            1.0f, // 100% wet send
-            (float)g_sampleRate
-        );
-        float globalPanMix = std::clamp(((float)globalFX.autoPanMix / 99.0f) + panMixMod, 0.0f, 1.0f);
-        panWetL *= globalPanMix;
-        panWetR *= globalPanMix;
+        samplesProcessed += chunkSize;
+    } // End of while loop
 
-        // 5. Interleave Left and Right channels into the Stereo Hardware Output Buffer
-                pOutputF[2 * outIdx]     = masterL + reverbWetL + delayWetL + satWetL + panWetL; // Left
-                pOutputF[2 * outIdx + 1] = masterR + reverbWetR + delayWetR + satWetR + panWetR; // Right
+    auto endTime = std::chrono::high_resolution_clock::now();
+    double elapsedSec = std::chrono::duration<double>(endTime - startTime).count();
+    double expectedSec = (double)frameCount / g_sampleRate;
+    float instantCpu = (float)((elapsedSec / expectedSec) * 100.0);
+    if (instantCpu > 100.0f) instantCpu = 100.0f;
 
-            } // 1st BRACE: Closes the inner loop -> for (ma_uint32 i = 0; i < chunkSize; ++i)
-
-            // Advance the offset
-            samplesProcessed += chunkSize;
-
-        } // 2nd BRACE: Closes the outer loop -> while (samplesProcessed < frameCount)
-
-
-        // =========================================================================
-        // THE CODE BELOW IS NOW BACK INSIDE THE CALLBACK FUNCTION BODY:
-        // =========================================================================
-
-        // Calculate real-time CPU thread load
-        auto endTime = std::chrono::high_resolution_clock::now();
-        double elapsedSec = std::chrono::duration<double>(endTime - startTime).count();
-        double expectedSec = (double)frameCount / g_sampleRate;
-        float instantCpu = (float)((elapsedSec / expectedSec) * 100.0);
-        if (instantCpu > 100.0f) instantCpu = 100.0f; // Limit clamp to 100%
-
-        static float s_smoothedCpu = 0.0f;
-        s_smoothedCpu += 0.05f * (instantCpu - s_smoothedCpu); // Leaky integrator smoothing
-        g_audioCpuLoad = s_smoothedCpu;
-
-        } // 3rd BRACE: Closes the entire callback function -> void ma_audio_callback(...)
+    static float s_smoothedCpu = 0.0f;
+    s_smoothedCpu += 0.05f * (instantCpu - s_smoothedCpu);
+    g_audioCpuLoad = s_smoothedCpu;
+}
 // ==========================================
 // PUBLIC CONTROLLER INTERFACE
 // ==========================================
@@ -1648,6 +1706,7 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
     const Track& trk = tracks[trackIdx];
     int depth = trk.pitchSweepDepth;
     int time = trk.pitchSweepTime;
+    int glide = trk.glideTime; // Resolve Glide Time
 
     int finalPolyMode = trk.polyMode;
     if (finalPolyMode < 1) finalPolyMode = 1;
@@ -1660,7 +1719,7 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
         if (g_trackVoices[trackIdx][targetIdx].active) {
             g_trackVoices[trackIdx][targetIdx].Choke();
         }
-        g_trackVoices[trackIdx][targetIdx].Trigger(freq, depth, time, velocity, false);
+        g_trackVoices[trackIdx][targetIdx].Trigger(freq, depth, time, velocity, false, 0, glide); // Pass Glide Time
         g_trackVoiceIndex[trackIdx] = (g_trackVoiceIndex[trackIdx] + 1) % finalPolyMode;
     } else {
         int slot = trk.sampleSlot;
@@ -1678,6 +1737,7 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
         g_samplerVoiceIndex[trackIdx] = (g_samplerVoiceIndex[trackIdx] + 1) % finalPolyMode;
     }
 }
+
 void ReleaseVoiceLive(int trackIdx, int midiNote) {
     if (trackIdx < 0 || trackIdx >= 8) return;
     
@@ -1701,8 +1761,8 @@ void ReleaseVoiceLive(int trackIdx, int midiNote) {
         }
     }
 }
+
 bool IsSynthVoiceActive(int trackIdx, int voiceIdx) {
     if (trackIdx < 0 || trackIdx >= 8 || voiceIdx < 0 || voiceIdx >= 4) return false;
     return g_trackVoices[trackIdx][voiceIdx].active;
 }
-

@@ -1050,21 +1050,53 @@ void DrawFilterLfoPage(const UIState& state) {
     DrawLeftLabel("S", 60, 56, (state.synthGridRow == 3 && state.synthGridCol == 2), 7);
     DrawLeftLabel("R", 84, 56, (state.synthGridRow == 3 && state.synthGridCol == 3), 7);
 
-    // Draw VOY (Voice Count Limit 1 to 4) directly next to the ADSR envelope (aligned to Row 3, Col 4)
-    bool voySelected = (state.synthGridRow == 3 && state.synthGridCol == 4);
-    bool lVoy = false;
-    int effVoy = GetEffectiveVal(sp.polyMode, trk.polyMode, 114, 48, lVoy);
-    if (effVoy < 1) effVoy = 1;
-    if (effVoy > 4) effVoy = 4;
+    // Draw VOY (Voice Count) and PRT (Portamento Glide) Stacked block (Row 3, Col 4)
+        bool voyPrtSelected = (state.synthGridRow == 3 && state.synthGridCol == 4);
+        bool isShiftHeld = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
-    Draw3x5String("VOY:", 94, 48, WHITE);
-    if (voySelected) {
-        DrawRectangle(113, 47, 11, 7, WHITE);
-        // Converts int (1-4) to char ('1'-'4') for pixel-perfect drawing
-        Draw3x5Char('0' + effVoy, 114, 48, BLACK); 
-    } else {
-        Draw3x5Char('0' + effVoy, 114, 48, WHITE);
-    }
+        // Resolve Voice effective value
+        bool lVoy = false;
+        int effVoy = GetEffectiveVal(sp.polyMode, trk.polyMode, 114, 39, lVoy);
+        if (effVoy < 1) effVoy = 1;
+        if (effVoy > 4) effVoy = 4;
+
+        // Resolve Glide effective value
+        bool lPrt = false;
+        int effPrt = GetEffectiveVal(sp.glideTime, trk.glideTime, 114, 49, lPrt);
+
+        // Draw clean bounding box outline around the entire block when focused
+        if (voyPrtSelected) {
+            DrawPixelRectLines(92, 36, 33, 21, WHITE);
+        }
+
+        // 1. Draw Voice Limit (VOY)
+        Draw3x5String("VOY:", 94, 39, WHITE);
+        if (voyPrtSelected && !isShiftHeld) {
+            DrawRectangle(113, 38, 11, 7, WHITE);
+            Draw3x5Char('0' + effVoy, 114, 39, BLACK);
+        } else {
+            Draw3x5Char('0' + effVoy, 114, 39, WHITE);
+        }
+
+        // 2. Draw Portamento Glide (PRT)
+        Draw3x5String("PRT:", 94, 49, WHITE);
+        if (effPrt == 0) {
+            if (voyPrtSelected && isShiftHeld) {
+                DrawRectangle(113, 48, 11, 7, WHITE);
+                Draw3x5String("--", 114, 49, BLACK);
+            } else {
+                Draw3x5String("--", 114, 49, WHITE);
+            }
+        } else {
+            char prtBuf[8];
+            snprintf(prtBuf, sizeof(prtBuf), "%02d", effPrt);
+            if (voyPrtSelected && isShiftHeld) {
+                DrawRectangle(113, 48, 11, 7, WHITE);
+                Draw3x5String(prtBuf, 114, 49, BLACK);
+            } else {
+                Draw3x5String(prtBuf, 114, 49, WHITE);
+            }
+        }
 
     // Spacious LFO Layout on the Right Half of the screen (x = 128 to 255)
     auto DrawLfoRow = [&](int rowNum, int yPos, int lfoWave, int lfoSpeed, int lfoDepth, int lfoTrig, int lfoSync, const char* modDesc) {
@@ -2004,5 +2036,78 @@ void DrawStepPopup(const UIState& state) {
         else if (k == 12) arrowX += 44; // C+
 
         Draw3x5Char('^', arrowX - 1, arrowY, WHITE);
+    }
+}
+void DrawPerformancePopup(const UIState& state) {
+    // Large, centered popup frame (180x56) matching your other popup overlays
+    int mx = 38, my = 4, mw = 180, mh = 56;
+    
+    DrawRectangle(mx, my, mw, mh, BLACK);
+    DrawPixelRectLines(mx, my, mw, mh, WHITE);
+
+    // Title Header
+    Draw5x5String("PERFORMANCE FX", mx + 46, my + 4, WHITE);
+    DrawPixelLine(mx + 4, my + 11, mx + mw - 5, my + 11, WHITE);
+
+    int leftX = mx + 4;
+    int leftY = my + 14;
+
+    // --- I. LEFT HALF: GLOBAL MASTER FILTER ---
+    // Render the beautiful filter curve graph
+    DrawFilterCurve(perfFilterCutoff, perfFilterResonance, perfFilterType, leftX, leftY, 78, 22, WHITE);
+
+    // Render selector labels below the filter graph with highlights
+    // (synthGridCol on Row 0 will determine which filter parameter you are tweaking)
+    auto DrawFilterLabel = [&](const char* label, int lx, int ly, bool selected) {
+        if (selected) {
+            DrawRectangle(lx - 1, ly - 1, 15, 7, WHITE);
+            Draw3x5String(label, lx, ly, BLACK);
+        } else {
+            Draw3x5String(label, lx, ly, WHITE);
+        }
+    };
+
+    bool focusCut = (perfPopupOpen && state.synthGridRow == 0 && state.synthGridCol == 0);
+    bool focusRes = (perfPopupOpen && state.synthGridRow == 0 && state.synthGridCol == 1);
+    bool focusTyp = (perfPopupOpen && state.synthGridRow == 0 && state.synthGridCol == 2);
+
+    DrawFilterLabel("FRQ", leftX + 4, leftY + 25, focusCut);
+    DrawFilterLabel("RES", leftX + 28, leftY + 25, focusRes);
+    DrawFilterLabel("TYP", leftX + 52, leftY + 25, focusTyp);
+
+    // Draw central vertical dividing line separating the filter from the stutter grid
+    DrawPixelLine(mx + 86, my + 11, mx + 86, my + mh - 5, WHITE);
+
+    // --- II. RIGHT HALF: BEAT REPEAT / STUTTER ---
+    int rightX = mx + 90;
+    int rightY = my + 14;
+
+    Draw3x5String("GLOBAL STUTTER", rightX + 6, rightY, WHITE);
+
+    // Rhythmic loop subdivisions (using your newly fixed '/' character!)
+    const char* stutterDivisions[] = { "1/1", "1/2", "1/4", "1/8", "1/12", "1/16", "1/24", "1/32" };
+
+    // Render 8 boxes representing the 8 physical stutter pads
+    int gridBaseX = rightX + 4;
+    int gridBaseY = rightY + 9;
+
+    for (int i = 0; i < 8; ++i) {
+        int col = i % 4;
+        int row = i / 4;
+        int bx = gridBaseX + col * 20;
+        int by = gridBaseY + row * 12;
+
+        bool padPressed = (activeStutterKey == i);
+
+        // Draw individual pad borders
+        DrawPixelRectLines(bx, by, 18, 10, WHITE);
+
+        if (padPressed) {
+            // Fill pad fully in solid white when physically pressed
+            DrawRectangle(bx + 1, by + 1, 16, 8, WHITE);
+            Draw3x5String(stutterDivisions[i], bx + 3, by + 3, BLACK);
+        } else {
+            Draw3x5String(stutterDivisions[i], bx + 3, by + 3, WHITE);
+        }
     }
 }

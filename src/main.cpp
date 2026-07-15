@@ -147,6 +147,116 @@ static void ToggleStepChordNote(Step& step, int keyIdx) {
 // =========================================================================
 // MODULAR INPUT & DSP EVENT HANDLERS
 // =========================================================================
+// Manage navigation and tactile parameter editing inside the Performance Popup
+static void HandlePerformancePopupInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
+    bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
+                      IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+                      
+    // Exit popup using Escape or Enter/Return
+    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        perfPopupOpen = false;
+        activeStutterKey = -1; // Clear stutter immediately on close
+        menuFeedback = "PERFORMANCE FX CLOSED";
+        return;
+    }
+
+    // --- I. DYNAMIC KEY REPEAT TIMERS ---
+    
+    // 1. Navigation Auto-Repeat Timer (Shift is NOT held)
+    static float popupNavTimer = 0.0f;
+    bool anyNavKeyHeld = IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
+    bool triggerNav = false;
+
+    if (anyNavKeyHeld && !isShiftDown) {
+        if (popupNavTimer == 0.0f) {
+            triggerNav = true;
+            popupNavTimer += GetFrameTime();
+        } else {
+            popupNavTimer += GetFrameTime();
+            const float INITIAL_DELAY = 0.25f;  // Standard Soundboy delay before scrolling starts
+            const float REPEAT_INTERVAL = 0.06f; // Scroll speed
+            if (popupNavTimer >= INITIAL_DELAY) {
+                triggerNav = true;
+                popupNavTimer -= REPEAT_INTERVAL;
+            }
+        }
+    } else {
+        popupNavTimer = 0.0f; // Reset timer when keys are released
+    }
+
+    // 2. Parameter Editing Auto-Repeat Timer (Shift IS held)
+    static float popupEditTimer = 0.0f;
+    bool anyEditKeyHeld = IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
+    bool triggerEdit = false;
+
+    if (anyEditKeyHeld && isShiftDown) {
+        if (popupEditTimer == 0.0f) {
+            triggerEdit = true;
+            popupEditTimer += GetFrameTime();
+        } else {
+            popupEditTimer += GetFrameTime();
+            const float INITIAL_DELAY = 0.30f;  // Standard edit start delay
+            const float REPEAT_INTERVAL = 0.08f; // Parameter shift rate
+            if (popupEditTimer >= INITIAL_DELAY) {
+                triggerEdit = true;
+                popupEditTimer -= REPEAT_INTERVAL;
+            }
+        }
+    } else {
+        popupEditTimer = 0.0f; // Reset timer when keys are released
+    }
+
+    // --- II. NAVIGATION PROCESSING ---
+    if (triggerNav) {
+        if (IsKeyDown(KEY_LEFT)) {
+            synthGridCol--;
+            if (synthGridCol < 0) synthGridCol = 2; // Wrap left to TYP
+        }
+        if (IsKeyDown(KEY_RIGHT)) {
+            synthGridCol++;
+            if (synthGridCol > 2) synthGridCol = 0; // Wrap right to FRQ
+        }
+    }
+
+    // --- III. PARAMETER EDITING VALUE CHANGES ---
+    int change = 0;
+    
+    if (encoderTurn != 0) {
+        // Rotary encoder always edits value directly
+        change = encoderTurn;
+    }
+    else if (triggerEdit) {
+        // Shift + Keys matches your global fine/coarse editing format:
+        if (IsKeyDown(KEY_UP))    change = 10;  // Fast Scroll (+10)
+        if (IsKeyDown(KEY_DOWN))  change = -10; // Fast Scroll (-10)
+        if (IsKeyDown(KEY_RIGHT)) change = 1;   // Precise Scroll (+1)
+        if (IsKeyDown(KEY_LEFT))  change = -1;  // Precise Scroll (-1)
+    }
+
+    if (change != 0) {
+        if (synthGridCol == 0) {
+            perfFilterCutoff = std::clamp(perfFilterCutoff + change, 0, 99);
+        } else if (synthGridCol == 1) {
+            perfFilterResonance = std::clamp(perfFilterResonance + change, 0, 99);
+        } else if (synthGridCol == 2) {
+            // Cycle through 0 = LPF, 1 = HPF, 2 = BPF
+            perfFilterType += (change > 0) ? 1 : -1;
+            if (perfFilterType < 0) perfFilterType = 2;
+            if (perfFilterType > 2) perfFilterType = 0;
+        }
+    }
+
+    // --- IV. MOMENTARY STUTTER KEY PRESS SCANNING ---
+    if (IsKeyDown(KEY_A))      activeStutterKey = 0;
+    else if (IsKeyDown(KEY_S)) activeStutterKey = 1;
+    else if (IsKeyDown(KEY_D)) activeStutterKey = 2;
+    else if (IsKeyDown(KEY_F)) activeStutterKey = 3;
+    else if (IsKeyDown(KEY_G)) activeStutterKey = 4;
+    else if (IsKeyDown(KEY_H)) activeStutterKey = 5;
+    else if (IsKeyDown(KEY_J)) activeStutterKey = 6;
+    else if (IsKeyDown(KEY_K)) activeStutterKey = 7;
+    else                       activeStutterKey = -1;
+}
 
 // Handles live piano input playability
 static void HandlePianoKeysInput(int octaveValue) {
@@ -640,44 +750,51 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
     }
 
     int change = 0;
-    if (triggerAction || (encoderTurn != 0)) {
-        bool isVolumeCol = false;
-        bool isFeedbackCol = false;
-        bool isToggleCol = false;
+        if (triggerAction || (encoderTurn != 0)) {
+            bool isVolumeCol = false;
+            bool isFeedbackCol = false;
+            bool isToggleCol = false;
 
-        if (currentScreen == SCREEN_SYNTH) {
-            isVolumeCol = (tracks[selectedTrack].engineType == ENGINE_SYNTH && synthGridCol == 3) ||
-                          (synthGridCol == 11) ||
-                          (tracks[selectedTrack].engineType == ENGINE_SAMPLER && synthGridRow == 1 && synthGridCol == 12);
-        } else if (currentScreen == SCREEN_TRACK_PARAMS) {
-            isToggleCol = (synthGridCol == 2 || (synthGridRow == 3 && synthGridCol == 4) || (synthGridRow == 1 && synthGridCol == 4) || synthGridCol == 5 || synthGridCol == 8 || synthGridCol == 9);
-        } else if (currentScreen == SCREEN_PLACEHOLDER) {
-            isToggleCol = (synthGridCol == 1 && synthGridRow == 1);
-        } else if (currentScreen == SCREEN_GLOBAL_FX) {
-            isToggleCol = (synthGridCol == 4 && synthGridRow == 2);
-        }
-
-        if (encoderTurn != 0) {
-            if (currentScreen == SCREEN_SYNTH && (isVolumeCol || isFeedbackCol)) {
-                change = encoderTurn * 5;
-            } else {
-                change = encoderTurn;
+            if (currentScreen == SCREEN_SYNTH) {
+                isVolumeCol = (tracks[selectedTrack].engineType == ENGINE_SYNTH && synthGridCol == 3) ||
+                              (synthGridCol == 11) ||
+                              (tracks[selectedTrack].engineType == ENGINE_SAMPLER && synthGridRow == 1 && synthGridCol == 12);
             }
-        } else if (currentScreen == SCREEN_SYNTH && (isVolumeCol || isFeedbackCol)) {
-            if (IsKeyDown(KEY_RIGHT)) change = 5;
-            if (IsKeyDown(KEY_LEFT))  change = -5;
-        } else if (isToggleCol) {
-            if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_UP)) change = 1;
-            if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_DOWN))  change = -1;
-        } else {
-            if (IsKeyDown(KEY_RIGHT)) change = 1;
-            if (IsKeyDown(KEY_LEFT))  change = -1;
-            if (IsKeyDown(KEY_UP))    change = 10;
-            if (IsKeyDown(KEY_DOWN))  change = -10;
-        }
-    }
+            else if (currentScreen == SCREEN_TRACK_PARAMS) {
+                // VOY is a toggle (1..4), but PRT (0..99) is a standard continuous range
+                isToggleCol = (synthGridCol == 2 || (synthGridRow == 1 && synthGridCol == 4) || synthGridCol == 5 || synthGridCol == 8 || synthGridCol == 9);
+                if (synthGridRow == 3 && synthGridCol == 4 && !isShiftDown) {
+                    isToggleCol = true;
+                }
+            }
+            else if (currentScreen == SCREEN_PLACEHOLDER) {
+                isToggleCol = (synthGridCol == 1 && synthGridRow == 1);
+            }
+            else if (currentScreen == SCREEN_GLOBAL_FX) {
+                isToggleCol = (synthGridCol == 4 && synthGridRow == 2);
+            }
 
-    if (change == 0) return;
+            if (encoderTurn != 0) {
+                if (currentScreen == SCREEN_SYNTH && (isVolumeCol || isFeedbackCol)) {
+                    change = encoderTurn * 5;
+                } else {
+                    change = encoderTurn;
+                }
+            } else if (currentScreen == SCREEN_SYNTH && (isVolumeCol || isFeedbackCol)) {
+                if (IsKeyDown(KEY_RIGHT)) change = 5;
+                if (IsKeyDown(KEY_LEFT))  change = -5;
+            } else if (isToggleCol) {
+                if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_UP)) change = 1;
+                if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_DOWN))  change = -1;
+            } else {
+                if (IsKeyDown(KEY_RIGHT)) change = 1;
+                if (IsKeyDown(KEY_LEFT))  change = -1;
+                if (IsKeyDown(KEY_UP))    change = 10;
+                if (IsKeyDown(KEY_DOWN))  change = -10;
+            }
+        }
+
+        if (change == 0) return;
 
     Track& trk = tracks[selectedTrack];
     StepParams& sp = trk.steps[cursorStep].params;
@@ -814,14 +931,25 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
             else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.filterDecay, trk.filterDecay, change, 0, 99); else trk.filterDecay = std::clamp(trk.filterDecay + change, 0, 99); }
             else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.filterSustain, trk.filterSustain, change, 0, 99); else trk.filterSustain = std::clamp(trk.filterSustain + change, 0, 99); }
             else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterRelease, trk.filterRelease, change, 0, 99); else trk.filterRelease = std::clamp(trk.filterRelease + change, 0, 99); }
-            else if (synthGridCol == 4) { // VOY
-                if (isStepLock) {
-                    int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
-                    sp.polyMode = std::clamp(base + change, 1, 4);
-                } else {
-                    trk.polyMode = std::clamp(trk.polyMode + change, 1, 4);
-                }
-            }
+            else if (synthGridCol == 4) { // VOY & PRT Slot
+                                if (isShiftDown) {
+                                    // Edit Portamento Glide (0..99) with full step-lock support
+                                    if (isStepLock) {
+                                        int base = (sp.glideTime == -1) ? trk.glideTime : sp.glideTime;
+                                        sp.glideTime = std::clamp(base + change, 0, 99);
+                                    } else {
+                                        trk.glideTime = std::clamp(trk.glideTime + change, 0, 99);
+                                    }
+                                } else {
+                                    // Edit Voice limit (1..4) with full step-lock support
+                                    if (isStepLock) {
+                                        int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
+                                        sp.polyMode = std::clamp(base + change, 1, 4);
+                                    } else {
+                                        trk.polyMode = std::clamp(trk.polyMode + change, 1, 4);
+                                    }
+                                }
+                            }
             else if (synthGridCol == 5) {
                 int baseW2 = (isStepLock && sp.lfo2Wave != -1) ? sp.lfo2Wave : trk.lfo2Wave;
                 int newW2 = baseW2 + change;
@@ -1016,7 +1144,22 @@ int main() {
             systemMenuState = 0;
             menuFeedback = "";
         }
-
+      
+        // Ctrl + . (Ctrl + Full Stop) to toggle the Performance Popup
+                if (isCtrlDown && IsKeyPressed(KEY_PERIOD)) {
+                    perfPopupOpen = !perfPopupOpen;
+                    if (perfPopupOpen) {
+                        // Initialize default parameter column positions on open
+                        synthGridRow = 0;
+                        synthGridCol = 0;
+                        activeStutterKey = -1; // Reset stutter state
+                        menuFeedback = "PERFORMANCE FX OPEN";
+                    } else {
+                        menuFeedback = "PERFORMANCE FX CLOSED";
+                    }
+                }
+        
+        
         // --- DIAGNOSTICS KEYBOARD INTERCEPT ---
         if (showDiagnostics) {
             if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
@@ -1063,7 +1206,49 @@ int main() {
             EndDrawing();
             continue;
         }
+        if (perfPopupOpen) {
+                    HandlePerformancePopupInputs(encoderTurn, encoderButton, isShiftDown);
+                    BeginTextureMode(oledScreen);
+                        ClearBackground(BLACK);
+                        UIState state = {
+                            currentScreen, selectedTrack, cursorTrack, cursorStep,
+                            currentOctave, tempo, isPlaying, playhead,
+                            synthGridRow, synthGridCol, trackParamsGridCol,
+                            blinkOn, activeNotesString,
+                            systemMenuOpen, systemMenuCursor,
+                            menuFeedback,
+                            systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+                        };
+                        
+                        // Draw whatever active page is running in the background behind our overlay
+                        if (showDiagnostics) {
+                            DrawDiagnosticsScreen(state);
+                        } else {
+                            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
+                            else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
+                            else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
+                            else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
+                            else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
+                        }
+                        
+                        // Draw the performance popup on top of the layout
+                        DrawPerformancePopup(state);
+                    EndTextureMode();
 
+                    UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+                    UpdateOled(oledScreen);
+
+                    BeginDrawing();
+                        ClearBackground(DARKGRAY);
+                        Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
+                        Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                        Vector2 origin = { 0.0f, 0.0f };
+                        DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+                    EndDrawing();
+                    continue; // Intercept inputs and skip regular main loop parsing
+                }
+        
+        
         // --- MODAL POPUPS DISPATCH ---
                 if (lfoPopupOpen) {
                     HandleLfoPopupInputs(encoderTurn, encoderButton, isShiftDown);
