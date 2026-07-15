@@ -932,21 +932,51 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
             else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.filterSustain, trk.filterSustain, change, 0, 99); else trk.filterSustain = std::clamp(trk.filterSustain + change, 0, 99); }
             else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterRelease, trk.filterRelease, change, 0, 99); else trk.filterRelease = std::clamp(trk.filterRelease + change, 0, 99); }
             else if (synthGridCol == 4) { // VOY & PRT Slot
-                                if (isShiftDown) {
-                                    // Edit Portamento Glide (0..99) with full step-lock support
-                                    if (isStepLock) {
-                                        int base = (sp.glideTime == -1) ? trk.glideTime : sp.glideTime;
-                                        sp.glideTime = std::clamp(base + change, 0, 99);
+                                // Both parameters require Shift combinations because Shift-less arrows navigate.
+                                if (encoderTurn != 0) {
+                                    // 1. ROTARY ENCODER: Turn normally to edit VOY, turn with Shift to edit PRT
+                                    if (isShiftDown) {
+                                        if (isStepLock) {
+                                            int base = (sp.glideTime == -1) ? trk.glideTime : sp.glideTime;
+                                            sp.glideTime = std::clamp(base + encoderTurn, 0, 99);
+                                        } else {
+                                            trk.glideTime = std::clamp(trk.glideTime + encoderTurn, 0, 99);
+                                        }
                                     } else {
-                                        trk.glideTime = std::clamp(trk.glideTime + change, 0, 99);
+                                        if (isStepLock) {
+                                            int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
+                                            sp.polyMode = std::clamp(base + encoderTurn, 1, 4);
+                                        } else {
+                                            trk.polyMode = std::clamp(trk.polyMode + encoderTurn, 1, 4);
+                                        }
                                     }
-                                } else {
-                                    // Edit Voice limit (1..4) with full step-lock support
-                                    if (isStepLock) {
-                                        int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
-                                        sp.polyMode = std::clamp(base + change, 1, 4);
-                                    } else {
-                                        trk.polyMode = std::clamp(trk.polyMode + change, 1, 4);
+                                }
+                                else if (isShiftDown) {
+                                    // 2. ARROW KEYS: Only process edits when Shift is held down
+                                    bool pressUp = IsKeyDown(KEY_UP);
+                                    bool pressDown = IsKeyDown(KEY_DOWN);
+                                    bool pressRight = IsKeyDown(KEY_RIGHT);
+                                    bool pressLeft = IsKeyDown(KEY_LEFT);
+
+                                    if (pressUp || pressDown) {
+                                        // Shift + Up/Down edits Voice limit (VOY: 1..4)
+                                        int voyDir = pressUp ? 1 : -1;
+                                        if (isStepLock) {
+                                            int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
+                                            sp.polyMode = std::clamp(base + voyDir, 1, 4);
+                                        } else {
+                                            trk.polyMode = std::clamp(trk.polyMode + voyDir, 1, 4);
+                                        }
+                                    }
+                                    else if (pressRight || pressLeft) {
+                                        // Shift + Left/Right edits Portamento Glide (PRT: 0..99)
+                                        int prtDir = pressRight ? 1 : -1;
+                                        if (isStepLock) {
+                                            int base = (sp.glideTime == -1) ? trk.glideTime : sp.glideTime;
+                                            sp.glideTime = std::clamp(base + prtDir, 0, 99);
+                                        } else {
+                                            trk.glideTime = std::clamp(trk.glideTime + prtDir, 0, 99);
+                                        }
                                     }
                                 }
                             }

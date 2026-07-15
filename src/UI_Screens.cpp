@@ -1069,9 +1069,10 @@ void DrawFilterLfoPage(const UIState& state) {
             DrawPixelRectLines(92, 36, 33, 21, WHITE);
         }
 
-        // 1. Draw Voice Limit (VOY)
+    // 1. Draw Voice Limit (VOY)
         Draw3x5String("VOY:", 94, 39, WHITE);
-        if (voyPrtSelected && !isShiftHeld) {
+        // VOY is highlighted whenever focused (with or without Shift)
+        if (voyPrtSelected) {
             DrawRectangle(113, 38, 11, 7, WHITE);
             Draw3x5Char('0' + effVoy, 114, 39, BLACK);
         } else {
@@ -1080,6 +1081,7 @@ void DrawFilterLfoPage(const UIState& state) {
 
         // 2. Draw Portamento Glide (PRT)
         Draw3x5String("PRT:", 94, 49, WHITE);
+        // PRT is highlighted ONLY when focused AND Shift is held
         if (effPrt == 0) {
             if (voyPrtSelected && isShiftHeld) {
                 DrawRectangle(113, 48, 11, 7, WHITE);
