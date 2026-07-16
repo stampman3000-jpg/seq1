@@ -1663,12 +1663,6 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         }
     }
 
-    // 9. Apply 14-bit resolution reduction crunch
-        menuFeedback = "DIAG: crunching bits";
-        for (size_t i = 0; i < tempBuffer.size(); ++i) {
-            tempBuffer[i] = (tempBuffer[i] >> 2) << 2;
-        }
-
         // 9b. Pre-calculate 97 peak values for the visual display cache
         std::array<uint8_t, 97> peaks{};
         if (!tempBuffer.empty()) {
