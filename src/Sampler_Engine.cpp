@@ -365,8 +365,19 @@ float SamplerVoice::Process(int trackIdx) {
     } else {
         sampleOut = ProcessGranular(trk, sp);
     }
+    // --- REAL-TIME DSP BITCRUSHER ---
+        int crushVal = (sp.bitRed == -1) ? trk.bitRed : sp.bitRed;
+        if (crushVal > 0) {
+            // Map 1..99 slider to a bit-depth range of 15.0 down to 2.0 bits
+            float norm = (float)crushVal / 99.0f;
+            float bits = 16.0f - (norm * 14.0f);
+            if (bits < 2.0f) bits = 2.0f;
 
-    // 5. Pump the sampler volume to 4.5x to match the synths (utilizing smoothed volume)
+            float steps = std::pow(2.0f, bits - 1.0f);
+            
+            // Quantize the float signal
+            sampleOut = std::round(sampleOut * steps) / steps;
+        }    // 5. Pump the sampler volume to 4.5x to match the synths (utilizing smoothed volume)
      float boosted = sampleOut * envLevel * smoothVol * 4.5f;
     
     // 6. Warm cubic soft-clipper protects against digital clipping
