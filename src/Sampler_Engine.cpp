@@ -450,28 +450,49 @@ float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
     uint32_t absoluteSliceEnd = sliceStart + activeRangeWidth;
     if (boundaryEnd > absoluteSliceEnd) boundaryEnd = absoluteSliceEnd;
 
-    // Interpolate playhead index
-    uint32_t currentFrame = boundaryStart + (uint32_t)playheadPosition;
-    float outSample = 0.0f;
+    // --- 1. SMOOTH LINEAR INTERPOLATION READ ---
+        uint32_t idx0 = (uint32_t)playheadPosition;
+        float frac = playheadPosition - (float)idx0;
+        uint32_t idx1 = idx0 + 1;
 
-    if (currentFrame < boundaryEnd) {
-        outSample = sampleBuffer[currentFrame] / 32768.0f;
-    }
+        uint32_t currentFrame0 = boundaryStart + idx0;
+        uint32_t currentFrame1 = boundaryStart + idx1;
 
-    playheadPosition += playbackSpeed;
+        float outSample = 0.0f;
 
-    // Wrap loop boundary if LP mode is active
-    if (boundaryStart + playheadPosition >= boundaryEnd) {
-        if (GetParam(sp.sampleLoop, trk.sampleLoop) == 1) {
-            playheadPosition = (float)loopStartOffset;
-        } else {
-            active = false;
-            stage = ENV_IDLE;
+        if (currentFrame0 < boundaryEnd) {
+            float sample0 = sampleBuffer[currentFrame0] / 32768.0f;
+            float sample1 = 0.0f;
+            
+            if (currentFrame1 < boundaryEnd) {
+                sample1 = sampleBuffer[currentFrame1] / 32768.0f;
+            } else if (GetParam(sp.sampleLoop, trk.sampleLoop) == 1) {
+                // Smoothly interpolate loop end back to the loop start frame
+                uint32_t wrapFrame = boundaryStart + loopStartOffset;
+                if (wrapFrame < sampleLengthSamples) {
+                    sample1 = sampleBuffer[wrapFrame] / 32768.0f;
+                }
+            }
+
+            // Smooth linear interpolation blend
+            outSample = sample0 + frac * (sample1 - sample0);
         }
-    }
 
-    return outSample;
-}
+        // --- 2. INCREMENT PLAYHEAD POSITION ---
+        playheadPosition += playbackSpeed;
+
+        // --- 3. WRAP LOOP BOUNDARY IF LP MODE IS ACTIVE ---
+        if (boundaryStart + playheadPosition >= boundaryEnd) {
+            if (GetParam(sp.sampleLoop, trk.sampleLoop) == 1) {
+                playheadPosition = (float)loopStartOffset;
+            } else {
+                active = false;
+                stage = ENV_IDLE;
+            }
+        }
+
+        return outSample;
+    }
 
 float SamplerVoice::ProcessGranular(const Track& trk, const StepParams& sp) {
     if (sampleBuffer == nullptr || sampleLengthSamples == 0) return 0.0f;
