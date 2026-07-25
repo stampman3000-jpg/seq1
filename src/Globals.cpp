@@ -251,9 +251,9 @@ void InitializeTracks() {
 
         tracks[t].sampleSlot = 0;
         tracks[t].morph = 0; tracks[t].coarse = 0; tracks[t].fine = 0; tracks[t].volume = 99;
-        tracks[t].attack = 10; tracks[t].decay = 30; tracks[t].sustain = 75; tracks[t].release = 20;
+        tracks[t].attack = 10; tracks[t].decay = 99; tracks[t].sustain = 75; tracks[t].release = 20;
         tracks[t].morph2 = 50; tracks[t].coarse2 = 12; tracks[t].fine2 = 15; tracks[t].volume2 = 70;
-        tracks[t].attack2 = 20; tracks[t].decay2 = 45; tracks[t].sustain2 = 50; tracks[t].release2 = 30;
+        tracks[t].attack2 = 20; tracks[t].decay2 = 99; tracks[t].sustain2 = 50; tracks[t].release2 = 30;
 
         tracks[t].pitchSweepDepth = 0; // Pitch sweep depth always down (0) on startup
         tracks[t].pitchSweepTime = defaultPitchSweepTime[t];
@@ -502,7 +502,7 @@ void ResetTrackToDefault(int t) {
     tracks[t].fine = 0;
     tracks[t].volume = 99;
     tracks[t].attack = 10;
-    tracks[t].decay = 30;
+    tracks[t].decay = 99;
     tracks[t].sustain = 75;
     tracks[t].release = 20;
 
@@ -511,7 +511,7 @@ void ResetTrackToDefault(int t) {
     tracks[t].fine2 = 15;
     tracks[t].volume2 = 70;
     tracks[t].attack2 = 20;
-    tracks[t].decay2 = 45;
+    tracks[t].decay2 = 99;
     tracks[t].sustain2 = 50;
     tracks[t].release2 = 30;
 

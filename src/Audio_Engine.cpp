@@ -831,7 +831,7 @@ struct SynthVoice {
             // ==========================================
             // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
             // ==========================================
-            float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 2000.0f);
+            float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
             if (ratio < 0.05f) ratio = 0.05f;
             float freq2 = freq1 * ratio;
 

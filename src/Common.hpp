@@ -324,7 +324,7 @@ struct Track {
     int fine = 0;
     int volume = 99;
     int attack = 10;
-    int decay = 30;
+    int decay = 99;
     int sustain = 75;
     int release = 20;
 
@@ -334,7 +334,7 @@ struct Track {
     int fine2 = 15;
     int volume2 = 70; // Serves as INDEX/MOD DEPTH in FM algorithm
     int attack2 = 20;
-    int decay2 = 45;
+    int decay2 = 99;
     int sustain2 = 50;
     int release2 = 30;
 
