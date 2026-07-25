@@ -184,20 +184,21 @@ void MidiManager::midiCallback(double timeStamp, std::vector<unsigned char> *mes
 
     if (targetTrack < 0 || targetTrack >= 8) return;
 
-    if (command == 0x90 && velocity > 0) {
-        int mappedVelocity = (velocity < 43) ? 1 : ((velocity < 86) ? 2 : 3);
-        
-        if (channel == 15 && targetTrack == selectedTrack) {
-            bool isSeqPageOpen = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
-            if (isSeqPageOpen) {
-                Step& s = tracks[selectedTrack].steps[cursorStep];
-                s.note = MidiToNote(note);
-                s.velocity = mappedVelocity;
+    // Locate standard note-on processing in midiCallback:
+        if (command == 0x90 && velocity > 0) {
+            int mappedVelocity = (velocity < 43) ? 1 : ((velocity < 86) ? 2 : 3);
+            
+            if (channel == 15 && targetTrack == selectedTrack) {
+                bool isSeqPageOpen = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
+                if (isSeqPageOpen) {
+                    Step& s = tracks[selectedTrack].steps[cursorStep];
+                    s.note = note; // 'note' is already a raw unsigned char! Store directly.
+                    s.velocity = mappedVelocity;
+                }
             }
-        }
 
-        TriggerVoiceLive(targetTrack, note, mappedVelocity);
-    }
+            TriggerVoiceLive(targetTrack, note, mappedVelocity);
+        }
     else if (command == 0x80 || (command == 0x90 && velocity == 0)) {
         ReleaseVoiceLive(targetTrack, note);
     }

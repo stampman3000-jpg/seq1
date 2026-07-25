@@ -116,29 +116,28 @@ void runEncoderThread() {
 
 // --- CUSTOM CHORD INPUT HELPER ---
 static void ToggleStepChordNote(Step& step, int keyIdx) {
-    int midiVal = 60 + keyIdx;
-    std::string noteStr = MidiToNote(midiVal);
+    int8_t noteVal = 60 + keyIdx; // Represent key indices as absolute MIDI values
     
-    if (step.note == noteStr) {
-        step.note = "";
+    if (step.note == noteVal) {
+        step.note = -1;
         step.velocity = 0;
         return;
     }
     for (int i = 0; i < 3; ++i) {
-        if (step.chordNotes[i] == noteStr) {
-            step.chordNotes[i] = "";
+        if (step.chordNotes[i] == noteVal) {
+            step.chordNotes[i] = -1;
             return;
         }
     }
     
-    if (step.note.empty()) {
-        step.note = noteStr;
+    if (step.note == -1) {
+        step.note = noteVal;
         step.velocity = 3;
         return;
     }
     for (int i = 0; i < 3; ++i) {
-        if (step.chordNotes[i].empty()) {
-            step.chordNotes[i] = noteStr;
+        if (step.chordNotes[i] == -1) {
+            step.chordNotes[i] = noteVal;
             return;
         }
     }
@@ -1475,9 +1474,9 @@ int main() {
             bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
             if (isSequencerPage) {
                 Step& step = tracks[selectedTrack].steps[cursorStep];
-                step.note = "";
+                step.note = -1;                  // Change empty string to -1 sentinel
                 step.velocity = 0;
-                step.condition = "";
+                // Removed step.condition = "";  // Deleted dead weight field
                 step.retrigger = 0;
                 step.microtiming = 0;
                 step.params.reset();
@@ -1511,30 +1510,30 @@ int main() {
             }
             
             // Shift + Backspace: Clear Tracks or Step Lock resets
-            if (IsKeyPressed(KEY_BACKSPACE)) {
-                bool isAltHeld = IsKeyDown(KEY_X);
-                if (isAltHeld) {
-                    tracks[selectedTrack].steps[cursorStep].params.reset();
-                    menuFeedback = "STEP LOCKS CLEARED";
-                } else {
-                    bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
-                    if (isSequencerPage) {
-                        for (int s = 0; s < 16; ++s) {
-                            Step& step = tracks[selectedTrack].steps[s];
-                            step.note = "";
-                            step.velocity = 0;
-                            step.condition = "";
-                            step.retrigger = 0;
-                            step.microtiming = 0;
-                            step.params.reset();
+                        if (IsKeyPressed(KEY_BACKSPACE)) {
+                            bool isAltHeld = IsKeyDown(KEY_X);
+                            if (isAltHeld) {
+                                tracks[selectedTrack].steps[cursorStep].params.reset();
+                                menuFeedback = "STEP LOCKS CLEARED";
+                            } else {
+                                bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
+                                if (isSequencerPage) {
+                                    for (int s = 0; s < 16; ++s) {
+                                        Step& step = tracks[selectedTrack].steps[s];
+                                        step.note = -1;  // Replaced empty string with our -1 sentinel
+                                        step.velocity = 0;
+                                        // Removed step.condition = ""; // Deleted legacy string
+                                        step.retrigger = 0;
+                                        step.microtiming = 0;
+                                        step.params.reset();
+                                    }
+                                    menuFeedback = "TRACK TRIGS CLEARED";
+                                } else {
+                                    ResetTrackToDefault(selectedTrack);
+                                    menuFeedback = "TRACK SOUND DEFAULTED";
+                                }
+                            }
                         }
-                        menuFeedback = "TRACK TRIGS CLEARED";
-                    } else {
-                        ResetTrackToDefault(selectedTrack);
-                        menuFeedback = "TRACK SOUND DEFAULTED";
-                    }
-                }
-            }
         }
 
         // --- TRACK MUTE / SOLO CONTROL ENGINE ---
@@ -1635,6 +1634,8 @@ int main() {
         }
 
         // Shift + Backspace: Clear active page trigs/parameter locks
+        // Locate Clear Page (Shift + Backspace) inside main's loop:
+        // Shift + Backspace: Clear active page trigs/parameter locks
         if (IsKeyPressed(KEY_BACKSPACE) && isShiftDown && !isCtrlDown) {
             bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
             int startStep = activePage * 16;
@@ -1642,21 +1643,21 @@ int main() {
             if (isSequencerPage) {
                 for (int s = startStep; s < startStep + 16; ++s) {
                     Step& step = tracks[selectedTrack].steps[s];
-                    step.note = "";
+                    step.note = -1;                  // Change empty string to -1 sentinel
                     step.velocity = 0;
-                    step.condition = "";
+                    // Removed step.condition = "";  // Deleted dead weight field
                     step.retrigger = 0;
                     step.microtiming = 0;
                     step.params.reset();
                 }
                 menuFeedback = (activePage == 0) ? "PAGE 1 TRIGS RESET" : "PAGE 2 TRIGS RESET";
-            } else {
-                for (int s = startStep; s < startStep + 16; ++s) {
-                    tracks[selectedTrack].steps[s].params.reset();
+                    } else {
+                        for (int s = startStep; s < startStep + 16; ++s) {
+                            tracks[selectedTrack].steps[s].params.reset();
+                        }
+                        menuFeedback = (activePage == 0) ? "PAGE 1 PARAM LOCKS RESET" : "PAGE 2 PARAM LOCKS RESET";
+                    }
                 }
-                menuFeedback = (activePage == 0) ? "PAGE 1 PARAM LOCKS RESET" : "PAGE 2 PARAM LOCKS RESET";
-            }
-        }
 
         // Octave modification via Comma/Period (Only un-shifted)
         if (!isCtrlDown && !isShiftDown) {
@@ -1727,42 +1728,43 @@ int main() {
 
         // Polyphonic Live step disperser
         if (liveKeyboardActive && !isCtrlDown && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
-            bool anyKeyPressed = false;
-            for (int i = 0; i < NUM_NOTES; ++i) {
-                if (IsKeyPressed(keyboardPiano[i].key)) {
-                    anyKeyPressed = true;
-                    break;
-                }
-            }
+                   bool anyKeyPressed = false;
+                   for (int i = 0; i < NUM_NOTES; ++i) {
+                       if (IsKeyPressed(keyboardPiano[i].key)) {
+                           anyKeyPressed = true;
+                           break;
+                       }
+                   }
 
-            if (anyKeyPressed) {
-                std::vector<NoteBinding> heldNotes;
-                for (int i = 0; i < NUM_NOTES; ++i) {
-                    if (IsKeyDown(keyboardPiano[i].key)) {
-                        heldNotes.push_back(keyboardPiano[i]);
-                    }
-                }
+                   if (anyKeyPressed) {
+                       std::vector<NoteBinding> heldNotes;
+                       for (int i = 0; i < NUM_NOTES; ++i) {
+                           if (IsKeyDown(keyboardPiano[i].key)) {
+                               heldNotes.push_back(keyboardPiano[i]);
+                           }
+                       }
 
-                int notesToDisperse = std::min((int)heldNotes.size(), 4);
-                for (int n = 0; n < notesToDisperse; ++n) {
-                    std::string noteName = heldNotes[n].noteName;
-                    int octaveToUse = currentOctave;
-                    
-                    if (noteName == "C+") {
-                        noteName = "C";
-                        octaveToUse = currentOctave + 1;
-                        if (octaveToUse > 8) octaveToUse = 8;
-                    }
-                    
-                    std::string noteStr = noteName + std::to_string(octaveToUse);
-                    int trackOffset = (currentScreen == SCREEN_SEQ_5_8) ? 4 : 0;
-                    int targetTrack = trackOffset + ((cursorTrack + n) % 4);
-                    
-                    tracks[targetTrack].steps[cursorStep].note = noteStr;
-                    tracks[targetTrack].steps[cursorStep].velocity = 3;
-                }
-            }
-        }
+                       int notesToDisperse = std::min((int)heldNotes.size(), 4);
+                       for (int n = 0; n < notesToDisperse; ++n) {
+                           std::string noteName = heldNotes[n].noteName;
+                           int octaveToUse = currentOctave;
+                           
+                           if (noteName == "C+") {
+                               noteName = "C";
+                               octaveToUse = currentOctave + 1;
+                               if (octaveToUse > 8) octaveToUse = 8;
+                           }
+                           
+                           std::string noteStr = noteName + std::to_string(octaveToUse);
+                           int trackOffset = (currentScreen == SCREEN_SEQ_5_8) ? 4 : 0;
+                           int targetTrack = trackOffset + ((cursorTrack + n) % 4);
+                           
+                           // Translate string notation to MIDI numbers on keypress
+                           tracks[targetTrack].steps[cursorStep].note = NoteToMidi(noteStr);
+                           tracks[targetTrack].steps[cursorStep].velocity = 3;
+                       }
+                   }
+               }
 
         // Toggle Step Popup Open (Ctrl/Cmd + X Hotkey)
                 if (isCtrlDown && IsKeyPressed(KEY_X)) {
@@ -1856,55 +1858,58 @@ int main() {
                 }
             }
 
-            if ((triggerAction || (encoderTurn != 0)) && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
-                if (encoderTurn != 0 && !encoderButton) {
-                    std::string curNote = step.note;
-                    if (curNote.empty()) {
-                        step.note = "C" + std::to_string(currentOctave);
-                        step.velocity = 3;
-                    } else {
-                        step.note = TransposeNote(curNote, encoderTurn);
-                    }
-                } else {
-                    if (IsKeyDown(KEY_UP)) {
-                        std::string curNote = step.note;
-                        if (curNote.empty()) {
-                            step.note = "C" + std::to_string(currentOctave);
-                            step.velocity = 3;
-                        } else {
-                            step.note = TransposeNote(curNote, 1);
-                        }
-                    }
-                    if (IsKeyDown(KEY_DOWN)) {
-                        std::string curNote = step.note;
-                        if (curNote.empty()) {
-                            step.note = "C" + std::to_string(currentOctave);
-                            step.velocity = 3;
-                        } else {
-                            step.note = TransposeNote(curNote, -1);
-                        }
-                    }
-                }
-                
-                int velocityChange = 0;
-                if (encoderTurn != 0 && encoderButton) {
-                    velocityChange = (encoderTurn > 0) ? 1 : -1;
-                } else if (IsKeyDown(KEY_RIGHT)) {
-                    velocityChange = 1;
-                } else if (IsKeyDown(KEY_LEFT)) {
-                    velocityChange = -1;
-                }
+            // Locate transposition triggers (Shift + Up/Down or Encoder Turn) inside main's loop:
+                        if ((triggerAction || (encoderTurn != 0)) && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
+                            if (encoderTurn != 0 && !encoderButton) {
+                                int8_t curNote = step.note;
+                                if (curNote == -1) {
+                                    step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                    step.velocity = 3;
+                                } else {
+                                    // Transpose directly using standard integers!
+                                    int transposed = curNote + encoderTurn;
+                                    step.note = (int8_t)std::clamp(transposed, 0, 127);
+                                }
+                            } else {
+                                if (IsKeyDown(KEY_UP)) {
+                                    int8_t curNote = step.note;
+                                    if (curNote == -1) {
+                                        step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                        step.velocity = 3;
+                                    } else {
+                                        step.note = (int8_t)std::clamp(curNote + 1, 0, 127);
+                                    }
+                                }
+                                if (IsKeyDown(KEY_DOWN)) {
+                                    int8_t curNote = step.note;
+                                    if (curNote == -1) {
+                                        step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                        step.velocity = 3;
+                                    } else {
+                                        step.note = (int8_t)std::clamp(curNote - 1, 0, 127);
+                                    }
+                                }
+                            }
+                            
+                            int velocityChange = 0;
+                            if (encoderTurn != 0 && encoderButton) {
+                                velocityChange = (encoderTurn > 0) ? 1 : -1;
+                            } else if (IsKeyDown(KEY_RIGHT)) {
+                                velocityChange = 1;
+                            } else if (IsKeyDown(KEY_LEFT)) {
+                                velocityChange = -1;
+                            }
 
-                if (velocityChange != 0) {
-                    int v = step.velocity + velocityChange;
-                    if (v > 3) v = 3;
-                    if (v < 0) v = 0;
-                    step.velocity = v;
-                    if (v > 0 && step.note.empty()) {
-                        step.note = "C" + std::to_string(currentOctave);
-                    }
-                }
-            }
+                            if (velocityChange != 0) {
+                                int v = step.velocity + velocityChange;
+                                if (v > 3) v = 3;
+                                if (v < 0) v = 0;
+                                step.velocity = v;
+                                if (v > 0 && step.note == -1) {
+                                    step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                }
+                            }
+                        }
         }
 
         // --- MANAGE GRID PARAMETER CONTROLS ---

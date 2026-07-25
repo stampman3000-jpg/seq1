@@ -210,21 +210,20 @@ void InitializeTracks() {
             if (s < 16) {
                 // Page 1 (Steps 1-16) receives your startup demo data
                 if (t < 4) {
-                                    tracks[t].steps[s].note = rawNotes1_4[t][s];
-                                    tracks[t].steps[s].velocity = rawVels1_4[t][s];
-                                    tracks[t].steps[s].condition = ""; // Completely clean
-                                    tracks[t].steps[s].retrigger = rawRetrigs1_4[t][s];
-                                } else {
-                                    tracks[t].steps[s].note = rawNotes5_8[t - 4][s];
-                                    tracks[t].steps[s].velocity = rawVels5_8[t - 4][s];
-                                    tracks[t].steps[s].condition = ""; // Completely clean
-                                    tracks[t].steps[s].retrigger = rawRetrigs5_8[t - 4][s];
-                                }
+                    std::string rawNote = rawNotes1_4[t][s];
+                    tracks[t].steps[s].note = rawNote.empty() ? -1 : NoteToMidi(rawNote);
+                    tracks[t].steps[s].velocity = rawVels1_4[t][s];
+                    tracks[t].steps[s].retrigger = rawRetrigs1_4[t][s];
+                } else {
+                    std::string rawNote = rawNotes5_8[t - 4][s];
+                    tracks[t].steps[s].note = rawNote.empty() ? -1 : NoteToMidi(rawNote);
+                    tracks[t].steps[s].velocity = rawVels5_8[t - 4][s];
+                    tracks[t].steps[s].retrigger = rawRetrigs5_8[t - 4][s];
+                }
             } else {
                 // Page 2 (Steps 17-32) is initialized as completely empty
-                tracks[t].steps[s].note = "";
+                tracks[t].steps[s].note = -1;
                 tracks[t].steps[s].velocity = 0;
-                tracks[t].steps[s].condition = "";
                 tracks[t].steps[s].retrigger = 0;
             }
             // Reset all parameter locks and microtiming across all 32 steps
@@ -232,12 +231,12 @@ void InitializeTracks() {
             tracks[t].steps[s].microtiming = 0;
 
             // --- INITIALIZE POPUP FIELDS CORRECTLY INSIDE STEP LOOP ---
-                        tracks[t].steps[s].condMask = 0x0101; // Default: active on loop 1, cycle length 1
-                        tracks[t].steps[s].noteLength = 0;
-                        tracks[t].steps[s].chordType = 0;
-            tracks[t].steps[s].chordNotes[0] = "";
-            tracks[t].steps[s].chordNotes[1] = "";
-            tracks[t].steps[s].chordNotes[2] = "";
+            tracks[t].steps[s].condMask = 0x0101; // Default: active on loop 1, cycle length 1
+            tracks[t].steps[s].noteLength = 0;
+            tracks[t].steps[s].chordType = 0;
+            tracks[t].steps[s].chordNotes[0] = -1;
+            tracks[t].steps[s].chordNotes[1] = -1;
+            tracks[t].steps[s].chordNotes[2] = -1;
         }
         
         tracks[t].localTick = -1;
@@ -481,17 +480,20 @@ void ResetTrackToDefault(int t) {
     }
 
     // Reset step parameters lock overrides
-        for (int s = 0; s < 16; ++s) {
-            tracks[t].steps[s].params.reset();
+        for (int s = 0; s < 32; ++s) { // Expands resets to cover all 32 steps
+            tracks[t].steps[s].note = -1;
+            tracks[t].steps[s].velocity = 0;
+            tracks[t].steps[s].retrigger = 0;
             tracks[t].steps[s].microtiming = 0;
+            tracks[t].steps[s].params.reset();
 
             // Reset step-based popup defaults
-                    tracks[t].steps[s].condMask = 0x0101;
-                    tracks[t].steps[s].noteLength = 0;
-                    tracks[t].steps[s].chordType = 0;
-            tracks[t].steps[s].chordNotes[0] = "";
-            tracks[t].steps[s].chordNotes[1] = "";
-            tracks[t].steps[s].chordNotes[2] = "";
+            tracks[t].steps[s].condMask = 0x0101;
+            tracks[t].steps[s].noteLength = 0;
+            tracks[t].steps[s].chordType = 0;
+            tracks[t].steps[s].chordNotes[0] = -1;
+            tracks[t].steps[s].chordNotes[1] = -1;
+            tracks[t].steps[s].chordNotes[2] = -1;
         }
 
     tracks[t].sampleSlot = 0;
@@ -824,23 +826,23 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
         // Save Poly/Mono Voice Mode
         file << trk.polyMode << "\n";
 
-        // Save 16 steps
+        // Save 32 steps
                 for (int s = 0; s < 32; ++s) {
                     const Step& step = trk.steps[s];
-                    file << (step.note.empty() ? "-" : step.note) << "\n";
+                    file << (step.note == -1 ? "-" : MidiToNote(step.note)) << "\n";
                     file << step.velocity << "\n";
-                    file << (step.condition.empty() ? "-" : step.condition) << "\n";
+                    file << "-" << "\n"; // Write standard dummy dash to protect format layout
                     file << step.retrigger << "\n";
-                    file << step.microtiming << "\n"; // Save microtiming
+                    file << step.microtiming << "\n";
 
                     // Popup details
                     file << step.condMask << "\n";
                     file << step.noteLength << "\n";
                     file << step.chordType << "\n";
-                    file << (step.chordNotes[0].empty() ? "-" : step.chordNotes[0]) << "\n";
-                    file << (step.chordNotes[1].empty() ? "-" : step.chordNotes[1]) << "\n";
-                    file << (step.chordNotes[2].empty() ? "-" : step.chordNotes[2]) << "\n";
-
+                    file << (step.chordNotes[0] == -1 ? "-" : MidiToNote(step.chordNotes[0])) << "\n";
+                    file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
+                    file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
+                    
             // Step overrides
             const StepParams& sp = step.params;
             file << sp.morph << "\n" << sp.coarse << "\n" << sp.fine << "\n" << sp.volume << "\n";
@@ -933,34 +935,42 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
         // Safely load Poly Mode default
         SafeRead(file, trk.polyMode, 1);
 
+        // Inside the track loop (t) of LoadPattern:
         for (int s = 0; s < 32; ++s) {
-            Step& step = trk.steps[s];
-            file >> step.note; if (step.note == "-") step.note = "";
-            file >> step.velocity;
-            file >> step.condition; step.condition = ""; // Force clean legacy text triggers
-            file >> step.retrigger;
-            file >> step.microtiming; // Load microtiming
+                    Step& step = trk.steps[s];
+                    
+                    std::string tempNote;
+                    file >> tempNote;
+                    step.note = (tempNote == "-" || tempNote.empty()) ? -1 : NoteToMidi(tempNote);
+                    
+                    file >> step.velocity;
+                    
+                    std::string tempLegacyCondition;
+                    file >> tempLegacyCondition; // Discards legacy condition strings safely
+                    
+                    file >> step.retrigger;
+                    file >> step.microtiming;
 
-            std::string tempMask, tempLen, tempChord;
-            if (file >> tempMask >> tempLen >> tempChord) {
-                step.condMask = (uint16_t)std::stoul(tempMask);
-                step.noteLength = std::stoi(tempLen);
-                step.chordType = std::stoi(tempChord);
+                    std::string tempMask, tempLen, tempChord;
+                    if (file >> tempMask >> tempLen >> tempChord) {
+                        step.condMask = (uint16_t)std::stoul(tempMask);
+                        step.noteLength = std::stoi(tempLen);
+                        step.chordType = std::stoi(tempChord);
 
-                std::string n0, n1, n2;
-                file >> n0 >> n1 >> n2;
-                step.chordNotes[0] = (n0 == "-") ? "" : n0;
-                step.chordNotes[1] = (n1 == "-") ? "" : n1;
-                step.chordNotes[2] = (n2 == "-") ? "" : n2;
-            } else {
-                file.clear(); // Flush EOF errors
-                step.condMask = 0xFFFF;
-                step.noteLength = 0;
-                step.chordType = 0;
-                step.chordNotes[0] = "";
-                step.chordNotes[1] = "";
-                step.chordNotes[2] = "";
-            }
+                        std::string n0, n1, n2;
+                        file >> n0 >> n1 >> n2;
+                        step.chordNotes[0] = (n0 == "-" || n0.empty()) ? -1 : NoteToMidi(n0);
+                        step.chordNotes[1] = (n1 == "-" || n1.empty()) ? -1 : NoteToMidi(n1);
+                        step.chordNotes[2] = (n2 == "-" || n2.empty()) ? -1 : NoteToMidi(n2);
+                    } else {
+                        file.clear(); // Flush EOF errors
+                        step.condMask = 0xFFFF;
+                        step.noteLength = 0;
+                        step.chordType = 0;
+                        step.chordNotes[0] = -1;
+                        step.chordNotes[1] = -1;
+                        step.chordNotes[2] = -1;
+                    }
 
             StepParams& sp = step.params;
             file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;
@@ -1093,20 +1103,20 @@ bool SaveProject(int slot, const std::string& filename) {
             file << trk.polyMode << "\n";
 
             for (int s = 0; s < 32; ++s) {
-                const Step& step = trk.steps[s];
-                file << (step.note.empty() ? "-" : step.note) << "\n";
-                file << step.velocity << "\n";
-                file << (step.condition.empty() ? "-" : step.condition) << "\n";
-                file << step.retrigger << "\n";
-                file << step.microtiming << "\n"; // Save microtiming
-                
-                // Popup details
-                           file << step.condMask << "\n";
-                           file << step.noteLength << "\n";
-                           file << step.chordType << "\n";
-                           file << (step.chordNotes[0].empty() ? "-" : step.chordNotes[0]) << "\n";
-                           file << (step.chordNotes[1].empty() ? "-" : step.chordNotes[1]) << "\n";
-                           file << (step.chordNotes[2].empty() ? "-" : step.chordNotes[2]) << "\n";
+                            const Step& step = trk.steps[s];
+                            file << (step.note == -1 ? "-" : MidiToNote(step.note)) << "\n";
+                            file << step.velocity << "\n";
+                            file << "-" << "\n"; // Write standard dummy dash to protect format layout
+                            file << step.retrigger << "\n";
+                            file << step.microtiming << "\n";
+
+                            // Popup details
+                            file << step.condMask << "\n";
+                            file << step.noteLength << "\n";
+                            file << step.chordType << "\n";
+                            file << (step.chordNotes[0] == -1 ? "-" : MidiToNote(step.chordNotes[0])) << "\n";
+                            file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
+                            file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
 
                 const StepParams& sp = step.params;
                 file << sp.morph << "\n" << sp.coarse << "\n" << sp.fine << "\n" << sp.volume << "\n";
@@ -1221,33 +1231,40 @@ bool LoadProject(const std::string& filename) {
             SafeRead(file, trk.polyMode, 1);
 
             for (int s = 0; s < 32; ++s) {
-                Step& step = trk.steps[s];
-                file >> step.note; if (step.note == "-") step.note = "";
-                file >> step.velocity;
-                file >> step.condition; step.condition = ""; // Force clean legacy text triggers
-                file >> step.retrigger;
-                file >> step.microtiming; // Load microtiming
-                
-                std::string tempMask, tempLen, tempChord;
-                if (file >> tempMask >> tempLen >> tempChord) {
-                    step.condMask = (uint16_t)std::stoul(tempMask);
-                    step.noteLength = std::stoi(tempLen);
-                    step.chordType = std::stoi(tempChord);
+                            Step& step = trk.steps[s];
+                            
+                            std::string tempNote;
+                            file >> tempNote;
+                            step.note = (tempNote == "-" || tempNote.empty()) ? -1 : NoteToMidi(tempNote);
+                            
+                            file >> step.velocity;
+                            
+                            std::string tempLegacyCondition;
+                            file >> tempLegacyCondition; // Discards legacy condition strings safely
+                            
+                            file >> step.retrigger;
+                            file >> step.microtiming;
 
-                    std::string n0, n1, n2;
-                    file >> n0 >> n1 >> n2;
-                    step.chordNotes[0] = (n0 == "-") ? "" : n0;
-                    step.chordNotes[1] = (n1 == "-") ? "" : n1;
-                    step.chordNotes[2] = (n2 == "-") ? "" : n2;
-                } else {
-                    file.clear(); // Flush EOF errors
-                    step.condMask = 0xFFFF;
-                    step.noteLength = 0;
-                    step.chordType = 0;
-                    step.chordNotes[0] = "";
-                    step.chordNotes[1] = "";
-                    step.chordNotes[2] = "";
-                }
+                            std::string tempMask, tempLen, tempChord;
+                            if (file >> tempMask >> tempLen >> tempChord) {
+                                step.condMask = (uint16_t)std::stoul(tempMask);
+                                step.noteLength = std::stoi(tempLen);
+                                step.chordType = std::stoi(tempChord);
+
+                                std::string n0, n1, n2;
+                                file >> n0 >> n1 >> n2;
+                                step.chordNotes[0] = (n0 == "-" || n0.empty()) ? -1 : NoteToMidi(n0);
+                                step.chordNotes[1] = (n1 == "-" || n1.empty()) ? -1 : NoteToMidi(n1);
+                                step.chordNotes[2] = (n2 == "-" || n2.empty()) ? -1 : NoteToMidi(n2);
+                            } else {
+                                file.clear(); // Flush EOF errors
+                                step.condMask = 0xFFFF;
+                                step.noteLength = 0;
+                                step.chordType = 0;
+                                step.chordNotes[0] = -1;
+                                step.chordNotes[1] = -1;
+                                step.chordNotes[2] = -1;
+                            }
 
                 StepParams& sp = step.params;
                 file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;

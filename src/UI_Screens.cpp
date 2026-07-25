@@ -159,31 +159,35 @@ void DrawSequencerScreen(const UIState& state) {
             int x = 31 + (step * 14);
             int y = 9 + (track * 13);
 
-            bool stepOutOfBounds = (absStep >= tracks[absTrack].stepLength);
-            bool isCurrentPlayhead = (absStep == localPlayhead);
-            Step& s = tracks[absTrack].steps[absStep];
+            // Locate Sequencer cell draw inside DrawSequencerScreen:
+                        bool stepOutOfBounds = (absStep >= tracks[absTrack].stepLength);
+                        bool isCurrentPlayhead = (absStep == localPlayhead);
+                        Step& s = tracks[absTrack].steps[absStep];
 
-            bool drawActive = (s.velocity > 0 && !s.note.empty());
-            bool isStepCursor = (absStep == state.cursorStep && track == state.cursorTrack);
-            if (isStepCursor && state.blinkOn) {
-                drawActive = !drawActive;
-            }
+                        bool drawActive = (s.velocity > 0 && s.note >= 0); // Sentinel check
+                        bool isStepCursor = (absStep == state.cursorStep && track == state.cursorTrack);
+                        if (isStepCursor && state.blinkOn) {
+                            drawActive = !drawActive;
+                        }
 
-            if (stepOutOfBounds) {
-                // Draw a beautiful, dimmed hollow box with center dot for inactive polymetric steps
-                DrawRectangleLines(x, y, 13, 13, GRAY);
-                DrawPixel(x + 6, y + 6, GRAY);
-            } else {
-                if (drawActive) {
-                    DrawRectangle(x, y, 13, 13, WHITE);
-                    
-                    if (isCurrentPlayhead && state.isPlaying) {
-                        DrawRectangle(x + 1, y + 1, 11, 11, BLACK);
-                        ParseAndDrawNote(s.note.c_str(), s.velocity, false, x, y, WHITE);
-                    } else {
-                        ParseAndDrawNote(s.note.c_str(), s.velocity, false, x, y, BLACK);
-                    }
-                } else {
+                        if (stepOutOfBounds) {
+                            DrawRectangleLines(x, y, 13, 13, GRAY);
+                            DrawPixel(x + 6, y + 6, GRAY);
+                        } else {
+                            if (drawActive) {
+                                DrawRectangle(x, y, 13, 13, WHITE);
+                                
+                                // Convert integer to string dynamically for drawing
+                                std::string noteName = (s.note >= 0) ? MidiToNote(s.note) : "";
+
+                                if (isCurrentPlayhead && state.isPlaying) {
+                                    DrawRectangle(x + 1, y + 1, 11, 11, BLACK);
+                                    ParseAndDrawNote(noteName.c_str(), s.velocity, false, x, y, WHITE);
+                                } else {
+                                    ParseAndDrawNote(noteName.c_str(), s.velocity, false, x, y, BLACK);
+                                }
+                            } else {
+                                // ... rest of inactive step drawing stays identical ...
                     DrawRectangle(x, y, 13, 13, WHITE);
                     DrawRectangle(x + 1, y + 1, 11, 11, BLACK);
                     
@@ -1957,43 +1961,44 @@ void DrawStepPopup(const UIState& state) {
     }
 
     // Determine active notes belonging to either preset formulas OR custom recorded chord notes
-    std::vector<int> activeSemitones;
-    std::vector<std::string> allActiveNotes;
-    if (!step.note.empty()) {
-        allActiveNotes.push_back(step.note);
-    }
-    for (int k = 0; k < 3; ++k) {
-        if (!step.chordNotes[k].empty()) {
-            allActiveNotes.push_back(step.chordNotes[k]);
+    // Locate keyboard display inside DrawStepPopup:
+        std::vector<int> activeSemitones;
+        std::vector<std::string> allActiveNotes;
+        
+        if (step.note >= 0) { // Sentinel check
+            allActiveNotes.push_back(MidiToNote(step.note)); // Dynamic string conversion
         }
-    }
-
-    if (step.chordType > 0) {
-        // Preset Formula offsets
-        std::vector<int> chordOffsets;
-        if (step.chordType == 1)      chordOffsets = {0, 4, 7};      // Major (Root, Maj 3rd, 5th)
-        else if (step.chordType == 2) chordOffsets = {0, 3, 7};      // Minor (Root, Min 3rd, 5th)
-        else if (step.chordType == 3) chordOffsets = {0, 5, 7};      // Sus4 (Root, Perf 4th, 5th)
-        else if (step.chordType == 4) chordOffsets = {0, 4, 7, 10};  // Dom7 (Root, Maj 3rd, 5th, Min 7th)
-        else if (step.chordType == 5) chordOffsets = {0, 4, 7, 11};  // Maj7 (Root, Maj 3rd, 5th, Maj 7th)
-        else if (step.chordType == 6) chordOffsets = {0, 3, 7, 10};  // Min7 (Root, Min 3rd, 5th, Min 7th)
-
-        if (!step.note.empty()) {
-            int rootMidi = NoteToMidi(step.note);
-            for (int offset : chordOffsets) {
-                int keyIdx = ((rootMidi + offset) % 12);
-                activeSemitones.push_back(keyIdx);
+        for (int k = 0; k < 3; ++k) {
+            if (step.chordNotes[k] >= 0) { // Sentinel check
+                allActiveNotes.push_back(MidiToNote(step.chordNotes[k])); // Dynamic string conversion
             }
         }
-    } else {
-        // Custom played chord notes (Map relative to C)
-        for (const auto& nStr : allActiveNotes) {
-            int midiVal = NoteToMidi(nStr);
-            if (midiVal >= 0) {
-                activeSemitones.push_back(midiVal % 12); // 0 = C, 1 = C#, etc.
+
+        if (step.chordType > 0) {
+            std::vector<int> chordOffsets;
+            if (step.chordType == 1)      chordOffsets = {0, 4, 7};
+            else if (step.chordType == 2) chordOffsets = {0, 3, 7};
+            else if (step.chordType == 3) chordOffsets = {0, 5, 7};
+            else if (step.chordType == 4) chordOffsets = {0, 4, 7, 10};
+            else if (step.chordType == 5) chordOffsets = {0, 4, 7, 11};
+            else if (step.chordType == 6) chordOffsets = {0, 3, 7, 10};
+
+            if (step.note >= 0) { // Sentinel check
+                int rootMidi = step.note; // Read value directly (no lookup!)
+                for (int offset : chordOffsets) {
+                    int keyIdx = ((rootMidi + offset) % 12);
+                    activeSemitones.push_back(keyIdx);
+                }
+            }
+        } else {
+            // Custom played chord notes (Map relative to C)
+            for (const auto& nStr : allActiveNotes) {
+                int midiVal = NoteToMidi(nStr);
+                if (midiVal >= 0) {
+                    activeSemitones.push_back(midiVal % 12);
+                }
             }
         }
-    }
 
     // Draw solid indicator dots inside active chord keys
     for (int offset : activeSemitones) {

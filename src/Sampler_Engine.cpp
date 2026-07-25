@@ -377,18 +377,20 @@ float SamplerVoice::Process(int trackIdx) {
             
             // Quantize the float signal
             sampleOut = std::round(sampleOut * steps) / steps;
-        }    // 5. Pump the sampler volume to 4.5x to match the synths (utilizing smoothed volume)
-     float boosted = sampleOut * envLevel * smoothVol * 4.5f;
+        }  // 5. Apply a fixed analog saturation drive to the envelope-controlled sample (1.5f drive)
+    float driven = sampleOut * envLevel * 1.5f;
     
-    // 6. Warm cubic soft-clipper protects against digital clipping
-    if (boosted > 1.0f)  boosted = 1.0f;
-    if (boosted < -1.0f) boosted = -1.0f;
-    float saturated = boosted - (boosted * boosted * boosted) / 3.0f;
+    // 6. Warm cubic soft-clipper adds classic harmonic saturation and protects downstream DSP
+    if (driven > 1.0f)  driven = 1.0f;
+    if (driven < -1.0f) driven = -1.0f;
+    float saturated = driven - (driven * driven * driven) / 3.0f;
 
     int fType = GetParam(sp.filterType, trk.filterType);
+    float filtered = filter.process(saturated, fType);
 
-    // --- 7. Run through State-Variable Filter (SVF) Stage & Scale by Note Velocity ---
-    return filter.process(saturated, fType) * velocityScale * chokeVolume;
+    // 7. Apply the smoothed volume fader, velocity scaling, and choke after non-linear processing.
+    // We apply a standard 2.0f level-matching scalar to balance with the virtual analog synths.
+    return filtered * smoothVol * velocityScale * chokeVolume * 2.0f;
 }
 
 float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {

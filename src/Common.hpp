@@ -293,11 +293,8 @@ struct StepParams {
 };
 
 struct Step {
-    std::string note = "";
+    int8_t note = -1;           // MIDI note number (0 to 127). -1 represents empty/inactive step.
     int velocity = 0;           // 0 to 3
-    std::string condition = ""; // "1:2", "AFT", etc.
-    int r_trigger = 0;
-    std::string condition_text = "";
     int retrigger = 0;          // retrigger count (0 to 16)
     int microtiming = 0;        // Microtiming offset (-6 to +6 ticks)
     StepParams params;          // Per-step parameter locks
@@ -306,7 +303,7 @@ struct Step {
     uint16_t condMask = 0xFFFF; // Custom loop bars condition bitmask (plays on all loops by default)
     int noteLength = 0;         // Gate hold duration (0 = AUTO, 1 to 16 steps)
     int chordType = 0;          // Chord formula (0 = NONE, 1 = MAJOR, etc.)
-    std::string chordNotes[3] = {"", "", ""}; // Recorded custom chord notes
+    int8_t chordNotes[3] = {-1, -1, -1}; // Recorded custom chord notes (MIDI numbers, -1 for empty)
 };
 
 // --- SEQUENCER TRACK STRUCT ---

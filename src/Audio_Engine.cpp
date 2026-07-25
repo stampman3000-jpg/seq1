@@ -101,20 +101,20 @@ static void UpdateGlobalLFOs() {
                                                 trk.lfo1LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
                                             }
                                             val = trk.lfo1LastVal;
-                                        } else { // SEQ: Track Note Pitch Sequencer Follower [1]
-                                            int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
-                                            if (currentStepIdx < 0) currentStepIdx = 0;
-                                            const Step& step = trk.steps[currentStepIdx];
-                                            
-                                            if (!step.note.empty()) {
-                                                int midiVal = NoteToMidi(step.note);
-                                                // Scale pitch symmetrically around C4 (MIDI 60) over a 2-octave range
-                                                val = (float)(midiVal - 60) / 24.0f;
-                                                val = std::clamp(val, -1.0f, 1.0f);
-                                            } else {
-                                                val = 0.0f;
-                                            }
-                                        }
+            } else { // SEQ: Track Note Pitch Sequencer Follower [1]
+                int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+                if (currentStepIdx < 0) currentStepIdx = 0;
+                const Step& step = trk.steps[currentStepIdx];
+                
+                if (step.note >= 0) { // Read the integer sentinel directly (-1 means empty)
+                    int midiVal = step.note; // Read direct integer (No NoteToMidi lookup!)
+                    // Scale pitch symmetrically around C4 (MIDI 60) over a 2-octave range
+                    val = (float)(midiVal - 60) / 24.0f;
+                    val = std::clamp(val, -1.0f, 1.0f);
+                } else {
+                    val = 0.0f;
+                }
+            }
             // Scale and output value relative to depth
             g_globalLFOValues[t][0] = val * (trk.lfo1Depth / 99.0f);
         }
@@ -149,19 +149,19 @@ static void UpdateGlobalLFOs() {
                                                 trk.lfo2LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
                                             }
                                             val = trk.lfo2LastVal;
-                                        } else { // SEQ: Track Note Pitch Sequencer Follower [1]
-                                            int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
-                                            if (currentStepIdx < 0) currentStepIdx = 0;
-                                            const Step& step = trk.steps[currentStepIdx];
-                                            
-                                            if (!step.note.empty()) {
-                                                int midiVal = NoteToMidi(step.note);
-                                                val = (float)(midiVal - 60) / 24.0f;
-                                                val = std::clamp(val, -1.0f, 1.0f);
-                                            } else {
-                                                val = 0.0f;
-                                            }
-                                        }
+            } else { // SEQ: Track Note Pitch Sequencer Follower [1]
+                int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+                if (currentStepIdx < 0) currentStepIdx = 0;
+                const Step& step = trk.steps[currentStepIdx];
+                
+                if (step.note >= 0) { // Read the integer sentinel directly (-1 means empty)
+                    int midiVal = step.note; // Read direct integer (No NoteToMidi lookup!)
+                    val = (float)(midiVal - 60) / 24.0f;
+                    val = std::clamp(val, -1.0f, 1.0f);
+                } else {
+                    val = 0.0f;
+                }
+            }
             // Scale and output value relative to depth
             g_globalLFOValues[t][1] = val * (trk.lfo2Depth / 99.0f);
         }
@@ -1148,7 +1148,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                             if (triggerTick < 0) triggerTick += localLengthTicks;
 
                             if (triggerTick == tracks[t].localTick) {
-                                if (step.velocity > 0 && !step.note.empty()) {
+                                if (step.velocity > 0 && step.note >= 0) { // Changed Note String check to quick Integer sentinel check
                                     int cycleLength = 1;
                                     for (int c = 0; c < 8; ++c) {
                                         if (step.condMask & (1 << (8 + c))) {
@@ -1160,7 +1160,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                     bool maskActive = (step.condMask & (1 << currentCycleIdx)) != 0;
 
                                     if (maskActive) {
-                                        int midiNoteRoot = NoteToMidi(step.note);
+                                        int midiNoteRoot = step.note; // Directly read the raw integer (NoteToMidi call removed!)
                                         if (midiNoteRoot >= 0) {
                                             std::vector<int> midiNotesToTrigger;
                                             midiNotesToTrigger.push_back(midiNoteRoot);
@@ -1178,9 +1178,8 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                 }
                                             } else {
                                                 for (int k = 0; k < 3; ++k) {
-                                                    if (!step.chordNotes[k].empty()) {
-                                                        int extraMidi = NoteToMidi(step.chordNotes[k]);
-                                                        if (extraMidi >= 0) midiNotesToTrigger.push_back(extraMidi);
+                                                    if (step.chordNotes[k] >= 0) { // Read standard chord integers directly
+                                                        midiNotesToTrigger.push_back(step.chordNotes[k]);
                                                     }
                                                 }
                                             }
@@ -1237,7 +1236,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                             }
                                         }
                                     }
-                                } else if (step.velocity == 0 && !step.note.empty()) {
+                                } else if (step.velocity == 0 && step.note >= 0) { // Changed String check to Integer sentinel check
                                     if (tracks[t].engineType == ENGINE_SYNTH) {
                                         for (int v = 0; v < 4; ++v) {
                                             if (g_trackVoices[t][v].triggeredBySequencer) {
@@ -1357,20 +1356,24 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 autoPanSendBusMono += processedSum * panSendNorm;
             }
 
-            float masterL = (masterDryMono / 8.0f) * 0.5f;
-            float masterR = (masterDryMono / 8.0f) * 0.5f;
+            // Replaced the punishing /16.0f division (ghost track attenuation)
+                        // with a standard master headroom scaling factor (0.35f ~ -9dB headroom)
+                        const float kMasterScale = 0.35f;
 
-            float delaySendL = (delaySendBusMono / 8.0f) * 0.5f;
-            float delaySendR = (delaySendBusMono / 8.0f) * 0.5f;
+                        float masterL = masterDryMono * kMasterScale;
+                        float masterR = masterDryMono * kMasterScale;
 
-            float satSendL = (satSendBusMono / 8.0f) * 0.5f;
-            float satSendR = (satSendBusMono / 8.0f) * 0.5f;
+                        float delaySendL = delaySendBusMono * kMasterScale;
+                        float delaySendR = delaySendBusMono * kMasterScale;
 
-            float reverbSendL = (reverbSendBusMono / 8.0f) * 0.5f;
-            float reverbSendR = (reverbSendBusMono / 8.0f) * 0.5f;
+                        float satSendL = satSendBusMono * kMasterScale;
+                        float satSendR = satSendBusMono * kMasterScale;
 
-            float panSendL = (autoPanSendBusMono / 8.0f) * 0.5f;
-            float panSendR = (autoPanSendBusMono / 8.0f) * 0.5f;
+                        float reverbSendL = reverbSendBusMono * kMasterScale;
+                        float reverbSendR = reverbSendBusMono * kMasterScale;
+
+                        float panSendL = autoPanSendBusMono * kMasterScale;
+                        float panSendR = autoPanSendBusMono * kMasterScale;
 
             float revMixMod = 0.0f;
             float delMixMod = 0.0f;
@@ -1502,8 +1505,20 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 outR = g_masterPerfFilterR.process(outR, perfFilterType);
             }
 
-            pOutputF[2 * outIdx]     = outL;
-            pOutputF[2 * outIdx + 1] = outR;
+            // Master Soft-Limiter: 100% transparent below 0.85f, soft-knee tanh compression up to 1.0f
+                        auto ApplyMasterLimit = [](float sample) -> float {
+                            float absSample = std::abs(sample);
+                            if (absSample < 0.85f) {
+                                return sample; // Fully linear & transparent below 0.85f
+                            }
+                            float excess = absSample - 0.85f;
+                            // Asymptotically approaches 1.0f (0.85f + 0.15f * 1.0f)
+                            float compressed = 0.85f + 0.15f * tanhf(excess / 0.15f);
+                            return (sample > 0.0f) ? compressed : -compressed;
+                        };
+
+                        pOutputF[2 * outIdx]     = ApplyMasterLimit(outL);
+                        pOutputF[2 * outIdx + 1] = ApplyMasterLimit(outR);
 
         } // End of i (chunkSize) loop
 
