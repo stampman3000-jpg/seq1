@@ -4,6 +4,8 @@ Soundboy is a standalone Raspberry Pi groovebox designed as both a musical instr
 
 Built around a Raspberry Pi 4 with an RP2040 keyboard controller, SSD1322 OLED display and custom UI, it combines sequencing, synthesis, sampling and real-time DSP into dedicated hardware.
 
+[![Watch the demo](https://img.youtube.com/vi/UfSV9runVow/maxresdefault.jpg)](https://www.youtube.com/watch?v=UfSV9runVow)
+
 ## Features
 
 - 8-track sequencer
