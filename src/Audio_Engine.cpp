@@ -62,6 +62,7 @@ static inline int GetParam(int stepVal, int trackVal) {
 // Block-rate Global LFO phase generator engine
 static void UpdateGlobalLFOs() {
     static uint32_t lfoRandSeed = 0x87654321u;
+    static int lastStepIdx[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
 
     for (int t = 0; t < 8; ++t) {
         Track& trk = tracks[t];
@@ -71,9 +72,32 @@ static void UpdateGlobalLFOs() {
             continue;
         }
 
+        // Resolve LFO locks from this track's local playing step (not selected-track playhead)
+        int stepIdx = (trk.localTick / 6) % trk.stepLength;
+        if (stepIdx < 0) stepIdx = 0;
+        const StepParams& sp = trk.steps[stepIdx].params;
+
+        int lfo1Speed = GetParam(sp.lfo1Speed, trk.lfo1Speed);
+        int lfo1Wave  = GetParam(sp.lfo1Wave,  trk.lfo1Wave);
+        int lfo1Depth = GetParam(sp.lfo1Depth, trk.lfo1Depth);
+        int lfo1Trig  = GetParam(sp.lfo1Trigger, trk.lfo1Trigger);
+        // int lfo1Sync = GetParam(sp.lfo1Sync, trk.lfo1Sync); // reserved: no DSP yet (track-level also unused)
+
+        int lfo2Speed = GetParam(sp.lfo2Speed, trk.lfo2Speed);
+        int lfo2Wave  = GetParam(sp.lfo2Wave,  trk.lfo2Wave);
+        int lfo2Depth = GetParam(sp.lfo2Depth, trk.lfo2Depth);
+        int lfo2Trig  = GetParam(sp.lfo2Trigger, trk.lfo2Trigger);
+
+        // TRG: re-arm phase when the track advances to a new step
+        if (stepIdx != lastStepIdx[t]) {
+            if (lfo1Trig) trk.lfo1Phase = 0.0f;
+            if (lfo2Trig) trk.lfo2Phase = 0.0f;
+            lastStepIdx[t] = stepIdx;
+        }
+
         // --- 1. EVALUATE LFO 1 ---
         {
-            float normSpeed = trk.lfo1Speed / 99.0f;
+            float normSpeed = lfo1Speed / 99.0f;
             float lfoHz = 0.05f * powf(400.0f, normSpeed); // Exponential mapping: 0.05Hz to 20Hz
             float phaseInc = (2.0f * 3.14159265f * lfoHz * 64.0f) / 44100.0f;
 
@@ -85,26 +109,24 @@ static void UpdateGlobalLFOs() {
             }
 
             float val = 0.0f;
-            if (trk.lfo1Wave == 0) { // Sine
+            if (lfo1Wave == 0) { // Sine
                 val = sinf(trk.lfo1Phase);
-            } else if (trk.lfo1Wave == 1) { // Triangle
+            } else if (lfo1Wave == 1) { // Triangle
                 float norm = trk.lfo1Phase / (2.0f * 3.14159265f);
                 val = (norm < 0.25f) ? (norm * 4.0f) : ((norm < 0.75f) ? (2.0f - (norm * 4.0f)) : ((norm * 4.0f) - 4.0f));
-            } else if (trk.lfo1Wave == 2) { // Saw
+            } else if (lfo1Wave == 2) { // Saw
                 float norm = trk.lfo1Phase / (2.0f * 3.14159265f);
                 val = 1.0f - (norm * 2.0f);
-            } else if (trk.lfo1Wave == 3) { // Square
+            } else if (lfo1Wave == 3) { // Square
                 float norm = trk.lfo1Phase / (2.0f * 3.14159265f);
                 val = (norm < 0.5f) ? 1.0f : -1.0f;
-            } else if (trk.lfo1Wave == 4) { // Sample & Hold
+            } else if (lfo1Wave == 4) { // Sample & Hold
                                             if (wrapped || trk.lfo1LastVal == 0.0f) {
                                                 trk.lfo1LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
                                             }
                                             val = trk.lfo1LastVal;
             } else { // SEQ: Track Note Pitch Sequencer Follower [1]
-                int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
-                if (currentStepIdx < 0) currentStepIdx = 0;
-                const Step& step = trk.steps[currentStepIdx];
+                const Step& step = trk.steps[stepIdx];
                 
                 if (step.note >= 0) { // Read the integer sentinel directly (-1 means empty)
                     int midiVal = step.note; // Read direct integer (No NoteToMidi lookup!)
@@ -116,12 +138,12 @@ static void UpdateGlobalLFOs() {
                 }
             }
             // Scale and output value relative to depth
-            g_globalLFOValues[t][0] = val * (trk.lfo1Depth / 99.0f);
+            g_globalLFOValues[t][0] = val * (lfo1Depth / 99.0f);
         }
 
         // --- 2. EVALUATE LFO 2 ---
         {
-            float normSpeed = trk.lfo2Speed / 99.0f;
+            float normSpeed = lfo2Speed / 99.0f;
             float lfoHz = 0.05f * powf(400.0f, normSpeed); // Exponential mapping: 0.05Hz to 20Hz
             float phaseInc = (2.0f * 3.14159265f * lfoHz * 64.0f) / 44100.0f;
 
@@ -133,26 +155,24 @@ static void UpdateGlobalLFOs() {
             }
 
             float val = 0.0f;
-            if (trk.lfo2Wave == 0) { // Sine
+            if (lfo2Wave == 0) { // Sine
                 val = sinf(trk.lfo2Phase);
-            } else if (trk.lfo2Wave == 1) { // Triangle
+            } else if (lfo2Wave == 1) { // Triangle
                 float norm = trk.lfo2Phase / (2.0f * 3.14159265f);
                 val = (norm < 0.25f) ? (norm * 4.0f) : ((norm < 0.75f) ? (2.0f - (norm * 4.0f)) : ((norm * 4.0f) - 4.0f));
-            } else if (trk.lfo2Wave == 2) { // Saw
+            } else if (lfo2Wave == 2) { // Saw
                 float norm = trk.lfo2Phase / (2.0f * 3.14159265f);
                 val = 1.0f - (norm * 2.0f);
-            } else if (trk.lfo2Wave == 3) { // Square
+            } else if (lfo2Wave == 3) { // Square
                 float norm = trk.lfo2Phase / (2.0f * 3.14159265f);
                 val = (norm < 0.5f) ? 1.0f : -1.0f;
-            } else if (trk.lfo2Wave == 4) { // Sample & Hold
+            } else if (lfo2Wave == 4) { // Sample & Hold
                                             if (wrapped || trk.lfo2LastVal == 0.0f) {
                                                 trk.lfo2LastVal = FastRandFloat(lfoRandSeed) * 2.0f - 1.0f;
                                             }
                                             val = trk.lfo2LastVal;
             } else { // SEQ: Track Note Pitch Sequencer Follower [1]
-                int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
-                if (currentStepIdx < 0) currentStepIdx = 0;
-                const Step& step = trk.steps[currentStepIdx];
+                const Step& step = trk.steps[stepIdx];
                 
                 if (step.note >= 0) { // Read the integer sentinel directly (-1 means empty)
                     int midiVal = step.note; // Read direct integer (No NoteToMidi lookup!)
@@ -163,7 +183,7 @@ static void UpdateGlobalLFOs() {
                 }
             }
             // Scale and output value relative to depth
-            g_globalLFOValues[t][1] = val * (trk.lfo2Depth / 99.0f);
+            g_globalLFOValues[t][1] = val * (lfo2Depth / 99.0f);
         }
     }
 }
@@ -175,9 +195,10 @@ static inline float MapVolumeToGain(float volVal) {
 }
 
 // Converts a 0..99 value to an exponential time duration in seconds.
-static float GetEnvTime(int val) {
-    float norm = val / 99.0f;
-    return 0.0010f * powf(15000.0f, norm * norm * norm);
+// 1ms..15s, exponent 1.5: snappy 0-40 for perc, usable mid, pads from ~80 up
+static float GetEnvTime(float val) {
+    float norm = std::clamp(val, 0.0f, 99.0f) / 99.0f;
+    return 0.0010f * powf(15000.0f, powf(norm, 1.5f));
 }
 
 // Cubic soft-clipper shaper to create warm, sweltering saturated waveforms
@@ -252,6 +273,9 @@ struct SynthVoice {
     float modMorph1Offset = 0.0f;
     float modMorph2Offset = 0.0f;
     float modPitchOffset = 0.0f;
+    float modDecayOffset = 0.0f;
+    float modFine1Offset = 0.0f;
+    float modFine2Offset = 0.0f;
 
     // Pitch Sweep Modulation States
     float pitchModFactor = 1.0f;
@@ -404,6 +428,9 @@ struct SynthVoice {
         modMorph1Offset = 0.0f;
         modMorph2Offset = 0.0f;
         modPitchOffset = 0.0f;
+        modDecayOffset = 0.0f;
+        modFine1Offset = 0.0f;
+        modFine2Offset = 0.0f;
 
         // Auto-Gate Timer Initialization
         if (isSeq) {
@@ -508,16 +535,21 @@ struct SynthVoice {
         }
 
         const Track& trk = tracks[trackIdx];
-        const StepParams& sp = trk.steps[playhead].params; // Parameter overrides on the active step
+        // Per-track playhead — not the selected-track global (polymeter-safe)
+        int stepIdx = (trk.localTick / 6) % trk.stepLength;
+        if (stepIdx < 0) stepIdx = 0;
+        const StepParams& sp = trk.steps[stepIdx].params;
 
         // Reusable fallback helper: if a step parameter is unlocked (-1), use the global track default
         auto GetParam = [](int stepVal, int trackVal) {
             return (stepVal == -1) ? trackVal : stepVal;
         };
 
+        int algo = GetParam(sp.algorithm, trk.algorithm);
+
         // Resolve active Analog value contextually (Reuses fmFeedback parameter in Parallel mode)
         int analogVal = GetParam(sp.fmFeedback, trk.fmFeedback);
-        float analogAmount = (trk.algorithm == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.0f;
+        float analogAmount = (algo == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.0f;
         
         // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
         // Combine base parameters with LFO modulation offsets (clamped to safe ranges)
@@ -531,7 +563,7 @@ struct SynthVoice {
 
         // Resolve Oscillator 2 targets contextually
         float targetVol2Val = std::clamp(GetParam(sp.volume2, trk.volume2) + modVol2Offset, 0.0f, 99.0f);
-        float targetVol2Gain = (trk.algorithm == ALGO_CARRIER_MOD)
+        float targetVol2Gain = (algo == ALGO_CARRIER_MOD)
             ? (targetVol2Val / 99.0f)                      // Raw 0..1 in FM mode to protect sweet spot
             : VolumeCurve(targetVol2Val);                  // Perceptual volume LUT in Parallel mode
 
@@ -668,32 +700,8 @@ struct SynthVoice {
             // Recalculate envelope parameters at block rate instead of per sample
             float invSampleRate = 1.0f / (float)g_sampleRate;
 
-            envAtkRate1 = invSampleRate / GetEnvTime(GetParam(sp.attack, trk.attack));
-            float decTime1 = GetEnvTime(GetParam(sp.decay, trk.decay));
-            envDecCoeff1 = expf(-6.9078f / ((float)g_sampleRate * decTime1));
-            float relTime1 = GetEnvTime(GetParam(sp.release, trk.release));
-            envRelCoeff1 = expf(-6.9078f / ((float)g_sampleRate * relTime1));
-            envSusLevel1 = GetParam(sp.sustain, trk.sustain) / 99.0f;
-
-            envAtkRate2 = invSampleRate / GetEnvTime(GetParam(sp.attack2, trk.attack2));
-            float decTime2 = GetEnvTime(GetParam(sp.decay2, trk.decay2));
-            envDecCoeff2 = expf(-6.9078f / ((float)g_sampleRate * decTime2));
-            float relTime2 = GetEnvTime(GetParam(sp.release2, trk.release2));
-            envRelCoeff2 = expf(-6.9078f / ((float)g_sampleRate * relTime2));
-            envSusLevel2 = GetParam(sp.sustain2, trk.sustain2) / 99.0f;
-
-            noiseAtkRate = invSampleRate / GetEnvTime(GetParam(sp.noiseAttack, trk.noiseAttack));
-            noiseDecRate = invSampleRate / GetEnvTime(GetParam(sp.noiseDecay, trk.noiseDecay));
-            noiseHoldSamples = (uint32_t)(GetEnvTime(GetParam(sp.noiseHold, trk.noiseHold)) * g_sampleRate);
-
-            filterAtkRate = invSampleRate / GetEnvTime(GetParam(sp.filterAttack, trk.filterAttack));
-            float fDecTime = GetEnvTime(GetParam(sp.filterDecay, trk.filterDecay));
-            filterDecCoeff = expf(-6.9078f / ((float)g_sampleRate * fDecTime));
-            float fRelTime = GetEnvTime(GetParam(sp.filterRelease, trk.filterRelease));
-            filterRelCoeff = expf(-6.9078f / ((float)g_sampleRate * fRelTime));
-            filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
-            
-            // Reset mod offsets
+            // Reset mod offsets, then sum LFO targets before envelope coeffs
+            // so DEST_DECAY can lengthen/shorten amp decay in this same block.
             modCutoffOffset = 0.0f;
             modResOffset = 0.0f;
             modVol1Offset = 0.0f;
@@ -701,12 +709,13 @@ struct SynthVoice {
             modMorph1Offset = 0.0f;
             modMorph2Offset = 0.0f;
             modPitchOffset = 0.0f;
+            modDecayOffset = 0.0f;
+            modFine1Offset = 0.0f;
+            modFine2Offset = 0.0f;
 
-            // Pull and sum modulation offsets from all 16 system LFO outputs targeting this voice
             for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
                 const Track& srcTrk = tracks[srcTrkIdx];
 
-                // Check LFO 1 Slots
                 for (int s = 0; s < 3; ++s) {
                     const ModSlot& m = srcTrk.lfo1Slots[s];
                     if (m.destType == 1 && m.destTrack == trackIdx) {
@@ -716,12 +725,14 @@ struct SynthVoice {
                         else if (m.destParam == DEST_VOLUME)     modVol1Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_MORPH1)     modMorph1Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_MORPH2)     modMorph2Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f; // Scale to pitch semitones (max +/-1 octave)
-                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f; // ADDED: Target Modulator Vol / FM Index [1]
+                        else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
+                        else if (m.destParam == DEST_DECAY)      modDecayOffset += modVal * 99.0f;
+                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f;
+                        else if (m.destParam == DEST_FINE1)      modFine1Offset += modVal * 99.0f;
+                        else if (m.destParam == DEST_FINE2)      modFine2Offset += modVal * 99.0f;
                     }
                 }
 
-                // Check LFO 2 Slots
                 for (int s = 0; s < 3; ++s) {
                     const ModSlot& m = srcTrk.lfo2Slots[s];
                     if (m.destType == 1 && m.destTrack == trackIdx) {
@@ -732,10 +743,38 @@ struct SynthVoice {
                         else if (m.destParam == DEST_MORPH1)     modMorph1Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_MORPH2)     modMorph2Offset += modVal * 99.0f;
                         else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f; // ADDED: Target Modulator Vol / FM Index [1]
+                        else if (m.destParam == DEST_DECAY)      modDecayOffset += modVal * 99.0f;
+                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f;
+                        else if (m.destParam == DEST_FINE1)      modFine1Offset += modVal * 99.0f;
+                        else if (m.destParam == DEST_FINE2)      modFine2Offset += modVal * 99.0f;
                     }
                 }
             }
+
+            envAtkRate1 = invSampleRate / GetEnvTime((float)GetParam(sp.attack, trk.attack));
+            float decTime1 = GetEnvTime((float)GetParam(sp.decay, trk.decay) + modDecayOffset);
+            envDecCoeff1 = expf(-6.9078f / ((float)g_sampleRate * decTime1));
+            float relTime1 = GetEnvTime((float)GetParam(sp.release, trk.release));
+            envRelCoeff1 = expf(-6.9078f / ((float)g_sampleRate * relTime1));
+            envSusLevel1 = GetParam(sp.sustain, trk.sustain) / 99.0f;
+
+            envAtkRate2 = invSampleRate / GetEnvTime((float)GetParam(sp.attack2, trk.attack2));
+            float decTime2 = GetEnvTime((float)GetParam(sp.decay2, trk.decay2));
+            envDecCoeff2 = expf(-6.9078f / ((float)g_sampleRate * decTime2));
+            float relTime2 = GetEnvTime((float)GetParam(sp.release2, trk.release2));
+            envRelCoeff2 = expf(-6.9078f / ((float)g_sampleRate * relTime2));
+            envSusLevel2 = GetParam(sp.sustain2, trk.sustain2) / 99.0f;
+
+            noiseAtkRate = invSampleRate / GetEnvTime((float)GetParam(sp.noiseAttack, trk.noiseAttack));
+            noiseDecRate = invSampleRate / GetEnvTime((float)GetParam(sp.noiseDecay, trk.noiseDecay));
+            noiseHoldSamples = (uint32_t)(GetEnvTime((float)GetParam(sp.noiseHold, trk.noiseHold)) * g_sampleRate);
+
+            filterAtkRate = invSampleRate / GetEnvTime((float)GetParam(sp.filterAttack, trk.filterAttack));
+            float fDecTime = GetEnvTime((float)GetParam(sp.filterDecay, trk.filterDecay));
+            filterDecCoeff = expf(-6.9078f / ((float)g_sampleRate * fDecTime));
+            float fRelTime = GetEnvTime((float)GetParam(sp.filterRelease, trk.filterRelease));
+            filterRelCoeff = expf(-6.9078f / ((float)g_sampleRate * fRelTime));
+            filterSusLevel = GetParam(sp.filterSustain, trk.filterSustain) / 99.0f;
 
             // Modulate the normalized control position (0.0 to 1.0) logarithmically before mapping to Hz
             float normCut = smoothCutoff / 99.0f;
@@ -768,16 +807,18 @@ struct SynthVoice {
                     currentFreq = baseFreq; // Snap instantly if glide is off
                 }
 
-                float semitoneOffset1 = GetParam(sp.coarse, trk.coarse) + (GetParam(sp.fine, trk.fine) / 100.0f);
+                float fine1Mod = std::clamp(GetParam(sp.fine, trk.fine) + modFine1Offset, -99.0f, 99.0f);
+                float semitoneOffset1 = GetParam(sp.coarse, trk.coarse) + (fine1Mod / 100.0f);
                 float freq1 = currentFreq * pitchModFactor * powf(2.0f, (semitoneOffset1 + modPitchOffset) / 12.0f); // Modulated by pitch envelope
 
         float finalSample = 0.0f;
 
-        if (trk.algorithm == ALGO_PARALLEL) {
+        if (algo == ALGO_PARALLEL) {
             // ==========================================
             // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
             // ==========================================
-            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
+            float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFine2Offset, -99.0f, 99.0f);
+            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (fine2Mod / 100.0f);
             float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
 
             float freq1AnalogScale = 1.0f;
@@ -831,7 +872,8 @@ struct SynthVoice {
             // ==========================================
             // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
             // ==========================================
-            float ratio = GetParam(sp.coarse2, trk.coarse2) + (GetParam(sp.fine2, trk.fine2) / 100.0f);
+            float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFine2Offset, -99.0f, 99.0f);
+            float ratio = GetParam(sp.coarse2, trk.coarse2) + (fine2Mod / 100.0f);
             if (ratio < 0.05f) ratio = 0.05f;
             float freq2 = freq1 * ratio;
 
@@ -1162,24 +1204,33 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                     if (maskActive) {
                                         int midiNoteRoot = step.note; // Directly read the raw integer (NoteToMidi call removed!)
                                         if (midiNoteRoot >= 0) {
-                                            std::vector<int> midiNotesToTrigger;
-                                            midiNotesToTrigger.push_back(midiNoteRoot);
+                                            // Fixed stack buffer: no heap in audio callback
+                                            int midiNotesToTrigger[4];
+                                            int noteCount = 0;
+                                            midiNotesToTrigger[noteCount++] = midiNoteRoot;
 
                                             if (step.chordType > 0) {
-                                                std::vector<int> chordOffsets;
-                                                if (step.chordType == 1)      chordOffsets = {4, 7};
-                                                else if (step.chordType == 2) chordOffsets = {3, 7};
-                                                else if (step.chordType == 3) chordOffsets = {5, 7};
-                                                else if (step.chordType == 4) chordOffsets = {4, 7, 10};
-                                                else if (step.chordType == 5) chordOffsets = {4, 7, 11};
-                                                else if (step.chordType == 6) chordOffsets = {3, 7, 10};
-                                                for (int offset : chordOffsets) {
-                                                    midiNotesToTrigger.push_back(midiNoteRoot + offset);
+                                                // Indexed by chordType 1..6: maj, min, sus4, dom7, maj7, min7
+                                                static const int kChordOffsets[7][3] = {
+                                                    {0, 0, 0},
+                                                    {4, 7, 0},
+                                                    {3, 7, 0},
+                                                    {5, 7, 0},
+                                                    {4, 7, 10},
+                                                    {4, 7, 11},
+                                                    {3, 7, 10}
+                                                };
+                                                static const int kChordOffsetCounts[7] = {0, 2, 2, 2, 3, 3, 3};
+                                                int ct = step.chordType;
+                                                if (ct >= 1 && ct <= 6) {
+                                                    for (int i = 0; i < kChordOffsetCounts[ct] && noteCount < 4; ++i) {
+                                                        midiNotesToTrigger[noteCount++] = midiNoteRoot + kChordOffsets[ct][i];
+                                                    }
                                                 }
                                             } else {
-                                                for (int k = 0; k < 3; ++k) {
+                                                for (int k = 0; k < 3 && noteCount < 4; ++k) {
                                                     if (step.chordNotes[k] >= 0) { // Read standard chord integers directly
-                                                        midiNotesToTrigger.push_back(step.chordNotes[k]);
+                                                        midiNotesToTrigger[noteCount++] = step.chordNotes[k];
                                                     }
                                                 }
                                             }
@@ -1192,7 +1243,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                             if (finalPolyMode < 1) finalPolyMode = 1;
                                             if (finalPolyMode > 4) finalPolyMode = 4;
 
-                                            int notesCount = std::min((int)midiNotesToTrigger.size(), finalPolyMode);
+                                            int notesCount = std::min(noteCount, finalPolyMode);
 
                                             for (int n = 0; n < notesCount; ++n) {
                                                 int midiNote = midiNotesToTrigger[n];

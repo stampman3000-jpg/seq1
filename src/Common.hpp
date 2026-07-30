@@ -134,6 +134,10 @@ enum ModDestination {
        DEST_GRAN_SIZE,  // ADDED: Grain Size target [1]
        DEST_GRAN_DENS,  // ADDED: Grain Density target [1]
        DEST_GRAN_SCAT,  // ADDED: Grain Scatter target [1]
+    // Inserted after GRAN_SCAT (before TAPE): shifts saved destParam ints for TAPE_*/FX routes by +3.
+    DEST_FINE1,     // Synth osc1 fine (±99¢)
+    DEST_FINE2,     // Synth osc2 fine2 + sampler fine2 (±99¢)
+    DEST_SAMP_POS,  // Sampler/grain POS (alias of DEST_MORPH1 on sampler)
 
     // Tape Buffer Parameters (Page 4 targets)
     DEST_TAPE_MEM,
@@ -209,7 +213,6 @@ struct StepParams {
     int pitchSweepDepth = -1;
     int pitchSweepTime = -1;
     int bitRed = -1;
-    int sampleRateRed = -1;
 
     // Sampler Parameters (Page 3)
     int sampleSlot = -1;
@@ -224,6 +227,7 @@ struct StepParams {
     int grainDensity = -1;
     int grainPosition = -1;
     int grainScatter = -1;
+    int algorithm = -1; // Synth Parallel/FM or Sampler Sample/Granular (not filterType)
 
     // Filter & LFO Parameters (Page 4)
     int filterCutoff = -1;
@@ -235,13 +239,12 @@ struct StepParams {
     int filterSustain = -1;
     int filterRelease = -1;
     
-    // LFO 1 State & Parameters
+    // LFO 1 State & Parameters (routing is track-level ModSlots — not per-step)
     int lfo1Wave = -1;
     int lfo1Speed = -1;
     int lfo1Depth = -1;
     int lfo1Trigger = -1;
     int lfo1Sync = -1;
-    int lfo1Dest = -1;
 
     // LFO 2 State & Parameters
     int lfo2Wave = -1;
@@ -249,7 +252,6 @@ struct StepParams {
     int lfo2Depth = -1;
     int lfo2Trigger = -1;
     int lfo2Sync = -1;
-    int lfo2Dest = -1;
 
     int reverbSend = -1;
     int delaySend = -1;
@@ -279,12 +281,13 @@ struct StepParams {
         morph = -1; coarse = -1; fine = -1; volume = -1; attack = -1; decay = -1; sustain = -1; release = -1;
         morph2 = -1; coarse2 = -1; fine2 = -1; volume2 = -1; attack2 = -1; decay2 = -1; sustain2 = -1; release2 = -1;
         fmFeedback = -1; noiseVolume = -1; noiseAttack = -1; noiseHold = -1; noiseDecay = -1;
-        pitchSweepDepth = -1; pitchSweepTime = -1; bitRed = -1; sampleRateRed = -1;
+        pitchSweepDepth = -1; pitchSweepTime = -1; bitRed = -1;
         sampleSlot = -1; sampleStart = -1; sampleLength = -1; sampleLoop = -1; sampleTune = -1; loopStart = -1; loopEnd = -1; sliceDivisions = -1; grainSize = -1; grainDensity = -1; grainPosition = -1; grainScatter = -1;
+        algorithm = -1;
         filterCutoff = -1; filterResonance = -1; filterType = -1; filterEnvDepth = -1;
         filterAttack = -1; filterDecay = -1; filterSustain = -1; filterRelease = -1;
-        lfo1Wave = -1; lfo1Speed = -1; lfo1Depth = -1; lfo1Trigger = -1; lfo1Sync = -1; lfo1Dest = -1;
-        lfo2Wave = -1; lfo2Speed = -1; lfo2Depth = -1; lfo2Trigger = -1; lfo2Sync = -1; lfo2Dest = -1;
+        lfo1Wave = -1; lfo1Speed = -1; lfo1Depth = -1; lfo1Trigger = -1; lfo1Sync = -1;
+        lfo2Wave = -1; lfo2Speed = -1; lfo2Depth = -1; lfo2Trigger = -1; lfo2Sync = -1;
         reverbSend = -1; delaySend = -1; saturationSend = -1; autoPanSend = -1; masterVolume = -1;  glideTime = -1;
         tapeMemory = -1; tapeHeads = -1; tapeSpread = -1; tapeSpeed = -1; tapeTether = -1;
         tapeDrift = -1; tapeDriftRate = -1; tapeFeedback = -1; tapeFbSpread = -1; tapeFbSource = -1;

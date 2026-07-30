@@ -403,13 +403,37 @@ static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
         // ==========================================
         
         // 1. Left/Right Navigation moves the cursor slot (0 to 14)
-        if (IsKeyPressed(KEY_LEFT)) {
-            g_typingCursor--;
-            if (g_typingCursor < 0) g_typingCursor = (int)g_typingBuffer.length() - 1; // Wrap to end
+        // Hold-and-repeat, mirroring the Up/Down character-scroll repeat already used on this screen.
+        static float typingCursorRepeatTimer = 0.0f;
+        bool typingCursorHeld = IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
+        bool triggerCursorMove = false;
+
+        if (typingCursorHeld) {
+            if (typingCursorRepeatTimer == 0.0f) {
+                triggerCursorMove = true;
+                typingCursorRepeatTimer += GetFrameTime();
+            } else {
+                typingCursorRepeatTimer += GetFrameTime();
+                const float INITIAL_DELAY = 0.250f;
+                const float REPEAT_INTERVAL = 0.060f;
+                if (typingCursorRepeatTimer >= INITIAL_DELAY) {
+                    triggerCursorMove = true;
+                    typingCursorRepeatTimer -= REPEAT_INTERVAL;
+                }
+            }
+        } else {
+            typingCursorRepeatTimer = 0.0f;
         }
-        if (IsKeyPressed(KEY_RIGHT)) {
-            g_typingCursor++;
-            if (g_typingCursor >= (int)g_typingBuffer.length()) g_typingCursor = 0; // Wrap to start
+
+        if (triggerCursorMove) {
+            if (IsKeyDown(KEY_LEFT)) {
+                g_typingCursor--;
+                if (g_typingCursor < 0) g_typingCursor = (int)g_typingBuffer.length() - 1; // Wrap to end
+            }
+            if (IsKeyDown(KEY_RIGHT)) {
+                g_typingCursor++;
+                if (g_typingCursor >= (int)g_typingBuffer.length()) g_typingCursor = 0; // Wrap to start
+            }
         }
 
         // 2. Up/Down or Encoder Turn scrolls characters at the active slot
@@ -826,15 +850,21 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
             }
             else if (synthGridRow == 2) {
                 if (synthGridCol == 0) {
-                    if (isStepLock) sp.filterType = (sp.filterType == -1) ? ((trk.filterType == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE) : ((sp.filterType == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE);
-                    else            trk.algorithm = (trk.algorithm == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
+                    // Lock real algorithm — never abuse filterType for sample↔granular
+                    if (isStepLock) {
+                        int base = (sp.algorithm == -1) ? trk.algorithm : sp.algorithm;
+                        sp.algorithm = (base == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
+                    } else {
+                        trk.algorithm = (trk.algorithm == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
+                    }
                 }
                 else if (synthGridCol == 1) {
                     if (isStepLock) EditParam(sp.sampleSlot, trk.sampleSlot, change, 0, 15);
                     else            trk.sampleSlot = std::clamp(trk.sampleSlot + change, 0, 15);
                 }
                 else if (synthGridCol == 2) {
-                    if (trk.algorithm == ALGO_SAMPLE) {
+                    int effAlgo = (isStepLock && sp.algorithm != -1) ? sp.algorithm : trk.algorithm;
+                    if (effAlgo == ALGO_SAMPLE) {
                         int baseSdiv = (isStepLock && sp.sliceDivisions != -1) ? sp.sliceDivisions : trk.sliceDivisions;
                         int newSdiv = baseSdiv;
                         if (change > 0)      newSdiv = std::clamp(baseSdiv * 2, 1, 64);

@@ -38,7 +38,9 @@ struct SamplerVoice {
     float modResOffset = 0.0f;
     float modVolOffset = 0.0f;
     float modPitchOffset = 0.0f;
-    float modMorphOffset = 0.0f; // Maps to grain position / slice selection offset
+    float modMorphOffset = 0.0f; // Maps to grain position / slice selection offset (MORPH1 + SAMP_POS)
+    float modFineOffset = 0.0f;  // Sampler fine2 cents LFO offset
+    float modDecayOffset = 0.0f;
     float modSampStartOffset = 0.0f; // ADDED [1]
         float modGranSizeOffset = 0.0f;  // ADDED [1]
         float modGranDensOffset = 0.0f;  // ADDED [1]

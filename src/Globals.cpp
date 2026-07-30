@@ -5,13 +5,63 @@
 #include <filesystem>
 #include <vector>
 
-// Helper utility to safely read optional parameters from older files without breaking the file stream
+// Optional trailing-field helper (track-level legacy only — step blocks use hard v2 reads)
 template <typename T>
 static void SafeRead(std::ifstream& file, T& val, T defaultVal) {
     if (!(file >> val)) {
         file.clear(); // Clears any fail/EOF flags so the stream can keep reading
         val = defaultVal; // Fall back to a safe default value
     }
+}
+
+// Complete StepParams serialize list (format v2). Order must match ReadStepParams.
+static void WriteStepParams(std::ofstream& file, const StepParams& sp) {
+    file << sp.polyMode << "\n";
+    file << sp.morph << "\n" << sp.coarse << "\n" << sp.fine << "\n" << sp.volume << "\n";
+    file << sp.attack << "\n" << sp.decay << "\n" << sp.sustain << "\n" << sp.release << "\n";
+    file << sp.morph2 << "\n" << sp.coarse2 << "\n" << sp.fine2 << "\n" << sp.volume2 << "\n";
+    file << sp.attack2 << "\n" << sp.decay2 << "\n" << sp.sustain2 << "\n" << sp.release2 << "\n";
+    file << sp.fmFeedback << "\n" << sp.noiseVolume << "\n" << sp.noiseAttack << "\n" << sp.noiseHold << "\n" << sp.noiseDecay << "\n";
+    file << sp.pitchSweepDepth << "\n" << sp.pitchSweepTime << "\n" << sp.bitRed << "\n";
+    file << sp.sampleSlot << "\n" << sp.sampleStart << "\n" << sp.sampleLength << "\n" << sp.sampleLoop << "\n";
+    file << sp.sampleTune << "\n" << sp.loopStart << "\n" << sp.loopEnd << "\n" << sp.sliceDivisions << "\n";
+    file << sp.grainSize << "\n" << sp.grainDensity << "\n" << sp.grainPosition << "\n" << sp.grainScatter << "\n";
+    file << sp.algorithm << "\n";
+    file << sp.filterCutoff << "\n" << sp.filterResonance << "\n" << sp.filterType << "\n" << sp.filterEnvDepth << "\n";
+    file << sp.filterAttack << "\n" << sp.filterDecay << "\n" << sp.filterSustain << "\n" << sp.filterRelease << "\n";
+    file << sp.lfo1Wave << "\n" << sp.lfo1Speed << "\n" << sp.lfo1Depth << "\n" << sp.lfo1Trigger << "\n" << sp.lfo1Sync << "\n";
+    file << sp.lfo2Wave << "\n" << sp.lfo2Speed << "\n" << sp.lfo2Depth << "\n" << sp.lfo2Trigger << "\n" << sp.lfo2Sync << "\n";
+    file << sp.reverbSend << "\n" << sp.delaySend << "\n" << sp.saturationSend << "\n" << sp.autoPanSend << "\n";
+    file << sp.masterVolume << "\n" << sp.glideTime << "\n";
+    file << sp.tapeMemory << "\n" << sp.tapeHeads << "\n" << sp.tapeSpread << "\n" << sp.tapeSpeed << "\n"
+         << sp.tapeTether << "\n" << sp.tapeDrift << "\n" << sp.tapeDriftRate << "\n" << sp.tapeFeedback << "\n"
+         << sp.tapeFbSpread << "\n" << sp.tapeFbSource << "\n" << sp.tapeFreeze << "\n" << sp.tapeSmearRate << "\n"
+         << sp.tapeSmearSize << "\n" << sp.tapeMix << "\n";
+}
+
+static bool ReadStepParams(std::ifstream& file, StepParams& sp) {
+    if (!(file >> sp.polyMode)) return false;
+    if (!(file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume)) return false;
+    if (!(file >> sp.attack >> sp.decay >> sp.sustain >> sp.release)) return false;
+    if (!(file >> sp.morph2 >> sp.coarse2 >> sp.fine2 >> sp.volume2)) return false;
+    if (!(file >> sp.attack2 >> sp.decay2 >> sp.sustain2 >> sp.release2)) return false;
+    if (!(file >> sp.fmFeedback >> sp.noiseVolume >> sp.noiseAttack >> sp.noiseHold >> sp.noiseDecay)) return false;
+    if (!(file >> sp.pitchSweepDepth >> sp.pitchSweepTime >> sp.bitRed)) return false;
+    if (!(file >> sp.sampleSlot >> sp.sampleStart >> sp.sampleLength >> sp.sampleLoop)) return false;
+    if (!(file >> sp.sampleTune >> sp.loopStart >> sp.loopEnd >> sp.sliceDivisions)) return false;
+    if (!(file >> sp.grainSize >> sp.grainDensity >> sp.grainPosition >> sp.grainScatter)) return false;
+    if (!(file >> sp.algorithm)) return false;
+    if (!(file >> sp.filterCutoff >> sp.filterResonance >> sp.filterType >> sp.filterEnvDepth)) return false;
+    if (!(file >> sp.filterAttack >> sp.filterDecay >> sp.filterSustain >> sp.filterRelease)) return false;
+    if (!(file >> sp.lfo1Wave >> sp.lfo1Speed >> sp.lfo1Depth >> sp.lfo1Trigger >> sp.lfo1Sync)) return false;
+    if (!(file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync)) return false;
+    if (!(file >> sp.reverbSend >> sp.delaySend >> sp.saturationSend >> sp.autoPanSend)) return false;
+    if (!(file >> sp.masterVolume >> sp.glideTime)) return false;
+    if (!(file >> sp.tapeMemory >> sp.tapeHeads >> sp.tapeSpread >> sp.tapeSpeed
+              >> sp.tapeTether >> sp.tapeDrift >> sp.tapeDriftRate >> sp.tapeFeedback
+              >> sp.tapeFbSpread >> sp.tapeFbSource >> sp.tapeFreeze >> sp.tapeSmearRate
+              >> sp.tapeSmearSize >> sp.tapeMix)) return false;
+    return true;
 }
 
 int selectedTrack = 0;
@@ -780,6 +830,8 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
     std::ofstream file(path);
     if (!file.is_open()) return false;
 
+    file << "SOUNDBOY_PAT 2\n";
+
     // Temporarily dump global live tracks to RAM slot before writing
     for (int t = 0; t < 8; ++t) {
         patterns[patternIdx].tracks[t] = tracks[t];
@@ -843,29 +895,7 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
                     file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
                     file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
                     
-            // Step overrides
-            const StepParams& sp = step.params;
-            file << sp.morph << "\n" << sp.coarse << "\n" << sp.fine << "\n" << sp.volume << "\n";
-            file << sp.attack << "\n" << sp.decay << "\n" << sp.sustain << "\n" << sp.release << "\n";
-            file << sp.morph2 << "\n" << sp.coarse2 << "\n" << sp.fine2 << "\n" << sp.volume2 << "\n";
-            file << sp.attack2 << "\n" << sp.decay2 << "\n" << sp.sustain2 << "\n" << sp.release2 << "\n";
-            file << sp.fmFeedback << "\n" << sp.noiseVolume << "\n" << sp.noiseAttack << "\n" << sp.noiseHold << "\n" << sp.noiseDecay << "\n";
-            file << sp.filterCutoff << "\n" << sp.filterResonance << "\n" << sp.filterType << "\n" << sp.filterEnvDepth << "\n";
-            file << sp.filterAttack << "\n" << sp.filterDecay << "\n" << sp.filterSustain << "\n" << sp.filterRelease << "\n";
-            file << sp.lfo1Wave << "\n" << sp.lfo1Speed << "\n" << sp.lfo1Depth << "\n" << sp.lfo1Trigger << "\n" << sp.lfo1Sync << "\n" << sp.lfo1Dest << "\n";
-            file << sp.lfo2Wave << "\n" << sp.lfo2Speed << "\n" << sp.lfo2Depth << "\n" << sp.lfo2Trigger << "\n" << sp.lfo2Sync << "\n" << sp.lfo2Dest << "\n";
-            file << sp.reverbSend << "\n" << sp.delaySend << "\n" << sp.saturationSend << "\n" << sp.autoPanSend << "\n";
-            file << sp.sampleSlot << "\n"; // Save step-locked sample slot [2]
-            file << sp.masterVolume << "\n";
-            
-            // Save step-locked Tape Buffer parameters
-            file << sp.tapeMemory << "\n" << sp.tapeHeads << "\n" << sp.tapeSpread << "\n" << sp.tapeSpeed << "\n"
-                 << sp.tapeTether << "\n" << sp.tapeDrift << "\n" << sp.tapeDriftRate << "\n" << sp.tapeFeedback << "\n"
-                 << sp.tapeFbSpread << "\n" << sp.tapeFbSource << "\n" << sp.tapeFreeze << "\n" << sp.tapeSmearRate << "\n"
-                 << sp.tapeSmearSize << "\n" << sp.tapeMix << "\n";
-
-            // Save step-locked Poly/Mono Voice Mode
-            file << sp.polyMode << "\n";
+            WriteStepParams(file, step.params);
         }
 
         // Save track-default Sample Slot and Name
@@ -879,6 +909,10 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
     std::string path = "patterns/" + filename + ".pat";
     std::ifstream file(path);
     if (!file.is_open()) return false;
+
+    std::string magic;
+    int ver = 0;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver != 2) return false;
 
     Pattern& pat = patterns[patternIdx];
     for (int t = 0; t < 8; ++t) {
@@ -972,38 +1006,7 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
                         step.chordNotes[2] = -1;
                     }
 
-            StepParams& sp = step.params;
-            file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;
-            file >> sp.attack >> sp.decay >> sp.sustain >> sp.release;
-            file >> sp.morph2 >> sp.coarse2 >> sp.fine2 >> sp.volume2;
-            file >> sp.attack2 >> sp.decay2 >> sp.sustain2 >> sp.release2;
-            file >> sp.fmFeedback >> sp.noiseVolume >> sp.noiseAttack >> sp.noiseHold >> sp.noiseDecay;
-            file >> sp.filterCutoff >> sp.filterResonance >> sp.filterType >> sp.filterEnvDepth;
-            file >> sp.filterAttack >> sp.filterDecay >> sp.filterSustain >> sp.filterRelease;
-            file >> sp.lfo1Wave >> sp.lfo1Speed >> sp.lfo1Depth >> sp.lfo1Trigger >> sp.lfo1Sync >> sp.lfo1Dest;
-            file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync >> sp.lfo2Dest;
-            file >> sp.reverbSend >> sp.delaySend >> sp.saturationSend >> sp.autoPanSend;
-            
-            // Safely load step overrides (fallback to -1 means "no parameter lock")
-            SafeRead(file, sp.sampleSlot, -1);
-            SafeRead(file, sp.masterVolume, -1);
-            
-            SafeRead(file, sp.tapeMemory, -1);
-            SafeRead(file, sp.tapeHeads, -1);
-            SafeRead(file, sp.tapeSpread, -1);
-            SafeRead(file, sp.tapeSpeed, -1);
-            SafeRead(file, sp.tapeTether, -1);
-            SafeRead(file, sp.tapeDrift, -1);
-            SafeRead(file, sp.tapeDriftRate, -1);
-            SafeRead(file, sp.tapeFeedback, -1);
-            SafeRead(file, sp.tapeFbSpread, -1);
-            SafeRead(file, sp.tapeFbSource, -1);
-            SafeRead(file, sp.tapeFreeze, -1);
-            SafeRead(file, sp.tapeSmearRate, -1);
-            SafeRead(file, sp.tapeSmearSize, -1);
-            SafeRead(file, sp.tapeMix, -1);
-
-            SafeRead(file, sp.polyMode, -1);
+            if (!ReadStepParams(file, step.params)) return false;
         } // end of step loop
 
         // Safely load default Sample Slot and Name
@@ -1039,6 +1042,8 @@ bool SaveProject(int slot, const std::string& filename) {
     std::string path = "projects/slot_" + std::to_string(slot) + "_" + filename + ".prj";
     std::ofstream file(path);
     if (!file.is_open()) return false;
+
+    file << "SOUNDBOY_PRJ 2\n";
 
     // Sync live edits to current pattern slot
     for (int t = 0; t < 8; ++t) {
@@ -1118,27 +1123,7 @@ bool SaveProject(int slot, const std::string& filename) {
                             file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
                             file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
 
-                const StepParams& sp = step.params;
-                file << sp.morph << "\n" << sp.coarse << "\n" << sp.fine << "\n" << sp.volume << "\n";
-                file << sp.attack << "\n" << sp.decay << "\n" << sp.sustain << "\n" << sp.release << "\n";
-                file << sp.morph2 << "\n" << sp.coarse2 << "\n" << sp.fine2 << "\n" << sp.volume2 << "\n";
-                file << sp.attack2 << "\n" << sp.decay2 << "\n" << sp.sustain2 << "\n" << sp.release2 << "\n";
-                file << sp.fmFeedback << "\n" << sp.noiseVolume << "\n" << sp.noiseAttack << "\n" << sp.noiseHold << "\n" << sp.noiseDecay << "\n";
-                file << sp.filterCutoff << "\n" << sp.filterResonance << "\n" << sp.filterType << "\n" << sp.filterEnvDepth << "\n";
-                file << sp.filterAttack << "\n" << sp.filterDecay << "\n" << sp.filterSustain << "\n" << sp.filterRelease << "\n";
-                file << sp.lfo1Wave << "\n" << sp.lfo1Speed << "\n" << sp.lfo1Depth << "\n" << sp.lfo1Trigger << "\n" << sp.lfo1Sync << "\n" << sp.lfo1Dest << "\n";
-                file << sp.lfo2Wave << "\n" << sp.lfo2Speed << "\n" << sp.lfo2Depth << "\n" << sp.lfo2Trigger << "\n" << sp.lfo2Sync << "\n" << sp.lfo2Dest << "\n";
-                file << sp.reverbSend << "\n" << sp.delaySend << "\n" << sp.saturationSend << "\n" << sp.autoPanSend << "\n";
-                file << sp.sampleSlot << "\n"; // Save step-locked sample slot [2]
-
-                // Save step-locked Tape Buffer parameters
-                file << sp.tapeMemory << "\n" << sp.tapeHeads << "\n" << sp.tapeSpread << "\n" << sp.tapeSpeed << "\n"
-                     << sp.tapeTether << "\n" << sp.tapeDrift << "\n" << sp.tapeDriftRate << "\n" << sp.tapeFeedback << "\n"
-                     << sp.tapeFbSpread << "\n" << sp.tapeFbSource << "\n" << sp.tapeFreeze << "\n" << sp.tapeSmearRate << "\n"
-                     << sp.tapeSmearSize << "\n" << sp.tapeMix << "\n";
-
-                // Save step-locked Poly/Mono Voice Mode
-                file << sp.polyMode << "\n";
+                WriteStepParams(file, step.params);
             }
 
             // Save track-default Sample Slot and Name
@@ -1153,6 +1138,10 @@ bool LoadProject(const std::string& filename) {
     std::string path = "projects/" + filename + ".prj";
     std::ifstream file(path);
     if (!file.is_open()) return false;
+
+    std::string magic;
+    int ver = 0;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || ver != 2) return false;
 
     // Load and automatically crunch the 16 Sample Pool slots in the background [2]
     for (int i = 0; i < 16; ++i) {
@@ -1266,39 +1255,7 @@ bool LoadProject(const std::string& filename) {
                                 step.chordNotes[2] = -1;
                             }
 
-                StepParams& sp = step.params;
-                file >> sp.morph >> sp.coarse >> sp.fine >> sp.volume;
-                file >> sp.attack >> sp.decay >> sp.sustain >> sp.release;
-                file >> sp.morph2 >> sp.coarse2 >> sp.fine2 >> sp.volume2;
-                file >> sp.attack2 >> sp.decay2 >> sp.sustain2 >> sp.release2;
-                file >> sp.fmFeedback >> sp.noiseVolume >> sp.noiseAttack >> sp.noiseHold >> sp.noiseDecay;
-                file >> sp.filterCutoff >> sp.filterResonance >> sp.filterType >> sp.filterEnvDepth;
-                file >> sp.filterAttack >> sp.filterDecay >> sp.filterSustain >> sp.filterRelease;
-                file >> sp.lfo1Wave >> sp.lfo1Speed >> sp.lfo1Depth >> sp.lfo1Trigger >> sp.lfo1Sync >> sp.lfo1Dest;
-                file >> sp.lfo2Wave >> sp.lfo2Speed >> sp.lfo2Depth >> sp.lfo2Trigger >> sp.lfo2Sync >> sp.lfo2Dest;
-                SafeRead(file, sp.reverbSend, -1);
-                SafeRead(file, sp.delaySend, -1);
-                SafeRead(file, sp.saturationSend, -1);
-                SafeRead(file, sp.autoPanSend, -1);
-                SafeRead(file, sp.sampleSlot, -1);
-
-                // Safely load step overrides (fallback to -1 means "no parameter lock")
-                SafeRead(file, sp.tapeMemory, -1);
-                SafeRead(file, sp.tapeHeads, -1);
-                SafeRead(file, sp.tapeSpread, -1);
-                SafeRead(file, sp.tapeSpeed, -1);
-                SafeRead(file, sp.tapeTether, -1);
-                SafeRead(file, sp.tapeDrift, -1);
-                SafeRead(file, sp.tapeDriftRate, -1);
-                SafeRead(file, sp.tapeFeedback, -1);
-                SafeRead(file, sp.tapeFbSpread, -1);
-                SafeRead(file, sp.tapeFbSource, -1);
-                SafeRead(file, sp.tapeFreeze, -1);
-                SafeRead(file, sp.tapeSmearRate, -1);
-                SafeRead(file, sp.tapeSmearSize, -1);
-                SafeRead(file, sp.tapeMix, -1);
-
-                SafeRead(file, sp.polyMode, -1);
+                if (!ReadStepParams(file, step.params)) return false;
             } // end of step (s) loop
 
             // Safely load default Sample Slot and Name

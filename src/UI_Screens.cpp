@@ -360,7 +360,7 @@ void DrawSynthScreen(const UIState& state) {
     if (trk.engineType == ENGINE_SAMPLER) {
         // --- SAMPLER ENGINE VIEWPORT ---
         bool lockedAlgo = false;
-        int effAlgo = GetEffectiveVal(sp.filterType, trk.algorithm, 15, 53, lockedAlgo);
+        int effAlgo = GetEffectiveVal(sp.algorithm, trk.algorithm, 15, 53, lockedAlgo);
 
         if (effAlgo == ALGO_GRANULAR) {
             Draw5x5String("ENG: GRANULAR", 76, 1, WHITE);
@@ -1678,6 +1678,9 @@ void DrawModulationPopup(const UIState& state) {
                         else if (m.destParam == DEST_GRAN_SIZE)  paramStr = "GR_SIZE"; // ADDED [1]
                         else if (m.destParam == DEST_GRAN_DENS)  paramStr = "GR_DENS"; // ADDED [1]
                         else if (m.destParam == DEST_GRAN_SCAT)  paramStr = "GR_SCAT"; // ADDED [1]
+                        else if (m.destParam == DEST_FINE1)     paramStr = "FINE1  ";
+                        else if (m.destParam == DEST_FINE2)     paramStr = "FINE2  ";
+                        else if (m.destParam == DEST_SAMP_POS)  paramStr = "POS    ";
                         else if (m.destParam == DEST_TAPE_MEM)  paramStr = "T.MEM  ";
             else if (m.destParam == DEST_TAPE_HDS)  paramStr = "T.HDS  ";
             else if (m.destParam == DEST_TAPE_SPR)  paramStr = "T.SPR  ";
