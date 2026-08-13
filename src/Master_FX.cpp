@@ -95,9 +95,11 @@ void GlueCompressor::process(float inL, float inR, float& outL, float& outR, flo
         float ratio = 1.0f + tightNorm * 11.0f;
 
         if (envelope > threshold) {
-            float excessDb = 20.0f * log10f(envelope / threshold);
-            float targetReductionDb = excessDb * (1.0f - 1.0f / ratio);
-            gainReduction = powf(10.0f, -targetReductionDb / 20.0f);
+            // Linear-domain ratio: out = thresh + (in - thresh) / ratio.
+            // Same control feel as the old log/exp path without a transcendental
+            // per sample, which is the cost that showed up with SAT mix up.
+            float compressed = threshold + (envelope - threshold) / ratio;
+            gainReduction = compressed / envelope;
         }
     }
 

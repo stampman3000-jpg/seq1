@@ -80,6 +80,10 @@ struct SamplerVoice {
     enum FilterEnvStage { FLT_IDLE, FLT_ATTACK, FLT_DECAY, FLT_SUSTAIN, FLT_RELEASE } filterStage = FLT_IDLE;
     uint32_t filterUpdateCounter = 0;
 
+    // Coarse/fine interval ratio, refreshed at block rate so ProcessStandard
+    // is free of powf per sample.
+    float pitchRatio = 1.0f;
+
     // Voice Origin Tracker (Isolates live play from sequencer gate choking)
     bool triggeredBySequencer = false;
 

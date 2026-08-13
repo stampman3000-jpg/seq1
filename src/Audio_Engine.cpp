@@ -6,6 +6,7 @@
 #include "Chaos.hpp"
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <filesystem>
 #include <cstdlib> // std::abs, rand
 #if defined(__SSE2__) || defined(_M_X64)
@@ -328,6 +329,9 @@ struct SynthVoice {
     // parameters so the per-sample path is free of powf.
     float pitchRatio1 = 1.0f;
     float pitchRatio2 = 1.0f;
+    // Keyboard tracking error for analog drift; baseFreq only changes on
+    // trigger, so this is exact at block rate and free per sample.
+    float trackingOctaves = 0.0f;
 
     // Voice Origin Tracker (Isolates live play from sequencer gate choking)
     bool triggeredBySequencer = false;
@@ -866,6 +870,8 @@ struct SynthVoice {
             float bFine2 = std::clamp(GetParam(sp.fine2, trk.fine2) + modFine2Offset, -99.0f, 99.0f);
             float bSemi2 = GetParam(sp.coarse2, trk.coarse2) + (bFine2 / 100.0f);
             pitchRatio2 = powf(2.0f, bSemi2 / 12.0f);
+
+            trackingOctaves = log2f(std::max(baseFreq, 1.0f) / 261.63f);
         }
 
         // --- 7. FREQUENCY CALCULATIONS & PORTAMENTO ---
@@ -907,8 +913,7 @@ struct SynthVoice {
                 freq2AnalogScale += analogAmount * 0.00042f;
 
                 // 3. Apply Differential Keyboard Tracking Error (Oscillator Divergence)
-                float octavesFromCenter = log2f(baseFreq / 261.63f);
-                float trackingDivergence = octavesFromCenter * analogAmount * 0.005f;
+                float trackingDivergence = trackingOctaves * analogAmount * 0.005f;
                 freq1AnalogScale += trackingDivergence;
                 freq2AnalogScale -= trackingDivergence;
             }
@@ -1069,6 +1074,9 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     float blockMasterPeak = 0.0f;
     float blockMinGain = 1.0f;
     int blockActiveVoices = 0;
+    double accVoiceSec = 0.0;
+    double accTapeSec = 0.0;
+    double accFxSec = 0.0;
 
     static int s_finalMem[8]  = {50};
     static int s_finalHds[8]  = {1};
@@ -1107,6 +1115,32 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
         ma_uint32 chunkSize = (frameCount - samplesProcessed < 64) ? (frameCount - samplesProcessed) : 64;
 
         UpdateGlobalLFOs();
+
+        // Master FX mix modulation reads only g_globalLFOValues, which updates
+        // once per chunk. Computing it per sample was 48 Track-straddling
+        // iterations for a value that cannot change inside the chunk.
+        float chunkRevMixMod = 0.0f;
+        float chunkDelMixMod = 0.0f;
+        float chunkSatMixMod = 0.0f;
+        float chunkPanMixMod = 0.0f;
+        for (int t = 0; t < 8; ++t) {
+            for (int s = 0; s < 3; ++s) {
+                if (tracks[t].lfo1Slots[s].destType == 2) {
+                    float modVal = g_globalLFOValues[t][0] * (tracks[t].lfo1Slots[s].depth / 99.0f);
+                    if (tracks[t].lfo1Slots[s].destParam == DEST_REV_MIX)       chunkRevMixMod += modVal;
+                    else if (tracks[t].lfo1Slots[s].destParam == DEST_DEL_MIX)  chunkDelMixMod += modVal;
+                    else if (tracks[t].lfo1Slots[s].destParam == DEST_SAT_MIX)  chunkSatMixMod += modVal;
+                    else if (tracks[t].lfo1Slots[s].destParam == DEST_PAN_MIX)  chunkPanMixMod += modVal;
+                }
+                if (tracks[t].lfo2Slots[s].destType == 2) {
+                    float modVal = g_globalLFOValues[t][1] * (tracks[t].lfo2Slots[s].depth / 99.0f);
+                    if (tracks[t].lfo2Slots[s].destParam == DEST_REV_MIX)       chunkRevMixMod += modVal;
+                    else if (tracks[t].lfo2Slots[s].destParam == DEST_DEL_MIX)  chunkDelMixMod += modVal;
+                    else if (tracks[t].lfo2Slots[s].destParam == DEST_SAT_MIX)  chunkSatMixMod += modVal;
+                    else if (tracks[t].lfo2Slots[s].destParam == DEST_PAN_MIX)  chunkPanMixMod += modVal;
+                }
+            }
+        }
         
         for (int t = 0; t < 8; ++t) {
             const Track& trk = tracks[t];
@@ -1486,7 +1520,9 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
 
             int soundingTracks = 0;
             int activeVoices = 0;
+            float trackDry[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
+            auto tVoice0 = std::chrono::high_resolution_clock::now();
             for (int t = 0; t < 8; ++t) {
                 if (tracks[t].muted) {
                     for (int v = 0; v < 4; ++v) {
@@ -1511,14 +1547,21 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 }
                 activeVoices += trackVoicesSounding;
                 if (trackVoicesSounding > 0) soundingTracks++;
-                
-                float normalTrackSum = trackSampleSum * 0.25f;
+                trackDry[t] = trackSampleSum * 0.25f;
+            }
+            auto tVoice1 = std::chrono::high_resolution_clock::now();
+            accVoiceSec += std::chrono::duration<double>(tVoice1 - tVoice0).count();
+
+            auto tTape0 = std::chrono::high_resolution_clock::now();
+            for (int t = 0; t < 8; ++t) {
+                if (tracks[t].muted) continue;
+
                 int currentStepIdx = (tracks[t].localTick / 6) % tracks[t].stepLength;
                 if (currentStepIdx < 0) currentStepIdx = 0;
                 const Step& step = tracks[t].steps[currentStepIdx];
 
                 float processedSum = g_trackTapeFX[t].process(
-                                normalTrackSum,
+                                trackDry[t],
                                 s_finalMem[t], s_finalHds[t], s_finalSpr[t], s_finalSpd[t], s_finalTet[t],
                                 s_finalDrf[t], s_finalDrt[t], s_finalFdb[t], s_finalFsp[t], s_finalFsc[t],
                                 s_finalFrz[t], s_finalSmr[t], s_finalSms[t], s_finalMix[t],
@@ -1543,6 +1586,8 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 float panSendNorm = (float)panSendVal / 99.0f;
                 autoPanSendBusMono += processedSum * panSendNorm;
             }
+            auto tTape1 = std::chrono::high_resolution_clock::now();
+            accTapeSec += std::chrono::duration<double>(tTape1 - tTape0).count();
 
             // --- MASTER HEADROOM ---
                         // A fixed 0.35 was fine for one track and hopeless for eight:
@@ -1574,36 +1619,13 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                         float panSendL = autoPanSendBusMono * kMasterScale;
                         float panSendR = autoPanSendBusMono * kMasterScale;
 
-            float revMixMod = 0.0f;
-            float delMixMod = 0.0f;
-            float satMixMod = 0.0f;
-            float panMixMod = 0.0f;
-
-            for (int t = 0; t < 8; ++t) {
-                for (int s = 0; s < 3; ++s) {
-                    if (tracks[t].lfo1Slots[s].destType == 2) {
-                        float modVal = g_globalLFOValues[t][0] * (tracks[t].lfo1Slots[s].depth / 99.0f);
-                        if (tracks[t].lfo1Slots[s].destParam == DEST_REV_MIX)       revMixMod += modVal;
-                        else if (tracks[t].lfo1Slots[s].destParam == DEST_DEL_MIX)  delMixMod += modVal;
-                        else if (tracks[t].lfo1Slots[s].destParam == DEST_SAT_MIX)  satMixMod += modVal;
-                        else if (tracks[t].lfo1Slots[s].destParam == DEST_PAN_MIX)  panMixMod += modVal;
-                    }
-                    if (tracks[t].lfo2Slots[s].destType == 2) {
-                        float modVal = g_globalLFOValues[t][1] * (tracks[t].lfo2Slots[s].depth / 99.0f);
-                        if (tracks[t].lfo2Slots[s].destParam == DEST_REV_MIX)       revMixMod += modVal;
-                        else if (tracks[t].lfo2Slots[s].destParam == DEST_DEL_MIX)  delMixMod += modVal;
-                        else if (tracks[t].lfo2Slots[s].destParam == DEST_SAT_MIX)  satMixMod += modVal;
-                        else if (tracks[t].lfo2Slots[s].destParam == DEST_PAN_MIX)  panMixMod += modVal;
-                    }
-                }
-            }
-
+            auto tFx0 = std::chrono::high_resolution_clock::now();
             // These four run as sends: mixNorm is deliberately 1.0 so process()
             // returns pure wet, which is then scaled by the global mix below.
             // That means their internal "mix <= 0" early-outs can never fire, so
             // all four used to run full DSP even with every mix at zero. The
             // decision has to be made here instead.
-            float globalRevMix = std::clamp(((float)globalFX.reverbMix / 99.0f) + revMixMod, 0.0f, 1.0f);
+            float globalRevMix = std::clamp(((float)globalFX.reverbMix / 99.0f) + chunkRevMixMod, 0.0f, 1.0f);
             float reverbWetL = 0.0f;
             float reverbWetR = 0.0f;
             if (globalRevMix > 0.0f) {
@@ -1619,7 +1641,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 reverbWetR *= globalRevMix;
             }
 
-            float globalDelayMixNorm = std::clamp(((float)globalFX.delayMix / 99.0f) + delMixMod, 0.0f, 1.0f);
+            float globalDelayMixNorm = std::clamp(((float)globalFX.delayMix / 99.0f) + chunkDelMixMod, 0.0f, 1.0f);
             float delayWetL = 0.0f;
             float delayWetR = 0.0f;
             if (globalDelayMixNorm > 0.0f) {
@@ -1635,7 +1657,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 delayWetR *= globalDelayMixNorm;
             }
 
-            float globalSatMixNorm = std::clamp(((float)globalFX.satMix / 99.0f) + satMixMod, 0.0f, 1.0f);
+            float globalSatMixNorm = std::clamp(((float)globalFX.satMix / 99.0f) + chunkSatMixMod, 0.0f, 1.0f);
             float satWetL = 0.0f;
             float satWetR = 0.0f;
             if (globalSatMixNorm > 0.0f) {
@@ -1651,7 +1673,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 satWetR *= globalSatMixNorm;
             }
 
-            float globalPanMix = std::clamp(((float)globalFX.autoPanMix / 99.0f) + panMixMod, 0.0f, 1.0f);
+            float globalPanMix = std::clamp(((float)globalFX.autoPanMix / 99.0f) + chunkPanMixMod, 0.0f, 1.0f);
             float panWetL = 0.0f;
             float panWetR = 0.0f;
             if (globalPanMix > 0.0f) {
@@ -1666,6 +1688,8 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 panWetL *= globalPanMix;
                 panWetR *= globalPanMix;
             }
+            auto tFx1 = std::chrono::high_resolution_clock::now();
+            accFxSec += std::chrono::duration<double>(tFx1 - tFx0).count();
 
             // --- MASTER MIX SUM ---
             float finalL = masterL + reverbWetL + delayWetL + satWetL + panWetL;
@@ -1777,6 +1801,17 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     static float s_smoothedCpu = 0.0f;
     s_smoothedCpu += 0.05f * (instantCpu - s_smoothedCpu);
     g_audioCpuLoad = s_smoothedCpu;
+
+    static float s_smoothVoices = 0.0f;
+    static float s_smoothTape = 0.0f;
+    static float s_smoothFx = 0.0f;
+    float invBudget = (expectedSec > 0.0) ? (float)(100.0 / expectedSec) : 0.0f;
+    s_smoothVoices += 0.05f * ((float)accVoiceSec * invBudget - s_smoothVoices);
+    s_smoothTape   += 0.05f * ((float)accTapeSec  * invBudget - s_smoothTape);
+    s_smoothFx     += 0.05f * ((float)accFxSec    * invBudget - s_smoothFx);
+    g_audioCpuVoices = s_smoothVoices;
+    g_audioCpuTape   = s_smoothTape;
+    g_audioCpuFx     = s_smoothFx;
 
     if (instantCpu >= 100.0f) g_audioDeadlineMisses++;
 

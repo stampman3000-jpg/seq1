@@ -131,6 +131,9 @@ unsigned int g_audioDeadlineMisses = 0;
 float g_masterPeak = 0.0f;
 float g_limiterReduction = 0.0f;
 int g_activeVoiceCount = 0;
+float g_audioCpuVoices = 0.0f;
+float g_audioCpuTape = 0.0f;
+float g_audioCpuFx = 0.0f;
 bool showDiagnostics = false;
 // Global State Definitions
 Track tracks[8];

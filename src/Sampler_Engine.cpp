@@ -374,6 +374,10 @@ float SamplerVoice::Process(int trackIdx) {
 
         // Recalculate coefficients
         filter.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
+
+        float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFineOffset, -99.0f, 99.0f);
+        float semitoneOffset = notePitchOffset + GetParam(sp.sampleTune, trk.sampleTune) + (fine2Mod / 100.0f) + modPitchOffset;
+        pitchRatio = powf(2.0f, semitoneOffset / 12.0f);
     }
 
     // 4. Select Processing Pipeline Contextually
@@ -429,9 +433,7 @@ float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
 
     // Pitch speed factor calculations...
     float baseSpeed = 32000.0f / 44100.0f;
-    float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFineOffset, -99.0f, 99.0f);
-    float semitoneOffset = notePitchOffset + GetParam(sp.sampleTune, trk.sampleTune) + (fine2Mod / 100.0f) + modPitchOffset;
-    float playbackSpeed = baseSpeed * pitchModFactor * powf(2.0f, semitoneOffset / 12.0f);
+    float playbackSpeed = baseSpeed * pitchModFactor * pitchRatio;
 
     int sdiv = GetParam(sp.sliceDivisions, trk.sliceDivisions);
     if (sdiv < 1) sdiv = 1;

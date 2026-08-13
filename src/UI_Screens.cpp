@@ -1551,22 +1551,23 @@ void DrawDiagnosticsScreen(const UIState& state) {
     char cpuBuf[32];
     snprintf(cpuBuf, sizeof(cpuBuf), "CPU: %4.1f%%", g_audioCpuLoad);
     Draw3x5String(cpuBuf, 4, 12, UI_VALUE);
+
+    char splitBuf[32];
+    snprintf(splitBuf, sizeof(splitBuf), "V:%02d T:%02d F:%02d",
+             (int)g_audioCpuVoices, (int)g_audioCpuTape, (int)g_audioCpuFx);
+    Draw3x5String(splitBuf, 4, 21, UI_VALUE);
     
     char fpsBuf[32];
     snprintf(fpsBuf, sizeof(fpsBuf), "FPS: %d", GetFPS());
-    Draw3x5String(fpsBuf, 4, 21, UI_VALUE);
+    Draw3x5String(fpsBuf, 4, 30, UI_VALUE);
 
     char grnBuf[32];
     snprintf(grnBuf, sizeof(grnBuf), "GRN: %d/128", g_globalActiveGrains);
-    Draw3x5String(grnBuf, 4, 30, UI_VALUE);
+    Draw3x5String(grnBuf, 4, 39, UI_VALUE);
 
     char bpmBuf[32];
     snprintf(bpmBuf, sizeof(bpmBuf), "BPM: %3d", (int)state.tempo);
-    Draw3x5String(bpmBuf, 4, 39, UI_VALUE);
-
-    char patBuf[32];
-    snprintf(patBuf, sizeof(patBuf), "PAT: %d", activePattern + 1);
-    Draw3x5String(patBuf, 4, 48, UI_VALUE);
+    Draw3x5String(bpmBuf, 4, 48, UI_VALUE);
 
     // Connected MIDI device display
         char midiBuf[64];

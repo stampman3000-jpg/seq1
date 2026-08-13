@@ -4,6 +4,13 @@ project(SequencerApp CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Fresh configures default to an optimised, still-debuggable build. Existing
+# build directories keep their cached CMAKE_BUILD_TYPE, so the flags below
+# are also applied via target_compile_options rather than relying on this.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
 # Tell CMake where to look for Homebrew packages on Apple Silicon Mac
 list(APPEND CMAKE_PREFIX_PATH "/opt/homebrew")
 
@@ -58,6 +65,15 @@ target_include_directories(seq1 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} src)
 # -----------------------------------------------------------------
 # 4. Platform-Specific Audio/MIDI Driver Configurations
 # -----------------------------------------------------------------
+# Applied via target_compile_options so they take effect even when the
+# existing build directory has CMAKE_BUILD_TYPE=Debug cached. -O3 inlines
+# the DSP helpers that at -O0 become real function calls; -fno-math-errno
+# lets sqrtf compile to a single instruction. -g keeps the binary
+# debuggable. -ffast-math is deliberately omitted: it reassociates
+# feedback filters and its denormal benefit is already covered by
+# EnableFlushToZero() on the audio thread.
+target_compile_options(seq1 PRIVATE -O3 -fno-math-errno -g)
+
 if(APPLE)
     # macOS uses CoreMIDI and CoreAudio
     target_compile_definitions(seq1 PRIVATE __MACOSX_CORE__)
@@ -70,9 +86,7 @@ elseif(UNIX AND NOT APPLE)
     # Linux (Raspberry Pi) uses ALSA
     target_compile_definitions(seq1 PRIVATE __LINUX_ALSA__)
     target_link_libraries(seq1 PRIVATE asound pthread)
-    
-    # --- ADD THIS LINE (Enables NEON vectorization and aggressive ARM math optimization) ---
-    target_compile_options(seq1 PRIVATE -O3 -ffast-math -march=native)
+    target_compile_options(seq1 PRIVATE -march=native)
 endif()
 
 # -----------------------------------------------------------------

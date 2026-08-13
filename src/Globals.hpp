@@ -72,6 +72,9 @@ extern unsigned int g_audioDeadlineMisses; // callbacks that took longer than th
 extern float g_masterPeak;              // pre-limiter peak, so clipping is visible
 extern float g_limiterReduction;        // 0 = open, 1 = fully clamped
 extern int g_activeVoiceCount;          // voices sounding, the number chaos moves
+extern float g_audioCpuVoices;          // callback time spent in voices, percent of budget
+extern float g_audioCpuTape;            // callback time spent in tape FX, percent of budget
+extern float g_audioCpuFx;              // callback time spent in master FX, percent of budget
 extern bool showDiagnostics;
 
 

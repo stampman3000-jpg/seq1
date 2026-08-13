@@ -25,7 +25,7 @@ public:
                   double sampleRate);
 
 private:
-    inline float readInterpolated(float pos, float len);
+    inline float readInterpolated(const float* buf, float pos, int len);
     inline float generateNoise();
 
     std::vector<float> delayBuf;
@@ -44,12 +44,16 @@ private:
 
     // Wow & Flutter Drift states
         float driftState[4];
+        float driftOffset[4];
+        float driftInc[4];
 
         // High-pass filter history for feedback warmth
         float hpState;
     // New block-rate parameter caches
         float cachedMemSamples = 0.0f;
+        int cachedMemLen = 0;
         float cachedHeadsParam = 0.0f;
+        int cachedHeadsLimit = 1;
         float cachedSpreadParam = 0.0f;
         float cachedSpeedParam = 0.0f;
         float cachedTetherParam = 0.0f;
@@ -64,4 +68,7 @@ private:
         float cachedMixParam = 0.0f;
         float cachedCrossFeedbackParam = 0.0f;
         int blockCounter = 9999; // Initialize high to force setup on first sample
+        float cachedMaxDriftSamples = 0.0f;
+        float cachedDriftFilterCoeff = 0.0f;
+        float cachedJumpRange = 0.0f;
     };

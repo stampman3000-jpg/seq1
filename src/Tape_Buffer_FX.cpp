@@ -29,6 +29,8 @@ void TapeBufferFX::reset() {
         fadeCount[i] = 0;
         smearOffset[i] = 0.0f;
         driftState[i] = 0.0f;
+        driftOffset[i] = 0.0f;
+        driftInc[i] = 0.0f;
     }
 }
 
@@ -37,25 +39,18 @@ inline float TapeBufferFX::generateNoise() {
     return ((float)(noiseSeed / 65536 % 32768) / 16384.0f) - 1.0f; // [-1.0, 1.0]
 }
 
-inline float TapeBufferFX::readInterpolated(float pos, float len) {
-    // Fast integer cast instead of std::floor
+inline float TapeBufferFX::readInterpolated(const float* buf, float pos, int len) {
     int idx0 = (int)pos;
     float frac = pos - (float)idx0;
-
     int idx1 = idx0 + 1;
 
-    // Fast conditional wrapping instead of fmod/modulo
-    if (idx0 < 0) idx0 += (int)len;
-    else if (idx0 >= (int)len) idx0 -= (int)len;
+    if (idx0 < 0) idx0 += len;
+    else if (idx0 >= len) idx0 -= len;
 
-    if (idx1 < 0) idx1 += (int)len;
-    else if (idx1 >= (int)len) idx1 -= (int)len;
+    if (idx1 < 0) idx1 += len;
+    else if (idx1 >= len) idx1 -= len;
 
-    float v0 = delayBuf[idx0];
-    float v1 = delayBuf[idx1];
-
-    // Linear blend
-    return v0 + frac * (v1 - v0);
+    return buf[idx0] + frac * (buf[idx1] - buf[idx0]);
 }
 
 float TapeBufferFX::process(float input,
@@ -86,8 +81,12 @@ float TapeBufferFX::process(float input,
         cachedMemSamples = std::floor(memorySec * sampleRate);
         if (cachedMemSamples > 88200.0f) cachedMemSamples = 88200.0f;
         if (cachedMemSamples < 2205.0f)  cachedMemSamples = 2205.0f;
+        cachedMemLen = (int)cachedMemSamples;
 
-        cachedHeadsParam = 1.0f + (headsVal / 99.0f) * 3.0f;
+        // headsVal is already 1..4 (the control range and the LFO clamp).
+        // The old 0..99 rescale collapsed every setting onto a single head.
+        cachedHeadsParam = (float)headsVal;
+        cachedHeadsLimit = std::clamp(headsVal, 1, 4);
         cachedSpreadParam = spreadVal / 99.0f;
         cachedSpeedParam = -2.0f + (speedVal / 99.0f) * 4.0f;
         cachedTetherParam = tetherVal / 99.0f;
@@ -101,10 +100,47 @@ float TapeBufferFX::process(float input,
         cachedSmearSizeParam = smearSizeVal / 99.0f;
 
         cachedCrossFeedbackParam = cachedFeedbackParam * 0.35f;
+
+        cachedDriftFilterCoeff = 0.00005f + cachedDriftRateParam * 0.00295f;
+        cachedMaxDriftSamples = cachedDriftParam * (float)sampleRate * 0.010f;
+        cachedJumpRange = (cachedSmearSizeParam * cachedSmearSizeParam * cachedSmearSizeParam) * cachedMemSamples;
+
+        // Drift's one-pole is a 300-to-20000 sample time constant, so the
+        // noise and the filter itself belong at block rate. Per-sample we
+        // just lerp the read offset so it does not step every 64 samples.
+        if (cachedDriftParam > 0.0f) {
+            for (int i = 0; i < cachedHeadsLimit; ++i) {
+                driftState[i] += cachedDriftFilterCoeff * (generateNoise() - driftState[i]);
+                float target = driftState[i] * cachedMaxDriftSamples * 8.0f;
+                driftInc[i] = (target - driftOffset[i]) * (1.0f / 64.0f);
+            }
+        } else {
+            for (int i = 0; i < 4; ++i) {
+                driftState[i] = 0.0f;
+                driftInc[i] = -driftOffset[i] * (1.0f / 64.0f);
+            }
+        }
+
+        // Smear used to roll a probability per head per sample. Scale by 64
+        // so the expected jump rate is unchanged, then start the fade here.
+        if (cachedSmearRateParam > 0.0f) {
+            float smearProb = cachedSmearRateParam * 0.0005f * 64.0f;
+            for (int i = 0; i < cachedHeadsLimit; ++i) {
+                if (fadeCount[i] == 0 && (std::abs(generateNoise()) < smearProb)) {
+                    fadeCount[i] = 800;
+                }
+            }
+        }
     }
 
+    float* buf = delayBuf.data();
+    const int memLen = cachedMemLen > 0 ? cachedMemLen : (int)cachedMemSamples;
+
     if (cachedMixParam <= 0.0f) {
-        delayBuf[(int)writePos] = saturate(input);
+        int w = (int)writePos;
+        if (w < 0) w = 0;
+        else if (w >= memLen && memLen > 0) w = 0;
+        buf[w] = saturate(input);
         writePos += 1.0f;
         if (writePos >= cachedMemSamples) {
             writePos = 0.0f;
@@ -130,73 +166,39 @@ float TapeBufferFX::process(float input,
     else if (activePhase < 0.0f) activePhase += cachedMemSamples;
 
     float spacing = cachedSpreadParam * (cachedMemSamples / 4.0f);
-
-    // --- WOW & FLUTTER DRIFT ---
-    float d[4] = {0.0f};
-    if (cachedDriftParam > 0.0f) {
-        float driftFilterCoeff = 0.00005f + cachedDriftRateParam * 0.00295f;
-        float maxDriftSamples = cachedDriftParam * sampleRate * 0.010f;
-
-        for (int i = 0; i < 4; ++i) {
-            driftState[i] += driftFilterCoeff * (generateNoise() - driftState[i]);
-            d[i] = driftState[i] * maxDriftSamples * 8.0f;
-        }
-    }
-
-    // --- GRANULAR JUMPS ---
-    int numHeadsLimit = std::clamp((int)cachedHeadsParam, 1, 4);
-    float gain[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-
-    if (cachedSmearRateParam > 0.0f) {
-        float smearProb = cachedSmearRateParam * 0.0005f;
-        int fadeLen = 800;
-        int fadeHalf = fadeLen / 2;
-        float jumpRange = (cachedSmearSizeParam * cachedSmearSizeParam * cachedSmearSizeParam) * cachedMemSamples;
-
-        for (int i = 0; i < numHeadsLimit; ++i) {
-            if (fadeCount[i] == 0 && (std::abs(generateNoise()) < smearProb)) {
-                fadeCount[i] = fadeLen;
-            }
-            if (fadeCount[i] > 0) {
-                fadeCount[i]--;
-                if (fadeCount[i] == fadeHalf) {
-                    smearOffset[i] = generateNoise() * jumpRange;
-                }
-                gain[i] = (float)std::abs(fadeCount[i] - fadeHalf) / fadeHalf;
-            } else {
-                gain[i] = 1.0f;
-            }
-        }
-    }
+    const int numHeadsLimit = cachedHeadsLimit;
 
     // --- PLAYHEADS READ ---
-    float sig[4] = {0.0f};
-    float baseReadPos[4];
+    float sig[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float gain[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 
-    baseReadPos[0] = activePhase;
-    baseReadPos[1] = activePhase - spacing;
-    baseReadPos[2] = activePhase - spacing * 2.0f;
-    baseReadPos[3] = activePhase - spacing * 3.0f;
-
-    for (int i = 0; i < 4; ++i) {
-        if (baseReadPos[i] < 0.0f) baseReadPos[i] += cachedMemSamples;
-        else if (baseReadPos[i] >= cachedMemSamples) baseReadPos[i] -= cachedMemSamples;
-    }
+    constexpr int fadeLen = 800;
+    constexpr int fadeHalf = fadeLen / 2;
 
     for (int i = 0; i < numHeadsLimit; ++i) {
-        float finalReadPos = baseReadPos[i] + d[i] + smearOffset[i];
-        if (finalReadPos < 0.0f) finalReadPos += cachedMemSamples;
-        else if (finalReadPos >= cachedMemSamples) finalReadPos -= cachedMemSamples;
+        driftOffset[i] += driftInc[i];
 
-        sig[i] = readInterpolated(finalReadPos, cachedMemSamples) * gain[i];
+        if (fadeCount[i] > 0) {
+            fadeCount[i]--;
+            if (fadeCount[i] == fadeHalf) {
+                smearOffset[i] = generateNoise() * cachedJumpRange;
+            }
+            gain[i] = (float)std::abs(fadeCount[i] - fadeHalf) / (float)fadeHalf;
+        }
+
+        float readPos = activePhase - spacing * (float)i + driftOffset[i] + smearOffset[i];
+        if (readPos < 0.0f) readPos += cachedMemSamples;
+        else if (readPos >= cachedMemSamples) readPos -= cachedMemSamples;
+
+        sig[i] = readInterpolated(buf, readPos, memLen) * gain[i];
     }
 
-    // --- HEAD CROSS-FEEDBACK MATRIX ---
-    float fb[4] = {0.0f};
-    fb[0] = sig[0] + cachedCrossFeedbackParam * sig[3];
-    fb[1] = sig[1] + cachedCrossFeedbackParam * sig[0];
-    fb[2] = sig[2] + cachedCrossFeedbackParam * sig[1];
-    fb[3] = sig[3] + cachedCrossFeedbackParam * sig[2];
+    // --- HEAD CROSS-FEEDBACK MATRIX (active heads only) ---
+    float fb[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (numHeadsLimit >= 1) fb[0] = sig[0] + ((numHeadsLimit >= 4) ? cachedCrossFeedbackParam * sig[3] : 0.0f);
+    if (numHeadsLimit >= 2) fb[1] = sig[1] + cachedCrossFeedbackParam * sig[0];
+    if (numHeadsLimit >= 3) fb[2] = sig[2] + cachedCrossFeedbackParam * sig[1];
+    if (numHeadsLimit >= 4) fb[3] = sig[3] + cachedCrossFeedbackParam * sig[2];
 
     float h1 = std::clamp(cachedHeadsParam, 0.0f, 1.0f);
     float h2 = std::clamp(cachedHeadsParam - 1.0f, 0.0f, 1.0f);
@@ -207,27 +209,38 @@ float TapeBufferFX::process(float input,
     float totalReadSignal = (fb[0] * h1 + fb[1] * h2 + fb[2] * h3 + fb[3] * h4) * invSqrtTable[numHeadsLimit];
 
     // --- FEEDBACK ROUTING ---
-    fbOffset += 0.0005f * (cachedFbSpreadParam * cachedMemSamples * (generateNoise() * 0.5f + 0.5f) - fbOffset);
-    float fbReadPos = activePhase - fbOffset;
-    if (fbReadPos < 0.0f) fbReadPos += cachedMemSamples;
-    else if (fbReadPos >= cachedMemSamples) fbReadPos -= cachedMemSamples;
-    
-    float diffusedFbSignal = readInterpolated(fbReadPos, cachedMemSamples);
+    // Default fbSource is 0, so the extra delay-line read was previously
+    // half of all tape reads and then multiplied by zero. Skip it, and skip
+    // the whole chain when feedback itself is off.
+    float fbSignal = 0.0f;
+    if (cachedFeedbackParam > 0.0f) {
+        float selectedFeedback = totalReadSignal;
+        if (cachedFbSourceParam > 0.0f) {
+            fbOffset += 0.0005f * (cachedFbSpreadParam * cachedMemSamples * (generateNoise() * 0.5f + 0.5f) - fbOffset);
+            float fbReadPos = activePhase - fbOffset;
+            if (fbReadPos < 0.0f) fbReadPos += cachedMemSamples;
+            else if (fbReadPos >= cachedMemSamples) fbReadPos -= cachedMemSamples;
 
-    float selectedFeedback = (1.0f - cachedFbSourceParam) * totalReadSignal + cachedFbSourceParam * diffusedFbSignal;
+            float diffusedFbSignal = readInterpolated(buf, fbReadPos, memLen);
+            selectedFeedback = (1.0f - cachedFbSourceParam) * totalReadSignal + cachedFbSourceParam * diffusedFbSignal;
+        }
 
-    float feedbackFilter = prevFeedback + 0.2f * (selectedFeedback - prevFeedback);
-    prevFeedback = feedbackFilter;
+        float feedbackFilter = prevFeedback + 0.2f * (selectedFeedback - prevFeedback);
+        prevFeedback = feedbackFilter;
 
-    hpState += 0.08f * (feedbackFilter - hpState);
-    float hpFiltered = feedbackFilter - hpState;
+        hpState += 0.08f * (feedbackFilter - hpState);
+        float hpFiltered = feedbackFilter - hpState;
 
-    float fbSignal = hpFiltered * cachedFeedbackParam;
+        fbSignal = hpFiltered * cachedFeedbackParam;
+    }
 
     // --- WRITE BLOCK ---
-    float currentVal = delayBuf[(int)writePos];
+    int w = (int)writePos;
+    if (w < 0) w = 0;
+    else if (w >= memLen && memLen > 0) w = 0;
+    float currentVal = buf[w];
     float writeSignal = (1.0f - writeGain) * currentVal + writeGain * saturate(input + fbSignal);
-    delayBuf[(int)writePos] = writeSignal;
+    buf[w] = writeSignal;
 
     writePos += 1.0f;
     if (writePos >= cachedMemSamples) {
