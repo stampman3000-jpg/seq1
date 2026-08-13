@@ -15,6 +15,48 @@ constexpr int SCALE_FACTOR = 2;
 constexpr int WINDOW_WIDTH = OLED_WIDTH * SCALE_FACTOR;
 constexpr int WINDOW_HEIGHT = OLED_HEIGHT * SCALE_FACTOR;
 
+// --- SEMANTIC OLED PALETTE ---
+// The SSD1322 renders 16 grey levels. Each channel value below is chosen so
+// that (value >> 4) lands exactly on the intended level, matching the shift
+// the display driver uses when packing the frame. Use these rather than raw
+// raylib colours so the desktop preview and the panel stay in agreement.
+constexpr Color UI_BG     = {   0,   0,   0, 255 }; // level 0  - background
+constexpr Color UI_CHROME = {  51,  51,  51, 255 }; // level 3  - dividers, frames, disabled
+constexpr Color UI_LABEL  = { 119, 119, 119, 255 }; // level 7  - static parameter labels
+constexpr Color UI_VALUE  = { 187, 187, 187, 255 }; // level 11 - live values, curves, waveforms
+constexpr Color UI_ACTIVE = { 255, 255, 255, 255 }; // level 15 - selection, playhead, focus
+
+// --- MOTION TIMING (seconds) ---
+constexpr float UI_BLINK_PERIOD = 0.5f;  // step cursor / edit caret
+constexpr float UI_BREATHE_PERIOD = 3.4f; // slow idle motion on pictograms
+
+// Pictogram animation rates, gathered here so the whole screen can be calmed
+// or livened from one place. Each pair is a base rate plus the amount added at
+// a full-scale parameter value, in cycles or pixels per second.
+constexpr float UI_WAVE_SCROLL_BASE  = 1.0f;  // helix scroll, pixels/sec
+constexpr float UI_WAVE_SCROLL_SPAN  = 4.5f;
+constexpr float UI_WAVE_SPRAY_RATE   = 2.0f;  // droplet reseeds per second
+constexpr float UI_RAIN_FALL_BASE    = 2.0f;  // drop descent, pixels/sec
+constexpr float UI_RAIN_FALL_SPAN    = 5.0f;
+constexpr float UI_TORNADO_SPIN_BASE = 0.4f;  // funnel rotation, radians/sec
+constexpr float UI_TORNADO_SPIN_SPAN = 1.6f;
+
+// --- LAYOUT GRID ---
+// Screens are built from a fixed header strip plus a body divided into rows.
+// Anything positioned by these tokens rather than a literal will stay aligned
+// with the rest of the UI when a row height or padding is retuned.
+constexpr int UI_HEADER_H   = 7;  // header text band; the rule sits on this row
+constexpr int UI_BODY_TOP   = UI_HEADER_H + 2;
+constexpr int UI_PAD        = 2;  // inset from a panel edge to its content
+constexpr int UI_GUTTER     = 4;  // horizontal space between sibling cells
+constexpr int UI_ROW_H      = 9;  // pitch of a body row (7px highlight + 2px gap)
+constexpr int UI_HILITE_H   = 7;  // height of a selection highlight
+constexpr int UI_TEXT_INSET = 1;  // text offset inside a highlight
+
+// Resolve a zero-based body row to its text baseline / highlight top.
+constexpr int UiRowTextY(int row)   { return UI_BODY_TOP + row * UI_ROW_H + UI_TEXT_INSET; }
+constexpr int UiRowHiliteY(int row) { return UI_BODY_TOP + row * UI_ROW_H; }
+
 enum Screen {
     SCREEN_SEQ_1_4,     // 1a: Tracks 1-4 Notes (Page 1)
     SCREEN_SEQ_5_8,     // 1b: Tracks 5-8 Notes (Page 1)
@@ -321,6 +363,10 @@ struct Track {
     EngineType engineType = ENGINE_SYNTH;
     int algorithm = 0;                    // Cast to SynthAlgo or SamplerAlgo depending on engineType
     int polyMode = 1; // Default to Polyphonic (1)
+    int swing = 0;    // 0..99; delays odd steps by up to 5 ticks
+    int keyRoot = 0;  // 0=C .. 11=B (major when keyLock == 1)
+    int keyScope = 0; // 0=GLOBAL, 1=TRACK
+    int keyLock = 0;  // 0=CHR (chromatic), 1=MAJ
     // Synth Parameters (Page 3 Source - Wave 1)
     int morph = 0;
     int coarse = 0;

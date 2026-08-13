@@ -2,6 +2,7 @@
 #include "Globals.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 // Instantiate the global CPU-side framebuffer
 Color g_oledCPUPixels[256 * 64];
 
@@ -74,6 +75,56 @@ void CpuDrawRectangleLines(int x, int y, int w, int h, Color color) {
         CpuDrawPixel(x + w - 1, y + dy, color);
     }
 }
+// =============================================================================
+// MOTION
+// =============================================================================
+
+float g_uiTime = 0.0f;
+
+void UiTickClock(float deltaSeconds) {
+    // Clamp so a stall (debugger break, SD card hiccup) cannot make the whole
+    // UI jump forward when the loop resumes.
+    if (deltaSeconds > 0.1f) deltaSeconds = 0.1f;
+    if (deltaSeconds < 0.0f) deltaSeconds = 0.0f;
+    g_uiTime += deltaSeconds;
+}
+
+float UiPulsePhase(float periodSeconds, float phase01) {
+    if (periodSeconds <= 0.0f) return 0.0f;
+    float t = g_uiTime / periodSeconds + phase01;
+    t -= std::floor(t);
+    // Raised cosine: smooth at both ends, unlike a triangle.
+    return 0.5f - 0.5f * cosf(t * 2.0f * PI);
+}
+
+float UiPulse(float periodSeconds) {
+    return UiPulsePhase(periodSeconds, 0.0f);
+}
+
+bool UiBlink(float periodSeconds) {
+    if (periodSeconds <= 0.0f) return true;
+    float t = g_uiTime / periodSeconds;
+    return (t - std::floor(t)) < 0.5f;
+}
+
+float UiApproach(float current, float target, float halfLifeSeconds, float deltaSeconds) {
+    if (halfLifeSeconds <= 0.0f || deltaSeconds <= 0.0f) return target;
+    // 0.5 ^ (dt / halfLife): the fraction of the gap still remaining.
+    float remaining = powf(0.5f, deltaSeconds / halfLifeSeconds);
+    return target + (current - target) * remaining;
+}
+
+float UiEaseOut(float t01) {
+    t01 = std::clamp(t01, 0.0f, 1.0f);
+    float inv = 1.0f - t01;
+    return 1.0f - inv * inv * inv;
+}
+
+void UiSmoothed::Set(float target, float deltaSeconds) {
+    float halfLife = (target > value) ? attackHalfLife : releaseHalfLife;
+    value = UiApproach(value, target, halfLife, deltaSeconds);
+}
+
 struct DeterministicRand {
     unsigned int seed;
     DeterministicRand(unsigned int s) : seed(s) {}
@@ -124,153 +175,124 @@ static void DrawPixelSquare(int cx, int cy, int r, Color color) {
 }
 
 // =============================================================================
-// II. CUSTOM FONT ENGINE
+// SHARED CHROME
 // =============================================================================
 
-void Draw5x5Char(char c, int x, int y, Color color) {
-    // Automatically convert lowercase letters to uppercase
-    if (c >= 'a' && c <= 'z') c = c - 32;
-
-    const char* grid = nullptr;
-    switch (c) {
-        case '_': grid = "00000" "00000" "00000" "00000" "11111"; break; // Underscore
-        case '1': grid = "00100" "01100" "00100" "00100" "01110"; break;
-        case '2': grid = "11111" "00001" "11111" "10000" "11111"; break;
-        case '3': grid = "11111" "00001" "11111" "00001" "11111"; break;
-        case '4': grid = "10001" "10001" "11111" "00001" "00001"; break;
-        case '5': grid = "11111" "10000" "11111" "00001" "11111"; break;
-        case '6': grid = "11111" "10000" "11111" "10001" "11111"; break;
-        case '7': grid = "11111" "00001" "00010" "00100" "00100"; break;
-        case '8': grid = "11111" "10001" "11111" "10001" "11111"; break;
-        case '9': grid = "11111" "10001" "11111" "00001" "11111"; break;
-        case '0': grid = "11111" "10001" "10001" "10001" "11111"; break;
-        case 'A': grid = "01110" "10001" "11111" "10001" "10001"; break;
-        case 'B': grid = "11110" "10001" "11110" "10001" "11110"; break;
-        case 'C': grid = "11111" "10000" "10000" "10000" "11111"; break;
-        case 'D': grid = "11110" "10001" "10001" "10001" "11110"; break;
-        case 'E': grid = "11111" "10000" "11110" "10000" "11111"; break;
-        case 'F': grid = "11111" "10000" "11110" "10000" "10000"; break;
-        case 'G': grid = "11111" "10000" "10111" "10001" "11111"; break;
-        case 'H': grid = "10001" "10001" "11111" "10001" "10001"; break;
-        case 'I': grid = "11111" "00100" "00100" "00100" "11111"; break;
-        case 'J': grid = "00001" "00001" "00001" "10001" "01110"; break;
-        case 'K': grid = "10001" "10010" "11100" "10010" "10001"; break;
-        case 'L': grid = "10000" "10000" "10000" "10000" "11111"; break;
-        case 'M': grid = "10001" "11011" "10101" "10001" "10001"; break;
-        case 'N': grid = "10001" "11001" "10101" "10011" "10001"; break;
-        case 'O': grid = "01110" "10001" "10001" "10001" "01110"; break;
-        case 'P': grid = "11110" "10001" "11110" "10000" "10000"; break;
-        case 'Q': grid = "01110" "10001" "10001" "10101" "01111"; break;
-        case 'R': grid = "11110" "10001" "11110" "10010" "10001"; break;
-        case 'S': grid = "01111" "10000" "01110" "00001" "11110"; break;
-        case 'T': grid = "11111" "00100" "00100" "00100" "00100"; break;
-        case 'U': grid = "10001" "10001" "10001" "10001" "11111"; break;
-        case 'V': grid = "10001" "10001" "10001" "01010" "00100"; break;
-        case 'W': grid = "10001" "10001" "10101" "11011" "10001"; break;
-        case 'X': grid = "10001" "01010" "00100" "01010" "10001"; break;
-        case 'Y': grid = "10001" "01010" "00100" "00100" "00100"; break;
-        case 'Z': grid = "11111" "00010" "00100" "01000" "11111"; break;
-        case '[': grid = "11100" "10000" "10000" "10000" "11100"; break;
-        case ']': grid = "00111" "00001" "00001" "00001" "00111"; break;
-        case ':': grid = "00000" "00100" "00000" "00100" "00000"; break;
-        case '-': grid = "00000" "00000" "11111" "00000" "00000"; break;
-        case '+': grid = "00100" "00100" "11111" "00100" "00100"; break;
-        default:  return;
-    }
-    for (int row = 0; row < 5; ++row) {
-        for (int col = 0; col < 5; ++col) {
-            if (grid[row * 5 + col] == '1') {
-                DrawPixel(x + col, y + row, color);
-            }
-        }
-    }
+void DrawHeaderRule() {
+    DrawPixelLine(0, UI_HEADER_H, OLED_WIDTH - 1, UI_HEADER_H, UI_CHROME);
 }
 
-void Draw5x5String(const char* str, int x, int y, Color color) {
+void DrawVDivider(int x) {
+    DrawPixelLine(x, UI_HEADER_H, x, OLED_HEIGHT - 1, UI_CHROME);
+}
+
+void DrawFocusFrame(int x, int y, int w, int h) {
+    DrawPixelRectLines(x - 1, y - 1, w + 2, h + 2, UI_ACTIVE);
+}
+
+// --- Transient edit readout -------------------------------------------------
+
+static char  g_focusLabel[24] = {0};
+static char  g_focusValue[16] = {0};
+static bool  g_hasLabel = false; // both set during the current frame's draw
+static bool  g_hasValue = false;
+static int   g_editFocusId = -1; // the control that was being edited
+static float g_lastEditTime = -1000.0f;
+
+static const float kEditOverlayHold = 0.45f; // fully bright
+static const float kEditOverlayFade = 0.2f;  // then steps down the grey ramp
+
+static void CopyCapture(char* dst, int cap, const char* src) {
     int i = 0;
-    int currentX = x;
-    while (str[i] != '\0') {
-        if (str[i] == ' ') {
-            currentX += 4;
-        } else {
-            Draw5x5Char(str[i], currentX, y, color);
-            currentX += 6;
-        }
-        i++;
-    }
+    for (; src[i] != '\0' && i < cap - 1; ++i) dst[i] = src[i];
+    dst[i] = '\0';
 }
 
-void Draw3x5Char(char c, int x, int y, Color color) {
-    // Automatically convert lowercase letters to uppercase
-    if (c >= 'a' && c <= 'z') c = c - 32;
-
-    const char* grid = nullptr;
-    switch (c) {
-        case '_': grid = "000" "000" "000" "000" "111"; break; // Underscore
-        case '1': grid = "010" "110" "010" "010" "111"; break;
-        case '2': grid = "111" "001" "111" "100" "111"; break;
-        case '3': grid = "111" "001" "111" "001" "111"; break;
-        case '4': grid = "101" "101" "111" "001" "001"; break;
-        case '5': grid = "111" "100" "111" "001" "111"; break;
-        case '6': grid = "111" "100" "111" "101" "111"; break;
-        case '7': grid = "111" "001" "001" "010" "010"; break;
-        case '8': grid = "111" "101" "111" "101" "111"; break;
-        case '9': grid = "111" "101" "111" "001" "111"; break;
-        case '0': grid = "111" "101" "101" "101" "111"; break;
-        case ':': grid = "000" "010" "000" "010" "000"; break;
-        case '/': grid = "001" "010" "010" "010" "100"; break;
-        case '.': grid = "000" "000" "000" "000" "010"; break;
-        case 'R': grid = "111" "101" "110" "101" "101"; break;
-        case 'A': grid = "010" "101" "111" "101" "101"; break;
-        case 'F': grid = "111" "100" "110" "100" "100"; break;
-        case 'T': grid = "111" "010" "010" "010" "010"; break;
-        case 'W': grid = "101" "101" "101" "111" "101"; break;
-        case 'V': grid = "101" "101" "101" "010" "010"; break;
-        case 'C': grid = "111" "100" "100" "100" "111"; break;
-        case 'S': grid = "111" "100" "111" "001" "111"; break;
-        case 'D': grid = "110" "101" "101" "101" "110"; break;
-        case 'P': grid = "111" "101" "111" "100" "100"; break;
-        case 'E': grid = "111" "100" "110" "100" "111"; break;
-        case 'N': grid = "111" "101" "101" "101" "101"; break;
-        case 'H': grid = "101" "101" "111" "101" "101"; break;
-        case 'B': grid = "110" "101" "110" "101" "110"; break;
-        case 'L': grid = "100" "100" "100" "100" "111"; break;
-        case 'O': grid = "111" "101" "101" "101" "111"; break;
-        case 'Y': grid = "101" "101" "010" "010" "010"; break;
-        case 'Z': grid = "111" "001" "010" "100" "111"; break;
-        case 'G': grid = "111" "100" "101" "101" "111"; break;
-        case 'M': grid = "111" "111" "101" "101" "101"; break;
-        case 'I': grid = "111" "010" "010" "010" "111"; break;
-        case 'J': grid = "001" "001" "001" "101" "111"; break;
-                case 'K': grid = "101" "110" "100" "110" "101"; break;
-                case 'Q': grid = "111" "101" "111" "010" "001"; break;
-                case 'U': grid = "101" "101" "101" "101" "111"; break;
-        case 'X': grid = "101" "101" "010" "101" "101"; break;
-                case '-': grid = "000" "000" "111" "000" "000"; break; // Mid-row horizontal line
-                case '+': grid = "010" "010" "111" "010" "010"; break; // Symmetrical cross
-                default:  return;
-            }
-    for (int row = 0; row < 5; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            if (grid[row * 3 + col] == '1') {
-                DrawPixel(x + col, y + row, color);
-            }
-        }
-    }
+void UiBeginFocusCapture() {
+    g_hasLabel = false;
+    g_hasValue = false;
 }
 
-void Draw3x5String(const char* str, int x, int y, Color color) {
-    int i = 0;
-    int currentX = x;
-    while (str[i] != '\0') {
-        Draw3x5Char(str[i], currentX, y, color);
-        if (str[i] == ':' || str[i] == '.') {
-            currentX += 2;
-        } else {
-            currentX += 4;
-        }
-        i++;
+void UiNoteParamEdit(int focusId) {
+    g_editFocusId = focusId;
+    g_lastEditTime = g_uiTime;
+}
+
+void UiCaptureFocusLabel(const char* label) {
+    if (!label) return;
+    CopyCapture(g_focusLabel, (int)sizeof(g_focusLabel), label);
+    g_hasLabel = true;
+}
+
+void UiCaptureFocusValue(int value) {
+    snprintf(g_focusValue, sizeof(g_focusValue), "%d", value);
+    g_hasValue = true;
+}
+
+void UiCaptureFocusText(const char* label, const char* value) {
+    if (!label || !value) return;
+    CopyCapture(g_focusLabel, (int)sizeof(g_focusLabel), label);
+    CopyCapture(g_focusValue, (int)sizeof(g_focusValue), value);
+    g_hasLabel = true;
+    g_hasValue = true;
+}
+
+void DrawEditOverlay(int focusId) {
+    if (focusId != g_editFocusId) return;
+    float age = g_uiTime - g_lastEditTime;
+    if (age < 0.0f || age > kEditOverlayHold + kEditOverlayFade) return;
+    if (!g_hasLabel || !g_hasValue || g_focusLabel[0] == '\0') return;
+
+    // Step down the grey ramp instead of a true fade; the panel only has
+    // 16 levels and a stepped decay reads as deliberate.
+    Color accent = UI_ACTIVE;
+    Color trim = UI_VALUE;
+    if (age > kEditOverlayHold) {
+        float t = (age - kEditOverlayHold) / kEditOverlayFade;
+        accent = (t < 0.5f) ? UI_VALUE : UI_LABEL;
+        trim = (t < 0.5f) ? UI_LABEL : UI_CHROME;
     }
+
+    int labelW = MeasureText3x5(g_focusLabel);
+    int valueW = MeasureText5x7(g_focusValue);
+    int inner = (labelW > valueW) ? labelW : valueW;
+
+    const int padX = 6, padY = 4, gap = 3;
+    int w = inner + padX * 2;
+    int h = FONT_HEIGHT_3x5 + gap + FONT_HEIGHT_5x7 + padY * 2;
+    int x = (OLED_WIDTH - w) / 2;
+    int y = (OLED_HEIGHT - h) / 2 + UI_HEADER_H / 2;
+
+    DrawRectangle(x, y, w, h, UI_BG);
+    DrawPixelRectLines(x, y, w, h, trim);
+
+    Draw3x5String(g_focusLabel, x + (w - labelW) / 2, y + padY, trim);
+    Draw5x7String(g_focusValue, x + (w - valueW) / 2, y + padY + FONT_HEIGHT_3x5 + gap, accent);
+}
+
+// Padding is applied uniformly here so no call site has to guess at it.
+static int DrawSelectableLabelImpl(const char* text, int x, int y, bool selected,
+                                   Color color, int textWidth,
+                                   void (*drawString)(const char*, int, int, Color)) {
+    if (selected) {
+        UiCaptureFocusLabel(text);
+        DrawRectangle(x - UI_TEXT_INSET, y - UI_TEXT_INSET,
+                      textWidth + UI_TEXT_INSET * 2, UI_HILITE_H, UI_ACTIVE);
+        drawString(text, x, y, UI_BG);
+    } else {
+        drawString(text, x, y, color);
+    }
+    return textWidth;
+}
+
+int DrawSelectableLabel(const char* text, int x, int y, bool selected, Color color) {
+    return DrawSelectableLabelImpl(text, x, y, selected, color,
+                                   MeasureText5x5(text), Draw5x5String);
+}
+
+int DrawSelectableLabel3x5(const char* text, int x, int y, bool selected, Color color) {
+    return DrawSelectableLabelImpl(text, x, y, selected, color,
+                                   MeasureText3x5(text), Draw3x5String);
 }
 
 // =============================================================================
@@ -370,10 +392,7 @@ void DrawSourceWaveform(int morph, int x, int y, int w, int h, bool isSelected, 
         DrawPixel(x, y + dy, color);
         DrawPixel(x + w - 1, y + dy, color);
     }
-    if (isSelected) {
-        DrawPixel(x - 2, y + h / 2, color);
-        DrawPixel(x + w + 1, y + h / 2, color);
-    }
+    if (isSelected) { DrawFocusFrame(x, y, w, h); UiCaptureFocusValue(morph); }
     int midY = y + h / 2, prevPixelY = midY;
     for (int dx = 2; dx < w - 2; ++dx) {
         int sineIndex = ((dx - 2) * 32) / (w - 4);
@@ -416,14 +435,11 @@ void DrawSlider(int val, int minVal, int maxVal, int x, int y, int w, bool isSel
     if (showValue) {
         std::string valStr = std::to_string(val);
         if (val > 0 && minVal < 0) valStr = "+" + valStr;
-        int valX = x + w / 2 - (int)(valStr.length() * 3);
+        int valX = x + w / 2 - MeasureText5x5(valStr.c_str()) / 2;
         Draw5x5String(valStr.c_str(), valX, y - 6, color);
     }
     
-    if (isSelected) {
-        DrawPixel(x - 2, y + 2, color);
-        DrawPixel(x + w + 1, y + 2, color);
-    }
+    if (isSelected) { DrawFocusFrame(x, y, w, 5); UiCaptureFocusValue(val); }
 }
 
 void DrawLevelBars(int val, int x, int y, int w, int h, bool isSelected, Color color) {
@@ -439,10 +455,7 @@ void DrawLevelBars(int val, int x, int y, int w, int h, bool isSelected, Color c
         if (i < activeBars) DrawRectangle(bx, by, barWidth, bh, color);
         else               {}
     }
-    if (isSelected) {
-        DrawPixel(x - 2, y + h / 2, color);
-        DrawPixel(x + w + 1, y + h / 2, color);
-    }
+    if (isSelected) { DrawFocusFrame(x, y, w, h); UiCaptureFocusValue(val); }
 }
 
 void DrawConcentricSquares(int val, int x, int y, int w, int h, bool isSelected, Color color) {
@@ -458,10 +471,7 @@ void DrawConcentricSquares(int val, int x, int y, int w, int h, bool isSelected,
         }
         DrawPixelSquare(cx, cy, r, color);
     }
-    if (isSelected) {
-        DrawPixel(x - 2, y + h / 2 - 1, color);
-        DrawPixel(x + w + 1, y + h / 2 - 1, color);
-    }
+    if (isSelected) { DrawFocusFrame(x, y, w, h); UiCaptureFocusValue(val); }
 }
 
 void DrawPitchCurve(int depth, int time, int x, int y, int w, int h, bool isSelected, Color color) {
@@ -487,15 +497,12 @@ void DrawPitchCurve(int depth, int time, int x, int y, int w, int h, bool isSele
         DrawPixelLine(x + dx - 1, prevY, x + dx, py, color);
         prevY = py;
     }
-    if (isSelected) {
-        DrawPixel(x - 2, y + h / 2, color);
-        DrawPixel(x + w + 1, y + h / 2, color);
-    }
+    if (isSelected) { DrawFocusFrame(x, y, w, h); UiCaptureFocusValue(depth); }
 }
 
 void DrawOctagonKnob(int cx, int cy, float valNorm, bool isSelected, Color color) {
     DrawCircleLines(cx, cy, 4, color);
-    if (isSelected) DrawCircleLines(cx, cy, 6, color);
+    if (isSelected) DrawFocusFrame(cx - 4, cy - 4, 9, 9);
     float angle = -140.0f + (valNorm * 280.0f);
     float rad = angle * DEG2RAD;
     int pointerX = cx + (int)(sin(rad) * 4.0f);
@@ -615,7 +622,8 @@ void DrawCleanText(const char* text, int x, int y, Color color) {
 }
 
 // Waves Icon (Reverb Send): Exact jagged coils matching your hand-drawn layout
-void DrawWavesIcon(int x, int y, int val, Color color) {
+void DrawWavesIcon(int x, int y, int val, Color color, bool animate) {
+    const float t = animate ? g_uiTime : 0.0f;
     struct Pixel { int dx, dy; };
     const std::vector<Pixel> wavePoints = {
         // Helix Loop 1 (Jagged stairs)
@@ -629,16 +637,23 @@ void DrawWavesIcon(int x, int y, int val, Color color) {
     float scale = val / 99.0f;
     const int baselineY = 9;
 
+    // The helix repeats every 5px, so scrolling by a whole number of pixels
+    // modulo 5 loops seamlessly. Higher sends travel faster.
+    int shift = (val > 0) ? ((int)(t * (UI_WAVE_SCROLL_BASE + scale * UI_WAVE_SCROLL_SPAN))) % 5 : 0;
+
     for (const auto& p : wavePoints) {
         // Dynamic scaling collapsing to horizontal line at y=9
         int drawY = y + baselineY - (int)((baselineY - p.dy) * scale);
-        DrawPixel(x + p.dx, drawY, color);
+        int px = p.dx - shift;
+        if (px < 0) px += 15;
+        DrawPixel(x + px, drawY, color);
     }
 
     // Dynamic splashing water droplets above the three jagged crests
     if (val > 40) {
         int sprayScale = (val - 40);
-        DeterministicRand drand((unsigned int)(val * 31));
+        // Reseeding on a time slice makes the spray scatter rather than freeze.
+        DeterministicRand drand((unsigned int)(val * 31 + (int)(t * UI_WAVE_SPRAY_RATE)));
         int numDots = 1 + (int)(sprayScale / 12);
         for (int d = 0; d < numDots; ++d) {
             int peakIndex = drand.next(0, 2);
@@ -654,7 +669,8 @@ void DrawWavesIcon(int x, int y, int val, Color color) {
 }
 
 // Rain Icon (Delay Send): Deterministic rain pixels that multiply continuously around canopy
-void DrawRainIcon(int x, int y, int val, Color color) {
+void DrawRainIcon(int x, int y, int val, Color color, bool animate) {
+    const float t = animate ? g_uiTime : 0.0f;
     // Exact outline of your cute umbrella canopy & J-hook handle
     struct Pixel { int dx, dy; };
     const std::vector<Pixel> umbrella = {
@@ -672,48 +688,35 @@ void DrawRainIcon(int x, int y, int val, Color color) {
     }
 
     if (val > 0) {
-        // Continuous, sequential raindrop pixels (8 vertical channels)
-        const Pixel rainPath[] = {
-            // Column 1
-            {1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}, {1, 8}, {1, 9}, {1, 10},
-            // Column 19
-            {19, 1}, {19, 2}, {19, 3}, {19, 4}, {19, 5}, {19, 6}, {19, 7}, {19, 8}, {19, 9}, {19, 10},
-            // Column 5
-            {5, 1}, {5, 2}, {5, 3}, {5, 4}, {5, 5}, {5, 6}, {5, 7}, {5, 8}, {5, 9}, {5, 10},
-            // Column 15
-            {15, 1}, {15, 2}, {15, 3}, {15, 4}, {15, 5}, {15, 6}, {15, 7}, {15, 8}, {15, 9}, {15, 10},
-            // Column 3
-            {3, 1}, {3, 2}, {3, 3}, {3, 4}, {3, 5}, {3, 6}, {3, 7}, {3, 8}, {3, 9}, {3, 10},
-            // Column 17
-            {17, 1}, {17, 2}, {17, 3}, {17, 4}, {17, 5}, {17, 6}, {17, 7}, {17, 8}, {17, 9}, {17, 10},
-            // Column 8
-            {8, 1}, {8, 2}, {8, 3}, {8, 4}, {8, 5}, {8, 6}, {8, 7}, {8, 8}, {8, 9}, {8, 10},
-            // Column 12
-            {12, 1}, {12, 2}, {12, 3}, {12, 4}, {12, 5}, {12, 6}, {12, 7}, {12, 8}, {12, 9}, {12, 10}
-        };
+        // Eight fixed channels, ordered so the rain fills outward from the
+        // edges as the send is raised.
+        const int columns[8] = { 1, 19, 5, 15, 3, 17, 8, 12 };
 
-        int drawn = 0;
-        int targetPixels = (int)(val * (80.0f / 99.0f));
+        float norm = val / 99.0f;
+        int activeColumns = 1 + (int)(norm * 7.0f);
+        float fallSpeed = UI_RAIN_FALL_BASE + norm * UI_RAIN_FALL_SPAN;
 
-        for (int i = 0; i < 80 && drawn < targetPixels; ++i) {
-            const auto& p = rainPath[i];
-            
-            // Mask and protect the canopy structure and J-hook handle from being overwritten
-            bool overlapsCanopy = (p.dx >= 3 && p.dx <= 17 && p.dy >= 2 && p.dy <= 5);
-            bool overlapsHandle = (p.dx == 10 && p.dy >= 3 && p.dy <= 8) || (p.dx >= 7 && p.dx <= 9 && p.dy == 9);
-            
-            if (overlapsCanopy || overlapsHandle) {
-                continue;
+        for (int c = 0; c < activeColumns; ++c) {
+            int dx = columns[c];
+            // Two drops per channel, half a cycle apart, with a per-channel
+            // offset so the columns do not fall in lockstep.
+            for (int d = 0; d < 2; ++d) {
+                float phase = t * fallSpeed + c * 1.7f + d * 5.0f;
+                int dy = 1 + ((int)phase) % 10;
+
+                // Mask and protect the canopy structure and J-hook handle
+                bool overlapsCanopy = (dx >= 3 && dx <= 17 && dy >= 2 && dy <= 5);
+                bool overlapsHandle = (dx == 10 && dy >= 3 && dy <= 8) || (dx >= 7 && dx <= 9 && dy == 9);
+                if (overlapsCanopy || overlapsHandle) continue;
+
+                DrawPixel(x + dx, y + dy, color);
             }
-            
-            DrawPixel(x + p.dx, y + p.dy, color);
-            drawn++;
         }
     }
 }
 
 // Sunshine Icon (Saturation Send): Core centered at (cx, cy) to stay strictly in the box
-void DrawSunIcon(int x, int y, int val, Color color) {
+void DrawSunIcon(int x, int y, int val, Color color, bool animate) {
     int cx = x + 8;
     int cy = y + 5; // Lifted centerY coordinate prevents box leak on bottom
 
@@ -724,38 +727,36 @@ void DrawSunIcon(int x, int y, int val, Color color) {
     DrawPixel(cx - 2, cy + 1, color);                               DrawPixel(cx + 2, cy + 1, color);
     DrawPixel(cx - 1, cy + 2, color); DrawPixel(cx, cy + 2, color); DrawPixel(cx + 1, cy + 2, color);
 
-    if (val >= 20) {
-        // Step 1: Cardinal Inner Rays
-        DrawPixel(cx, cy - 4, color);  // North
-        DrawPixel(cx, cy + 4, color);  // South
-        DrawPixel(cx - 4, cy, color);  // West
-        DrawPixel(cx + 4, cy, color);  // East
+    // Rays reach further in steps as the send rises, and breathe by one pixel
+    // so the sun is never completely static.
+    int cardinalReach = 0;
+    if (val >= 20) cardinalReach = 4;
+    if (val >= 40) cardinalReach = 5;
+
+    int diagonalReach = 0;
+    if (val >= 60) diagonalReach = 3;
+    if (val >= 80) diagonalReach = 4;
+
+    int breathe = (animate && val > 0 && UiPulse(UI_BREATHE_PERIOD) > 0.55f) ? 1 : 0;
+
+    for (int r = 4; r <= cardinalReach + breathe && cardinalReach > 0; ++r) {
+        DrawPixel(cx, cy - r, color);
+        DrawPixel(cx, cy + r, color);
+        DrawPixel(cx - r, cy, color);
+        DrawPixel(cx + r, cy, color);
     }
-    if (val >= 40) {
-        // Step 2: Cardinal Outer Rays
-        DrawPixel(cx, cy - 5, color);
-        DrawPixel(cx, cy + 5, color);
-        DrawPixel(cx - 5, cy, color);
-        DrawPixel(cx + 5, cy, color);
-    }
-    if (val >= 60) {
-        // Step 3: Diagonal Inner Rays
-        DrawPixel(cx - 3, cy - 3, color); // NW
-        DrawPixel(cx + 3, cy - 3, color); // NE
-        DrawPixel(cx - 3, cy + 3, color); // SW
-        DrawPixel(cx + 3, cy + 3, color); // SE
-    }
-    if (val >= 80) {
-        // Step 4: Diagonal Outer Rays
-        DrawPixel(cx - 4, cy - 4, color);
-        DrawPixel(cx + 4, cy - 4, color);
-        DrawPixel(cx - 4, cy + 4, color);
-        DrawPixel(cx + 4, cy + 4, color);
+
+    for (int r = 3; r <= diagonalReach + breathe && diagonalReach > 0; ++r) {
+        DrawPixel(cx - r, cy - r, color);
+        DrawPixel(cx + r, cy - r, color);
+        DrawPixel(cx - r, cy + r, color);
+        DrawPixel(cx + r, cy + r, color);
     }
 }
 
 // Tornado Icon (Chorus Send): Procedural horizontal squished ellipses
-void DrawTornadoIcon(int x, int y, int val, Color color) {
+void DrawTornadoIcon(int x, int y, int val, Color color, bool animate) {
+    const float t = animate ? g_uiTime : 0.0f;
     float scale = val / 99.0f;
     int centerX = x + 8;
     int centerY = y + 5;
@@ -766,17 +767,23 @@ void DrawTornadoIcon(int x, int y, int val, Color color) {
     if (val == 0) {
         DrawPixelLine(centerX, centerY - 4, centerX, centerY + 5, color);
     } else {
+        // Each ring is offset on a sine, phase-shifted down the stack, so the
+        // funnel appears to rotate. Faster at higher send amounts.
+        float spin = t * (UI_TORNADO_SPIN_BASE + scale * UI_TORNADO_SPIN_SPAN);
+
         // Draw squished circular ellipses tapering down
         for (int i = 0; i < 5; ++i) {
             int rx = (int)(widths[i] * scale);
             int ry = std::clamp((int)(rx / 3), 1, 2);
-            
+            int wobble = (int)lroundf(sinf(spin + i * 0.7f) * rx * 0.35f);
+            int ringX = centerX + wobble;
+
             for (int dx = -rx; dx <= rx; ++dx) {
                 if (dx == -rx || dx == rx) {
-                    DrawPixel(centerX + dx, centerY + rows[i], color);
+                    DrawPixel(ringX + dx, centerY + rows[i], color);
                 } else {
-                    DrawPixel(centerX + dx, centerY + rows[i] - ry, color);
-                    DrawPixel(centerX + dx, centerY + rows[i] + ry, color);
+                    DrawPixel(ringX + dx, centerY + rows[i] - ry, color);
+                    DrawPixel(ringX + dx, centerY + rows[i] + ry, color);
                 }
             }
         }
@@ -796,9 +803,7 @@ void DrawTornadoIcon(int x, int y, int val, Color color) {
 
 // Reusable Depth Wedge Drawing Routine (Populates columns left-to-right, bottom-to-top)
 void DrawDepthWedgeGraphic(int val, int x, int y, int w, int h, bool isSelected, Color color) {
-    if (isSelected) {
-        DrawPixelRectLines(x - 1, y - 1, w + 2, h + 2, color);
-    }
+    if (isSelected) { DrawFocusFrame(x, y, w, h); UiCaptureFocusValue(val); }
     
     // Generate coordinate pairs below the diagonal slope
     std::vector<std::pair<int, int>> pixels;

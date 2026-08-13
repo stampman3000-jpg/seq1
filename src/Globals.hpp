@@ -13,10 +13,17 @@ extern Screen currentScreen;
 extern int cursorStep;
 extern int activePage;
 extern int masterLength;   // Pattern loop limit: 16, 32, 64, or 0 (INF)
-extern int stepUtilFocus;  // 0 = Microtiming, 1 = Track Length, 2 = Global Lengt
-extern bool stepPopupOpen;
-extern int stepPopupFocusX;   // 0 = Parameters (Left Column), 1 = Chord Keyboard (Right Column)
-extern int stepPopupFocusY;   // 0 = Retrig, 1 = Condit, 2 = Length
+extern int stepUtilFocus;  // TRK tab: 0 = Track Len, 1 = Global Len, 2 = Swing, 3 = Key
+extern int globalKeyRoot;  // 0=C .. 11=B
+extern int globalKeyLock;  // 0=CHR, 1=MAJ
+extern bool settingsHubOpen;
+extern int settingsHubKind;   // 0 = STEP/TRK, 1 = LIVE/ALGO
+extern int settingsHubTab;    // 0 or 1 within the current kind
+extern int settingsHubSeqTab; // remembered STEP/TRK tab
+extern int settingsHubFocus;  // 0 = tab bar, 1 = tab body
+extern int liveFxFocusCol;    // 0 = FRQ, 1 = RES, 2 = TYP
+extern int stepPopupFocusX;   // 0 = Left column, 1 = Right column (chord / microtiming)
+extern int stepPopupFocusY;   // Left: 0 Retrig, 1 Condit, 2 Length. Right: 0 Chord, 1 Microtiming
 extern int stepPopupCondCol;  // 0..15 focused condition bit
 extern int stepPopupChordKey; // 0..12 hovered piano key index
 extern float g_audioCpuLoad;
@@ -77,8 +84,7 @@ extern std::string g_typingBuffer;
 extern int g_typingCursor;
 extern std::vector<std::string> g_fileList;
 
-// Global Performance FX Popup variables
-extern bool perfPopupOpen;
+// Global Performance FX (LIVE tab) variables
 extern int perfFilterCutoff;
 extern int perfFilterResonance;
 extern int perfFilterType;   // 0 = LPF, 1 = HPF, 2 = BPF
@@ -92,6 +98,13 @@ void ResetTrackToDefault(int t);
 int NoteToMidi(const std::string& noteStr);
 std::string MidiToNote(int midi);
 std::string TransposeNote(const std::string& noteStr, int semitones);
+
+int ResolveTrackKeyRoot(int trackIdx);
+int ResolveTrackKeyLock(int trackIdx);
+int SnapMidiToScale(int midi, int root, int lock);
+int StepMidiInScale(int midi, int root, int dir, int lock);
+int KeyRootMidiAtOctave(int root, int octave);
+void SnapTrackSequenceToKey(int trackIdx);
 
 // Directory & Disk Serialization Functions
 void SetupDirectories();

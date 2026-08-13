@@ -13,6 +13,7 @@
 #include "Midi_Manager.hpp"
 #include "OledDriver.hpp"
 #include <unistd.h>
+#include <cstdio>
 
 
 // Static safe character set for on-screen retro text scrolling
@@ -31,9 +32,71 @@ static int activeScreenRow = 0;
 static Step copiedStep;
 static bool hasCopiedStep = false;
 
+// Identifies whichever control the cursor is currently sitting on. The edit
+// readout compares this against the control that was edited, so stepping to
+// another encoder drops the overlay on the next frame rather than letting it
+// time out over the wrong parameter.
+static int CurrentFocusId() {
+    bool seq = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
+    if (seq) return (int)currentScreen * 100000 + cursorTrack * 1000 + cursorStep;
+    return (int)currentScreen * 100000 + selectedTrack * 1000
+         + synthGridRow * 100 + synthGridCol * 10 + trackParamsGridCol;
+}
+
 // Unified action key helper mapping Space and Enter/Return to a single key event
 static inline bool IsActionKeyPressed() {
     return IsKeyPressed(KEY_SPACE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
+}
+
+static int8_t DefaultStepNote(int trackIdx) {
+    return (int8_t)KeyRootMidiAtOctave(ResolveTrackKeyRoot(trackIdx), currentOctave);
+}
+
+static char g_keyFeedback[24];
+
+static void NudgeKeySelection(int* lock, int* root, int dir) {
+    int idx = (*lock == 0) ? 0 : (std::clamp(*root, 0, 11) + 1);
+    idx += dir;
+    if (idx < 0) idx = 12;
+    if (idx > 12) idx = 0;
+    if (idx == 0) {
+        *lock = 0;
+    } else {
+        *lock = 1;
+        *root = idx - 1;
+    }
+}
+
+static void ApplyKeySnap(int trackIdx) {
+    Track& trk = tracks[trackIdx];
+    int lock = ResolveTrackKeyLock(trackIdx);
+    if (lock == 0) {
+        menuFeedback = "CHR NO SNAP";
+        return;
+    }
+    int root = ResolveTrackKeyRoot(trackIdx);
+    if (trk.keyScope == 0) {
+        for (int t = 0; t < 8; ++t) {
+            if (tracks[t].keyScope == 0) SnapTrackSequenceToKey(t);
+        }
+    } else {
+        SnapTrackSequenceToKey(trackIdx);
+    }
+    root = std::clamp(root, 0, 11);
+    snprintf(g_keyFeedback, sizeof(g_keyFeedback), "SNAP %s MAJ", scaleNotes[root].c_str());
+    menuFeedback = g_keyFeedback;
+}
+
+static void DrawActiveScreen(const UIState& state) {
+    if (showDiagnostics) {
+        DrawDiagnosticsScreen(state);
+        return;
+    }
+    if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
+    else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
+    else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
+    else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
+    else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
 }
 
 #if defined(__linux__)
@@ -114,54 +177,19 @@ void runEncoderThread() {
 }
 #endif
 
-// --- CUSTOM CHORD INPUT HELPER ---
-static void ToggleStepChordNote(Step& step, int keyIdx) {
-    int8_t noteVal = 60 + keyIdx; // Represent key indices as absolute MIDI values
-    
-    if (step.note == noteVal) {
-        step.note = -1;
-        step.velocity = 0;
-        return;
-    }
-    for (int i = 0; i < 3; ++i) {
-        if (step.chordNotes[i] == noteVal) {
-            step.chordNotes[i] = -1;
-            return;
-        }
-    }
-    
-    if (step.note == -1) {
-        step.note = noteVal;
-        step.velocity = 3;
-        return;
-    }
-    for (int i = 0; i < 3; ++i) {
-        if (step.chordNotes[i] == -1) {
-            step.chordNotes[i] = noteVal;
-            return;
-        }
-    }
-}
-
 // =========================================================================
 // MODULAR INPUT & DSP EVENT HANDLERS
 // =========================================================================
-// Manage navigation and tactile parameter editing inside the Performance Popup
+// Manage navigation and tactile parameter editing inside the LIVE FX hub tab
 static void HandlePerformancePopupInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
-    bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-                      IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-                      
-    // Exit popup using Escape or Enter/Return
-    if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
-        perfPopupOpen = false;
-        activeStutterKey = -1; // Clear stutter immediately on close
-        menuFeedback = "PERFORMANCE FX CLOSED";
+    (void)encoderButton;
+
+    if (!isShiftDown && IsKeyPressed(KEY_UP)) {
+        settingsHubFocus = 0;
         return;
     }
 
     // --- I. DYNAMIC KEY REPEAT TIMERS ---
-    
-    // 1. Navigation Auto-Repeat Timer (Shift is NOT held)
     static float popupNavTimer = 0.0f;
     bool anyNavKeyHeld = IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
     bool triggerNav = false;
@@ -172,18 +200,17 @@ static void HandlePerformancePopupInputs(int encoderTurn, bool encoderButton, bo
             popupNavTimer += GetFrameTime();
         } else {
             popupNavTimer += GetFrameTime();
-            const float INITIAL_DELAY = 0.25f;  // Standard Soundboy delay before scrolling starts
-            const float REPEAT_INTERVAL = 0.06f; // Scroll speed
+            const float INITIAL_DELAY = 0.25f;
+            const float REPEAT_INTERVAL = 0.06f;
             if (popupNavTimer >= INITIAL_DELAY) {
                 triggerNav = true;
                 popupNavTimer -= REPEAT_INTERVAL;
             }
         }
     } else {
-        popupNavTimer = 0.0f; // Reset timer when keys are released
+        popupNavTimer = 0.0f;
     }
 
-    // 2. Parameter Editing Auto-Repeat Timer (Shift IS held)
     static float popupEditTimer = 0.0f;
     bool anyEditKeyHeld = IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
     bool triggerEdit = false;
@@ -194,58 +221,52 @@ static void HandlePerformancePopupInputs(int encoderTurn, bool encoderButton, bo
             popupEditTimer += GetFrameTime();
         } else {
             popupEditTimer += GetFrameTime();
-            const float INITIAL_DELAY = 0.30f;  // Standard edit start delay
-            const float REPEAT_INTERVAL = 0.08f; // Parameter shift rate
+            const float INITIAL_DELAY = 0.30f;
+            const float REPEAT_INTERVAL = 0.08f;
             if (popupEditTimer >= INITIAL_DELAY) {
                 triggerEdit = true;
                 popupEditTimer -= REPEAT_INTERVAL;
             }
         }
     } else {
-        popupEditTimer = 0.0f; // Reset timer when keys are released
+        popupEditTimer = 0.0f;
     }
 
-    // --- II. NAVIGATION PROCESSING ---
     if (triggerNav) {
         if (IsKeyDown(KEY_LEFT)) {
-            synthGridCol--;
-            if (synthGridCol < 0) synthGridCol = 2; // Wrap left to TYP
+            liveFxFocusCol--;
+            if (liveFxFocusCol < 0) liveFxFocusCol = 2;
         }
         if (IsKeyDown(KEY_RIGHT)) {
-            synthGridCol++;
-            if (synthGridCol > 2) synthGridCol = 0; // Wrap right to FRQ
+            liveFxFocusCol++;
+            if (liveFxFocusCol > 2) liveFxFocusCol = 0;
         }
     }
 
-    // --- III. PARAMETER EDITING VALUE CHANGES ---
     int change = 0;
-    
     if (encoderTurn != 0) {
-        // Rotary encoder always edits value directly
         change = encoderTurn;
-    }
-    else if (triggerEdit) {
-        // Shift + Keys matches your global fine/coarse editing format:
-        if (IsKeyDown(KEY_UP))    change = 10;  // Fast Scroll (+10)
-        if (IsKeyDown(KEY_DOWN))  change = -10; // Fast Scroll (-10)
-        if (IsKeyDown(KEY_RIGHT)) change = 1;   // Precise Scroll (+1)
-        if (IsKeyDown(KEY_LEFT))  change = -1;  // Precise Scroll (-1)
+    } else if (triggerEdit) {
+        if (IsKeyDown(KEY_UP))    change = 10;
+        if (IsKeyDown(KEY_DOWN))  change = -10;
+        if (IsKeyDown(KEY_RIGHT)) change = 1;
+        if (IsKeyDown(KEY_LEFT))  change = -1;
     }
 
     if (change != 0) {
-        if (synthGridCol == 0) {
+        if (liveFxFocusCol == 0) {
             perfFilterCutoff = std::clamp(perfFilterCutoff + change, 0, 99);
-        } else if (synthGridCol == 1) {
+        } else if (liveFxFocusCol == 1) {
             perfFilterResonance = std::clamp(perfFilterResonance + change, 0, 99);
-        } else if (synthGridCol == 2) {
-            // Cycle through 0 = LPF, 1 = HPF, 2 = BPF
+        } else if (liveFxFocusCol == 2) {
             perfFilterType += (change > 0) ? 1 : -1;
             if (perfFilterType < 0) perfFilterType = 2;
             if (perfFilterType > 2) perfFilterType = 0;
         }
     }
+}
 
-    // --- IV. MOMENTARY STUTTER KEY PRESS SCANNING ---
+static void ScanStutterPads() {
     if (IsKeyDown(KEY_A))      activeStutterKey = 0;
     else if (IsKeyDown(KEY_S)) activeStutterKey = 1;
     else if (IsKeyDown(KEY_D)) activeStutterKey = 2;
@@ -277,7 +298,7 @@ static void HandlePianoKeysInput(int octaveValue) {
             if (octaveToUse > 8) octaveToUse = 8;
         }
         std::string noteStr = noteName + std::to_string(octaveToUse);
-        int midiNote = NoteToMidi(noteStr);
+        int midiNote = SnapMidiToScale(NoteToMidi(noteStr), ResolveTrackKeyRoot(selectedTrack), ResolveTrackKeyLock(selectedTrack));
 
         if (IsKeyPressed(keyboardPiano[i].key)) {
             TriggerVoiceLive(selectedTrack, midiNote, 3);
@@ -296,15 +317,21 @@ static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
         // ==========================================
         if (menuDir == -1) {
             systemMenuCursor--;
-            if (systemMenuCursor < 0) systemMenuCursor = 6;
+            if (systemMenuCursor < 0) systemMenuCursor = 7;
             menuFeedback = "";
         }
         if (menuDir == 1) {
             systemMenuCursor++;
-            if (systemMenuCursor > 6) systemMenuCursor = 0;
+            if (systemMenuCursor > 7) systemMenuCursor = 0;
             menuFeedback = "";
         }
         if (IsActionKeyPressed()) {
+            if (systemMenuCursor == 7) {
+                systemMenuOpen = false;
+                systemMenuState = 0;
+                showDiagnostics = true;
+                menuFeedback = "DIAGNOSTICS OPEN";
+            } else {
             bool isSaveOption = (systemMenuCursor == 0 || systemMenuCursor == 2 || systemMenuCursor == 4);
             if (isSaveOption) {
                 systemMenuState = 2;
@@ -321,6 +348,7 @@ static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
                 g_fileList = GetFileList(targetDir, targetExt);
                 fileBrowserCursor = 0;
                 systemMenuState = 1;
+            }
             }
         }
     }
@@ -608,20 +636,8 @@ static void HandleLfoPopupInputs(int encoderTurn, bool encoderButton, bool isShi
     }
 }
 
-/// Handles input events inside the Step Utility Sub-Popup (Z Trigger)
+/// Handles input events inside the STEP hub tab
 static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
-    // Detect if Control/Command is held down inside this scope
-    bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-                      IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-    bool isCtrlXPressed = isCtrlDown && IsKeyPressed(KEY_X);
-
-    // Close on Escape or the Ctrl+X toggle macro (unifying Enter/Return to act as Space instead)
-    if (IsKeyPressed(KEY_ESCAPE) || isCtrlXPressed) {
-        stepPopupOpen = false;
-        menuFeedback = "POPUP CLOSED";
-        return;
-    }
-
     int activeTrackIdx = (currentScreen == SCREEN_SEQ_5_8) ? cursorTrack + 4 : cursorTrack;
     Step& step = tracks[activeTrackIdx].steps[cursorStep];
 
@@ -638,7 +654,8 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
                     stepPopupFocusY = 1;
                     stepPopupCondCol = 8;
                 } else {
-                    stepPopupFocusY = 2;
+                    settingsHubFocus = 0;
+                    return;
                 }
             }
             if (IsKeyPressed(KEY_DOWN)) {
@@ -646,7 +663,11 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
                     stepPopupFocusY = 1;
                     stepPopupCondCol = 0;
                 } else if (stepPopupFocusY == 1) {
-                    stepPopupFocusY = 2;
+                    if (stepPopupCondCol < 8) {
+                        stepPopupCondCol += 8;
+                    } else {
+                        stepPopupFocusY = 2;
+                    }
                 } else {
                     stepPopupFocusY = 0;
                 }
@@ -665,6 +686,7 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
                     curCol++;
                     if (curCol > 7) {
                         stepPopupFocusX = 1;
+                        if (stepPopupFocusY > 1) stepPopupFocusY = 1;
                     } else {
                         stepPopupCondCol = curRow * 8 + curCol;
                     }
@@ -672,30 +694,23 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
             } else {
                 if (IsKeyPressed(KEY_RIGHT)) {
                     stepPopupFocusX = 1;
+                    if (stepPopupFocusY > 1) stepPopupFocusY = 1;
                 }
             }
         }
         else if (stepPopupFocusX == 1) {
             if (IsKeyPressed(KEY_LEFT)) {
-                stepPopupChordKey--;
-                if (stepPopupChordKey < 0) {
-                    stepPopupFocusX = 0;
-                    stepPopupChordKey = 0;
-                }
-            }
-            if (IsKeyPressed(KEY_RIGHT)) {
-                stepPopupChordKey++;
-                if (stepPopupChordKey > 12) {
-                    stepPopupChordKey = 12;
-                }
+                stepPopupFocusX = 0;
             }
             if (IsKeyPressed(KEY_UP)) {
-                step.chordType--;
-                if (step.chordType < 0) step.chordType = 6;
+                if (stepPopupFocusY == 0) {
+                    settingsHubFocus = 0;
+                    return;
+                }
+                stepPopupFocusY = 0;
             }
             if (IsKeyPressed(KEY_DOWN)) {
-                step.chordType++;
-                if (step.chordType > 6) step.chordType = 0;
+                if (stepPopupFocusY == 0) stepPopupFocusY = 1;
             }
         }
     }
@@ -716,7 +731,6 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         }
         else if (stepPopupFocusY == 1) {
             bool shiftArrowPressed = isShiftDown && (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT));
-            // Unify SPACE and ENTER: we use IsActionKeyPressed() here instead of IsKeyPressed(KEY_SPACE)
             if (shiftArrowPressed || IsActionKeyPressed() || (encoderTurn != 0 && encoderButton)) {
                 if (stepPopupCondCol < 8) {
                     step.condMask ^= (1 << stepPopupCondCol);
@@ -733,14 +747,167 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         }
     }
     else if (stepPopupFocusX == 1) {
-        if (popupEditChange != 0) {
-            step.chordType = std::clamp(step.chordType + popupEditChange, 0, 6);
-        }
-        // Unify SPACE and ENTER: we use IsActionKeyPressed() here instead of IsKeyPressed(KEY_SPACE)
-        if (IsActionKeyPressed() || (encoderTurn != 0 && encoderButton)) {
-            if (step.chordType == 0) {
-                ToggleStepChordNote(step, stepPopupChordKey);
+        if (stepPopupFocusY == 0) {
+            if (popupEditChange != 0) {
+                step.chordType += popupEditChange;
+                if (step.chordType < 0) step.chordType = 6;
+                if (step.chordType > 6) step.chordType = 0;
             }
+        } else if (stepPopupFocusY == 1) {
+            if (popupEditChange != 0) {
+                step.microtiming = std::clamp(step.microtiming + popupEditChange, -6, 6);
+            }
+        }
+    }
+}
+
+static void HandleTrackTabInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
+    if (!isShiftDown) {
+        if (IsKeyPressed(KEY_UP)) {
+            if (stepUtilFocus == 0) {
+                settingsHubFocus = 0;
+            } else {
+                stepUtilFocus--;
+            }
+        }
+        if (IsKeyPressed(KEY_DOWN)) {
+            stepUtilFocus++;
+            if (stepUtilFocus > 3) stepUtilFocus = 0;
+        }
+    }
+
+    Track& trk = tracks[selectedTrack];
+    int* rootPtr = (trk.keyScope == 0) ? &globalKeyRoot : &trk.keyRoot;
+    int* lockPtr = (trk.keyScope == 0) ? &globalKeyLock : &trk.keyLock;
+
+    if (stepUtilFocus == 3 && isShiftDown && IsActionKeyPressed()) {
+        ApplyKeySnap(selectedTrack);
+        return;
+    }
+
+    if (!isShiftDown && stepUtilFocus == 3) {
+        int rootDir = 0;
+        if (IsKeyPressed(KEY_LEFT))  rootDir = -1;
+        if (IsKeyPressed(KEY_RIGHT)) rootDir = 1;
+        if (rootDir != 0) {
+            NudgeKeySelection(lockPtr, rootPtr, rootDir);
+        }
+    }
+
+    bool keyAction = IsActionKeyPressed() || (encoderTurn != 0 && encoderButton);
+    if (stepUtilFocus == 3 && !isShiftDown && keyAction) {
+        trk.keyScope = (trk.keyScope == 0) ? 1 : 0;
+        if (trk.keyScope == 1) {
+            trk.keyRoot = globalKeyRoot;
+            trk.keyLock = globalKeyLock;
+        }
+        return;
+    }
+
+    int editDirection = 0;
+    if (encoderTurn != 0 && !(encoderButton && stepUtilFocus == 3)) {
+        editDirection = (encoderTurn > 0) ? 1 : -1;
+    } else if (isShiftDown) {
+        static float trkEditTimer = 0.0f;
+        bool anyEditHeld = IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) ||
+                           IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
+        bool triggerEdit = false;
+        if (anyEditHeld) {
+            if (trkEditTimer == 0.0f) {
+                triggerEdit = true;
+                trkEditTimer += GetFrameTime();
+            } else {
+                trkEditTimer += GetFrameTime();
+                const float INITIAL_DELAY = 0.25f;
+                const float REPEAT_INTERVAL = 0.05f;
+                if (trkEditTimer >= INITIAL_DELAY) {
+                    triggerEdit = true;
+                    trkEditTimer -= REPEAT_INTERVAL;
+                }
+            }
+        } else {
+            trkEditTimer = 0.0f;
+        }
+
+        if (triggerEdit) {
+            if (IsKeyDown(KEY_LEFT))  editDirection = -1;
+            if (IsKeyDown(KEY_RIGHT)) editDirection = 1;
+            if (stepUtilFocus == 2) {
+                if (IsKeyDown(KEY_DOWN)) editDirection = -10;
+                if (IsKeyDown(KEY_UP))   editDirection = 10;
+            } else {
+                if (IsKeyDown(KEY_DOWN)) editDirection = -1;
+                if (IsKeyDown(KEY_UP))   editDirection = 1;
+            }
+        }
+    }
+
+    if (editDirection == 0) return;
+
+    if (stepUtilFocus == 0) {
+        trk.stepLength = std::clamp(trk.stepLength + editDirection, 1, 32);
+    } else if (stepUtilFocus == 1) {
+        if (editDirection > 0) {
+            if (masterLength == 0)       masterLength = 16;
+            else if (masterLength == 16) masterLength = 32;
+            else if (masterLength == 32) masterLength = 64;
+            else if (masterLength == 64) masterLength = 0;
+        } else {
+            if (masterLength == 0)       masterLength = 64;
+            else if (masterLength == 64) masterLength = 32;
+            else if (masterLength == 32) masterLength = 16;
+            else if (masterLength == 16) masterLength = 0;
+        }
+    } else if (stepUtilFocus == 2) {
+        trk.swing = std::clamp(trk.swing + editDirection, 0, 99);
+    } else if (stepUtilFocus == 3) {
+        NudgeKeySelection(lockPtr, rootPtr, editDirection);
+    }
+}
+
+static void HandleSettingsHubInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        settingsHubOpen = false;
+        activeStutterKey = -1;
+        menuFeedback = "SETTINGS CLOSED";
+        return;
+    }
+
+    if (settingsHubKind == 1 && settingsHubTab == 0) ScanStutterPads();
+    else activeStutterKey = -1;
+
+    if (settingsHubFocus == 0) {
+        if (!isShiftDown) {
+            if (IsKeyPressed(KEY_LEFT)) {
+                settingsHubTab--;
+                if (settingsHubTab < 0) settingsHubTab = 1;
+            }
+            if (IsKeyPressed(KEY_RIGHT)) {
+                settingsHubTab++;
+                if (settingsHubTab > 1) settingsHubTab = 0;
+            }
+            if (IsKeyPressed(KEY_DOWN)) {
+                settingsHubFocus = 1;
+                if (settingsHubKind == 0 && settingsHubTab == 0) {
+                    stepPopupFocusX = 0;
+                    stepPopupFocusY = 0;
+                } else if (settingsHubKind == 0 && settingsHubTab == 1) {
+                    stepUtilFocus = 0;
+                }
+            }
+        }
+        if (settingsHubKind == 0) settingsHubSeqTab = settingsHubTab;
+        return;
+    }
+
+    if (settingsHubKind == 0) {
+        if (settingsHubTab == 0) HandleStepPopupInputs(encoderTurn, encoderButton, isShiftDown);
+        else                     HandleTrackTabInputs(encoderTurn, encoderButton, isShiftDown);
+        settingsHubSeqTab = settingsHubTab;
+    } else {
+        if (settingsHubTab == 0) HandlePerformancePopupInputs(encoderTurn, encoderButton, isShiftDown);
+        else if (!isShiftDown && IsKeyPressed(KEY_UP)) {
+            settingsHubFocus = 0;
         }
     }
 }
@@ -818,6 +985,14 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
         }
 
         if (change == 0) return;
+
+    // Single choke point for every parameter edit, so the large readout does
+    // not need a hook per parameter. The sequencer pages are excluded because
+    // none of the branches below serve them; their note and velocity edits
+    // report the readout themselves.
+    if (currentScreen != SCREEN_SEQ_1_4 && currentScreen != SCREEN_SEQ_5_8) {
+        UiNoteParamEdit(CurrentFocusId());
+    }
 
     Track& trk = tracks[selectedTrack];
     StepParams& sp = trk.steps[cursorStep].params;
@@ -1112,12 +1287,12 @@ int main() {
             playBootAnimation = false;
         }
 
-        CpuClearBackground(BLACK);
+        CpuClearBackground(UI_BG);
         if (bootFrame < BOOT_FRAME_COUNT) {
             for (int r = 0; r < BOOT_ROWS; ++r) {
                 for (int c = 0; c < BOOT_COLS; ++c) {
                     if (bootAnimationData[bootFrame][r][c] != 0) {
-                        CpuDrawPixel(c, r, WHITE);
+                        CpuDrawPixel(c, r, UI_ACTIVE);
                     }
                 }
             }
@@ -1127,15 +1302,12 @@ int main() {
         UpdateOled(oledScreen);
 
         BeginDrawing();
-            ClearBackground(DARKGRAY);
             Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
             Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
             Vector2 origin = { 0.0f, 0.0f };
             DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
         EndDrawing();
     }
-    
-    int uiFrameCounter = 0;
     
     // Time-based key repeat timers
     float keyRepeatTimer = 0.0f;
@@ -1147,8 +1319,8 @@ int main() {
     hasCopiedStep = false;
 
     while (!WindowShouldClose()) {
-        uiFrameCounter++;
-        bool blinkOn = (uiFrameCounter % 30 < 15);
+        UiTickClock(GetFrameTime());
+        bool blinkOn = UiBlink(UI_BLINK_PERIOD);
 
         // Detect Modifier Keys
         bool isCtrlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
@@ -1249,21 +1421,6 @@ int main() {
                     }
                 }
       
-        // Ctrl + . (Ctrl + Full Stop) to toggle the Performance Popup
-                if (isCtrlDown && IsKeyPressed(KEY_PERIOD)) {
-                    perfPopupOpen = !perfPopupOpen;
-                    if (perfPopupOpen) {
-                        // Initialize default parameter column positions on open
-                        synthGridRow = 0;
-                        synthGridCol = 0;
-                        activeStutterKey = -1; // Reset stutter state
-                        menuFeedback = "PERFORMANCE FX OPEN";
-                    } else {
-                        menuFeedback = "PERFORMANCE FX CLOSED";
-                    }
-                }
-        
-        
         // --- DIAGNOSTICS KEYBOARD INTERCEPT ---
         if (showDiagnostics) {
             if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
@@ -1287,22 +1444,23 @@ int main() {
                 }
             }
 
-            BeginTextureMode(oledScreen);
-                ClearBackground(BLACK);
-                UIState state = {
-                    currentScreen, selectedTrack, cursorTrack, cursorStep,
-                    currentOctave, tempo, isPlaying, playhead,
-                    synthGridRow, synthGridCol, trackParamsGridCol,
-                    blinkOn, activeNotesString,
-                    systemMenuOpen, systemMenuCursor,
-                    menuFeedback,
-                    systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
-                };
-                DrawDiagnosticsScreen(state);
-            EndTextureMode();
+            CpuClearBackground(UI_BG);
+            DrawHeaderRule();
+            UIState state = {
+                currentScreen, selectedTrack, cursorTrack, cursorStep,
+                currentOctave, tempo, isPlaying, playhead,
+                synthGridRow, synthGridCol, trackParamsGridCol,
+                blinkOn, activeNotesString,
+                systemMenuOpen, systemMenuCursor,
+                menuFeedback,
+                systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+            };
+            DrawDiagnosticsScreen(state);
+
+            UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+            UpdateOled(oledScreen);
 
             BeginDrawing();
-                ClearBackground(DARKGRAY);
                 Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
                 Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
                 Vector2 origin = { 0.0f, 0.0f };
@@ -1310,54 +1468,12 @@ int main() {
             EndDrawing();
             continue;
         }
-        if (perfPopupOpen) {
-                    HandlePerformancePopupInputs(encoderTurn, encoderButton, isShiftDown);
-                    BeginTextureMode(oledScreen);
-                        ClearBackground(BLACK);
-                        UIState state = {
-                            currentScreen, selectedTrack, cursorTrack, cursorStep,
-                            currentOctave, tempo, isPlaying, playhead,
-                            synthGridRow, synthGridCol, trackParamsGridCol,
-                            blinkOn, activeNotesString,
-                            systemMenuOpen, systemMenuCursor,
-                            menuFeedback,
-                            systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
-                        };
-                        
-                        // Draw whatever active page is running in the background behind our overlay
-                        if (showDiagnostics) {
-                            DrawDiagnosticsScreen(state);
-                        } else {
-                            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
-                            else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
-                            else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
-                            else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
-                            else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
-                        }
-                        
-                        // Draw the performance popup on top of the layout
-                        DrawPerformancePopup(state);
-                    EndTextureMode();
 
-                    UpdateTexture(oledScreen.texture, g_oledCPUPixels);
-                    UpdateOled(oledScreen);
-
-                    BeginDrawing();
-                        ClearBackground(DARKGRAY);
-                        Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
-                        Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
-                        Vector2 origin = { 0.0f, 0.0f };
-                        DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
-                    EndDrawing();
-                    continue; // Intercept inputs and skip regular main loop parsing
-                }
-        
-        
         // --- MODAL POPUPS DISPATCH ---
                 if (lfoPopupOpen) {
                     HandleLfoPopupInputs(encoderTurn, encoderButton, isShiftDown);
                     BeginTextureMode(oledScreen);
-                        ClearBackground(BLACK);
+                        ClearBackground(UI_BG);
                         UIState state = {
                             currentScreen, selectedTrack, cursorTrack, cursorStep,
                             currentOctave, tempo, isPlaying, playhead,
@@ -1377,7 +1493,6 @@ int main() {
                     UpdateOled(oledScreen);
                     
                     BeginDrawing();
-                        ClearBackground(DARKGRAY);
                         Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
                         Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
                         Vector2 origin = { 0.0f, 0.0f };
@@ -1386,36 +1501,74 @@ int main() {
                     continue;
                 }
 
-        if (stepPopupOpen) {
-            HandleStepPopupInputs(encoderTurn, encoderButton, isShiftDown);
-            BeginTextureMode(oledScreen);
-                ClearBackground(BLACK);
-                UIState state = {
-                    currentScreen, selectedTrack, cursorTrack, cursorStep,
-                    currentOctave, tempo, isPlaying, playhead,
-                    synthGridRow, synthGridCol, trackParamsGridCol,
-                    blinkOn, activeNotesString,
-                    systemMenuOpen, systemMenuCursor,
-                    menuFeedback,
-                    systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
-                };
-                if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
-                    DrawSequencerScreen(state);
+        bool hubWasOpen = settingsHubOpen;
+        int hubWasKind = settingsHubKind;
+
+        if (isShiftDown && !isCtrlDown && IsKeyPressed(KEY_X) && !systemMenuOpen && !lfoPopupOpen) {
+            if (settingsHubOpen && settingsHubKind == 0) {
+                settingsHubOpen = false;
+                activeStutterKey = -1;
+                menuFeedback = "STEP / TRK CLOSED";
+            } else {
+                if (settingsHubOpen && settingsHubKind == 1) {
+                    activeStutterKey = -1;
                 }
-                DrawStepPopup(state);
-            EndTextureMode();
+                settingsHubOpen = true;
+                settingsHubKind = 0;
+                settingsHubTab = settingsHubSeqTab;
+                settingsHubFocus = 0;
+                menuFeedback = "STEP / TRK";
+            }
+        }
 
-            UpdateTexture(oledScreen.texture, g_oledCPUPixels);
-            UpdateOled(oledScreen);
+        if (isCtrlDown && IsKeyPressed(KEY_PERIOD) && !systemMenuOpen && !lfoPopupOpen) {
+            if (settingsHubOpen && settingsHubKind == 1) {
+                settingsHubOpen = false;
+                activeStutterKey = -1;
+                menuFeedback = "LIVE FX CLOSED";
+            } else {
+                if (settingsHubOpen && settingsHubKind == 0) {
+                    settingsHubSeqTab = settingsHubTab;
+                }
+                settingsHubOpen = true;
+                settingsHubKind = 1;
+                settingsHubTab = 0;
+                settingsHubFocus = 0;
+                menuFeedback = "LIVE FX";
+            }
+        }
 
-            BeginDrawing();
-                ClearBackground(DARKGRAY);
-                Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
-                Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
-                Vector2 origin = { 0.0f, 0.0f };
-                DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
-            EndDrawing();
-            continue;
+        if (settingsHubOpen && !systemMenuOpen) {
+            if (hubWasOpen && settingsHubKind == hubWasKind) {
+                HandleSettingsHubInputs(encoderTurn, encoderButton, isShiftDown);
+            }
+            if (settingsHubOpen) {
+                BeginTextureMode(oledScreen);
+                    ClearBackground(UI_BG);
+                    UIState state = {
+                        currentScreen, selectedTrack, cursorTrack, cursorStep,
+                        currentOctave, tempo, isPlaying, playhead,
+                        synthGridRow, synthGridCol, trackParamsGridCol,
+                        blinkOn, activeNotesString,
+                        systemMenuOpen, systemMenuCursor,
+                        menuFeedback,
+                        systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+                    };
+                    DrawActiveScreen(state);
+                    DrawSettingsHub(state);
+                EndTextureMode();
+
+                UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+                UpdateOled(oledScreen);
+
+                BeginDrawing();
+                    Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
+                    Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                    Vector2 origin = { 0.0f, 0.0f };
+                    DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+                EndDrawing();
+                continue;
+            }
         }
 
         if (systemMenuOpen) {
@@ -1445,9 +1598,33 @@ int main() {
             }
 
             HandleSystemMenuInputs(menuDir, encoderTurn);
+            if (!systemMenuOpen) {
+                CpuClearBackground(UI_BG);
+                DrawHeaderRule();
+                UIState diagState = {
+                    currentScreen, selectedTrack, cursorTrack, cursorStep,
+                    currentOctave, tempo, isPlaying, playhead,
+                    synthGridRow, synthGridCol, trackParamsGridCol,
+                    blinkOn, activeNotesString,
+                    systemMenuOpen, systemMenuCursor,
+                    menuFeedback,
+                    systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
+                };
+                DrawDiagnosticsScreen(diagState);
+                UpdateTexture(oledScreen.texture, g_oledCPUPixels);
+                UpdateOled(oledScreen);
+                BeginDrawing();
+                    Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
+                    Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
+                    Vector2 origin = { 0.0f, 0.0f };
+                    DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
+                EndDrawing();
+                continue;
+            }
+
             // --- DRAW TO CPU FRAMEBUFFER ---
-            CpuClearBackground(BLACK);
-            CpuDrawLine(0, 7, OLED_WIDTH, 7, WHITE);
+            CpuClearBackground(UI_BG);
+            DrawHeaderRule();
 
             UIState state = {
                 currentScreen, selectedTrack, cursorTrack, cursorStep,
@@ -1459,15 +1636,11 @@ int main() {
                 systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
             };
 
-            if (showDiagnostics) {
-                DrawDiagnosticsScreen(state);
-            } else {
-                if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
-                else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
-                else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
-                else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
-                else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
-            }
+            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
+            else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
+            else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
+            else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
+            else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
 
             if (lfoPopupOpen) DrawModulationPopup(state);
             DrawSystemMenu(state);
@@ -1476,7 +1649,6 @@ int main() {
             UpdateOled(oledScreen);
             
             BeginDrawing();
-                ClearBackground(DARKGRAY);
                 Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
                 Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
                 Vector2 origin = { 0.0f, 0.0f };
@@ -1494,7 +1666,7 @@ int main() {
                     bool isLfoRowSelected = (currentScreen == SCREEN_TRACK_PARAMS && (synthGridRow == 2 || synthGridRow == 4));
 
                     // Only toggle transport if we aren't in menus, popups, or selecting modal pages
-                    if (!systemMenuOpen && !lfoPopupOpen && !stepPopupOpen && !isLfoRowSelected) {
+                    if (!systemMenuOpen && !lfoPopupOpen && !settingsHubOpen && !isLfoRowSelected) {
                         isPlaying = !isPlaying;
                     }
                 }
@@ -1790,26 +1962,13 @@ int main() {
                            int targetTrack = trackOffset + ((cursorTrack + n) % 4);
                            
                            // Translate string notation to MIDI numbers on keypress
-                           tracks[targetTrack].steps[cursorStep].note = NoteToMidi(noteStr);
+                           int midiNote = SnapMidiToScale(NoteToMidi(noteStr), ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
+                           tracks[targetTrack].steps[cursorStep].note = (int8_t)midiNote;
                            tracks[targetTrack].steps[cursorStep].velocity = 3;
                        }
                    }
                }
 
-        // Toggle Step Popup Open (Ctrl/Cmd + X Hotkey)
-                if (isCtrlDown && IsKeyPressed(KEY_X)) {
-                    if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) {
-                        stepPopupOpen = !stepPopupOpen;
-                        menuFeedback = stepPopupOpen ? "STEP POPUP OPEN" : "STEP POPUP CLOSED";
-                        if (stepPopupOpen) {
-                            stepPopupFocusX = 0;
-                            stepPopupFocusY = 0;
-                            stepPopupCondCol = 0;
-                            stepPopupChordKey = 0;
-                        }
-                    }
-                }
-        
         // Ctrl + Shift + 9 (or Cmd + Shift + 9) to toggle the Diagnostics screen
         if (isCtrlDown && isShiftDown && IsKeyPressed(KEY_NINE)) {
             showDiagnostics = !showDiagnostics;
@@ -1843,80 +2002,37 @@ int main() {
             Step& step = tracks[activeTrack].steps[cursorStep];
             bool isAltHeld = IsKeyDown(KEY_X);
 
-            // Sequencer Microtiming Utilities
-            bool isSequencerPage = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
-            if (isShiftDown && isAltHeld && isSequencerPage) {
-                bool editStepUtil = false;
-                int editDirection = 0;
-                if (encoderTurn != 0) {
-                    editStepUtil = true;
-                    editDirection = (encoderTurn > 0) ? 1 : -1;
-                } else {
-                    if (IsKeyPressed(KEY_LEFT))  { editStepUtil = true; editDirection = -1; }
-                    if (IsKeyPressed(KEY_RIGHT)) { editStepUtil = true; editDirection = 1; }
-                }
-
-                if (IsKeyPressed(KEY_UP)) {
-                    stepUtilFocus--;
-                    if (stepUtilFocus < 0) stepUtilFocus = 2;
-                }
-                if (IsKeyPressed(KEY_DOWN)) {
-                    stepUtilFocus++;
-                    if (stepUtilFocus > 2) stepUtilFocus = 0;
-                }
-
-                if (editStepUtil) {
-                    if (stepUtilFocus == 0) {
-                        step.microtiming = std::clamp(step.microtiming + editDirection, -6, 6);
-                    }
-                    else if (stepUtilFocus == 1) {
-                        tracks[selectedTrack].stepLength = std::clamp(tracks[selectedTrack].stepLength + editDirection, 1, 32);
-                    }
-                    else if (stepUtilFocus == 2) {
-                        if (editDirection > 0) {
-                            if (masterLength == 0)       masterLength = 16;
-                            else if (masterLength == 16) masterLength = 32;
-                            else if (masterLength == 32) masterLength = 64;
-                            else if (masterLength == 64) masterLength = 0;
-                        } else {
-                            if (masterLength == 0)       masterLength = 64;
-                            else if (masterLength == 64) masterLength = 32;
-                            else if (masterLength == 32) masterLength = 16;
-                            else if (masterLength == 16) masterLength = 0;
-                        }
-                    }
-                }
-            }
-
             // Locate transposition triggers (Shift + Up/Down or Encoder Turn) inside main's loop:
                         if ((triggerAction || (encoderTurn != 0)) && !isAltHeld && (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8)) {
+                            int8_t noteBefore = step.note;
+                            int velBefore = step.velocity;
+                            int keyRoot = ResolveTrackKeyRoot(activeTrack);
+                            int keyLock = ResolveTrackKeyLock(activeTrack);
                             if (encoderTurn != 0 && !encoderButton) {
                                 int8_t curNote = step.note;
                                 if (curNote == -1) {
-                                    step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                    step.note = DefaultStepNote(activeTrack);
                                     step.velocity = 3;
                                 } else {
-                                    // Transpose directly using standard integers!
-                                    int transposed = curNote + encoderTurn;
-                                    step.note = (int8_t)std::clamp(transposed, 0, 127);
+                                    step.note = (int8_t)StepMidiInScale(curNote, keyRoot, encoderTurn, keyLock);
                                 }
                             } else {
                                 if (IsKeyDown(KEY_UP)) {
                                     int8_t curNote = step.note;
                                     if (curNote == -1) {
-                                        step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                        step.note = DefaultStepNote(activeTrack);
                                         step.velocity = 3;
                                     } else {
-                                        step.note = (int8_t)std::clamp(curNote + 1, 0, 127);
+                                        step.note = (int8_t)StepMidiInScale(curNote, keyRoot, 1, keyLock);
                                     }
                                 }
                                 if (IsKeyDown(KEY_DOWN)) {
                                     int8_t curNote = step.note;
                                     if (curNote == -1) {
-                                        step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                        step.note = DefaultStepNote(activeTrack);
                                         step.velocity = 3;
                                     } else {
-                                        step.note = (int8_t)std::clamp(curNote - 1, 0, 127);
+                                        step.note = (int8_t)StepMidiInScale(curNote, keyRoot, -1, keyLock);
                                     }
                                 }
                             }
@@ -1936,8 +2052,12 @@ int main() {
                                 if (v < 0) v = 0;
                                 step.velocity = v;
                                 if (v > 0 && step.note == -1) {
-                                    step.note = NoteToMidi("C" + std::to_string(currentOctave));
+                                    step.note = DefaultStepNote(activeTrack);
                                 }
+                            }
+
+                            if (step.note != noteBefore || step.velocity != velBefore) {
+                                UiNoteParamEdit(CurrentFocusId());
                             }
                         }
         }
@@ -2028,7 +2148,7 @@ int main() {
             }
             else if (currentScreen == SCREEN_SYNTH) {
                 if (triggerNav) {
-                    bool isAltHeld = IsKeyDown(KEY_X);
+                    bool isAltHeld = IsKeyDown(KEY_X) && !isShiftDown && !isCtrlDown;
                     if (isAltHeld) {
                         if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                         if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -2080,7 +2200,7 @@ int main() {
                             }
 
                 if (triggerNav) {
-                    bool isAltHeld = IsKeyDown(KEY_X);
+                    bool isAltHeld = IsKeyDown(KEY_X) && !isShiftDown && !isCtrlDown;
                     if (isAltHeld) {
                         if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                         if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -2108,7 +2228,7 @@ int main() {
             }
             else if (currentScreen == SCREEN_PLACEHOLDER) {
                 if (triggerNav) {
-                    bool isAltHeld = IsKeyDown(KEY_X);
+                    bool isAltHeld = IsKeyDown(KEY_X) && !isShiftDown && !isCtrlDown;
                     if (isAltHeld) {
                         if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                         if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -2129,7 +2249,7 @@ int main() {
             }
             else if (currentScreen == SCREEN_GLOBAL_FX) {
                 if (triggerNav) {
-                    bool isAltHeld = IsKeyDown(KEY_X);
+                    bool isAltHeld = IsKeyDown(KEY_X) && !isShiftDown && !isCtrlDown;
                     if (isAltHeld) {
                         if (IsKeyDown(KEY_LEFT))  cursorStep = (cursorStep - 1 + 16) % 16;
                         if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
@@ -2151,8 +2271,8 @@ int main() {
         }
 
         // --- DRAW VIRTUAL OLED FRAMEBUFFER ---
-        CpuClearBackground(BLACK);
-        CpuDrawLine(0, 7, OLED_WIDTH, 7, WHITE);
+        CpuClearBackground(UI_BG);
+        DrawHeaderRule();
 
         UIState state = {
             currentScreen, selectedTrack, cursorTrack, cursorStep,
@@ -2164,33 +2284,23 @@ int main() {
             systemMenuState, fileBrowserCursor, g_typingBuffer.c_str(), g_typingCursor
         };
 
-        if (showDiagnostics) {
-            DrawDiagnosticsScreen(state);
-        } else {
-            if (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8) DrawSequencerScreen(state);
-            else if (currentScreen == SCREEN_SYNTH) DrawSynthScreen(state);
-            else if (currentScreen == SCREEN_TRACK_PARAMS) DrawFilterLfoPage(state);
-            else if (currentScreen == SCREEN_PLACEHOLDER) DrawPlaceholderPage(state);
-            else if (currentScreen == SCREEN_GLOBAL_FX) DrawGlobalFXPage(state);
-        }
+        // Focus captures are only trusted for the frame they arrive in.
+        UiBeginFocusCapture();
+        DrawActiveScreen(state);
 
-        if (lfoPopupOpen) DrawModulationPopup(state);
-        if (stepPopupOpen) DrawStepPopup(state);
+        // Drawn last so it sits above whatever screen is active.
+        DrawEditOverlay(CurrentFocusId());
 
         UpdateTexture(oledScreen.texture, g_oledCPUPixels);
         UpdateOled(oledScreen);
 
         // --- DESKTOP RAYLIB RENDERING STAGE ---
         BeginDrawing();
-            ClearBackground(DARKGRAY);
             
             Rectangle sourceRec = { 0.0f, 0.0f, (float)oledScreen.texture.width, (float)oledScreen.texture.height };
             Rectangle destRec = { 0.0f, 0.0f, (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT };
             Vector2 origin = { 0.0f, 0.0f };
             DrawTexturePro(oledScreen.texture, sourceRec, destRec, origin, 0.0f, WHITE);
-            
-            if (lfoPopupOpen) DrawModulationPopup(state);
-            if (stepPopupOpen) DrawStepPopup(state);
         EndDrawing();
     }
 

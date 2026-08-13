@@ -11,6 +11,9 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <linux/spi/spidev.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 // --- UDP SOCKET HEADERS ---
 #include <sys/socket.h>
@@ -18,6 +21,14 @@
 #include <arpa/inet.h>
 
 extern Color g_oledCPUPixels[256 * 64];
+
+// Map a framebuffer pixel onto one of the SSD1322's 16 grey levels. The
+// brightest channel is used so a non-neutral colour never collapses to black.
+static inline uint8_t QuantizeToGray4(Color c) {
+    uint8_t m = (c.r > c.g) ? c.r : c.g;
+    if (c.b > m) m = c.b;
+    return (uint8_t)(m >> 4);
+}
 
 // Global handles
 static int g_spiFd = -1;
@@ -33,6 +44,23 @@ static const char* MAC_IP_ADDRESS = "192.168.0.94"; // <--- CHANGE THIS!
 
 static const int PIN_DC  = 512 + 25;
 static const int PIN_RES = 512 + 24;
+
+// A full frame is 8192 bytes. At the original 2 MHz that was ~33 ms per push,
+// which capped the whole UI near 30 fps; 8 MHz brings it to ~8 ms.
+static const uint32_t SPI_SPEED_HZ = 8000000;
+static const size_t FRAME_BYTES = 8192;
+
+// The SPI push runs on its own thread so the UI loop never waits on the panel.
+// Only the most recent frame matters, so a pending frame that has not been
+// picked up yet is simply overwritten rather than queued.
+static std::thread g_displayThread;
+static std::mutex g_frameMutex;
+static std::condition_variable g_frameCv;
+// Pre-sized so the buffer swaps between UI and worker thread always preserve
+// the frame length.
+static std::vector<uint8_t> g_pendingFrame(FRAME_BYTES, 0);
+static bool g_framePending = false;
+static bool g_displayRunning = false;
 
 static void gpioExport(int pin) {
     std::ofstream f("/sys/class/gpio/export");
@@ -87,7 +115,7 @@ static void spiWrite(const uint8_t* data, size_t len) {
         tr.tx_buf = (uintptr_t)(data + bytes_sent);
         tr.rx_buf = 0;
         tr.len = chunk_size;
-        tr.speed_hz = 2000000;
+        tr.speed_hz = SPI_SPEED_HZ;
         tr.bits_per_word = 8;
         tr.delay_usecs = 0;
 
@@ -111,6 +139,41 @@ static void writeCommandWithData(uint8_t cmd, const uint8_t* data, size_t len) {
     if (len > 0) {
         gpioWrite(PIN_DC, 1);
         spiWrite(data, len);
+    }
+}
+
+// Address the full panel window and blit one packed frame.
+static void pushFrame(const std::vector<uint8_t>& frame) {
+    uint8_t colData[] = {0x20, 0x5F};
+    writeCommandWithData(0x15, colData, 2);
+
+    uint8_t rowData[] = {0x00, 0x3F};
+    writeCommandWithData(0x75, rowData, 2);
+
+    writeCommand(0x5C);
+
+    gpioWrite(PIN_DC, 1);
+    spiWrite(frame.data(), frame.size());
+
+    // Mirror the same packed frame to the Mac preview.
+    if (g_udpFd >= 0) {
+        sendto(g_udpFd, frame.data(), frame.size(), 0,
+               (struct sockaddr*)&g_macAddr, sizeof(g_macAddr));
+    }
+}
+
+static void displayThreadMain() {
+    std::vector<uint8_t> local(FRAME_BYTES, 0);
+
+    while (true) {
+        {
+            std::unique_lock<std::mutex> lock(g_frameMutex);
+            g_frameCv.wait(lock, [] { return g_framePending || !g_displayRunning; });
+            if (!g_framePending) break; // shutdown with nothing left to draw
+            local.swap(g_pendingFrame);
+            g_framePending = false;
+        }
+        pushFrame(local);
     }
 }
 #endif
@@ -140,7 +203,7 @@ void InitOled() {
 
     uint8_t mode = SPI_MODE_0;
     uint8_t bits = 8;
-    uint32_t speed = 2000000;
+    uint32_t speed = SPI_SPEED_HZ;
 
     if (ioctl(g_spiFd, SPI_IOC_WR_MODE, &mode) < 0) std::cerr << "[OLED] SPI mode failed" << std::endl;
     if (ioctl(g_spiFd, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0) std::cerr << "[OLED] SPI bits failed" << std::endl;
@@ -196,8 +259,12 @@ void InitOled() {
     
     writeCommand(0xA6);
 
-    uint8_t contrastData[] = {0x20, 0x20, 0x20};
-    writeCommandWithData(0xC1, contrastData, 3);
+    // Default linear grey scale ramp. Without this the panel uses its
+    // non-linear factory table, which crushes the mid grey levels.
+    writeCommand(0xB9);
+
+    dataVal = 0x9F;
+    writeCommandWithData(0xC1, &dataVal, 1);
     
     std::vector<uint8_t> clearBuf(8192, 0);
     uint8_t colData[] = {0x20, 0x5F};
@@ -226,52 +293,60 @@ void InitOled() {
     } else {
         std::cerr << "[OLED] Failed to initialize UDP streaming socket!" << std::endl;
     }
+
+    // All panel setup is done, so the worker can take ownership of the bus.
+    g_displayRunning = true;
+    g_displayThread = std::thread(displayThreadMain);
+    std::cout << "[OLED] Display push thread started at "
+              << (SPI_SPEED_HZ / 1000000) << " MHz." << std::endl;
 #else
     std::cout << "[OLED] Running on macOS: Physical OLED simulation active (No-op)." << std::endl;
 #endif
 }
 
 void UpdateOled(RenderTexture2D oledScreen) {
+    (void)oledScreen;
 #if defined(__linux__)
     if (g_spiFd < 0) return;
 
-    uint8_t colData[] = {0x20, 0x5F};
-    writeCommandWithData(0x15, colData, 2);
-
-    uint8_t rowData[] = {0x00, 0x3F};
-    writeCommandWithData(0x75, rowData, 2);
-
-    writeCommand(0x5C);
-
-    static std::vector<uint8_t> oledBuffer(8192, 0);
+    // Packing is cheap; it stays on the caller so the worker only owns the bus.
+    // Reused across calls so a frame costs no allocation.
+    static std::vector<uint8_t> scratch(FRAME_BYTES, 0);
 
     int outIndex = 0;
     for (int y = 0; y < 64; ++y) {
         int targetY = 63 - y;
         for (int x = 0; x < 256; x += 2) {
-            Color p1 = g_oledCPUPixels[targetY * 256 + x];
-            Color p2 = g_oledCPUPixels[targetY * 256 + (x + 1)];
+            uint8_t gray1 = QuantizeToGray4(g_oledCPUPixels[targetY * 256 + x]);
+            uint8_t gray2 = QuantizeToGray4(g_oledCPUPixels[targetY * 256 + (x + 1)]);
 
-            uint8_t gray1 = (p1.r > 127 || p1.g > 127 || p1.b > 127) ? 15 : 0;
-            uint8_t gray2 = (p2.r > 127 || p2.g > 127 || p2.b > 127) ? 15 : 0;
-
-            oledBuffer[outIndex++] = (gray1 << 4) | (gray2 & 0x0F);
+            scratch[outIndex++] = (gray1 << 4) | (gray2 & 0x0F);
         }
     }
 
-    // 1. Push data to physical hardware SPI OLED
-    gpioWrite(PIN_DC, 1);
-    spiWrite(oledBuffer.data(), oledBuffer.size());
-
-    // 2. Broadcast the packed buffer to your Mac's screen mirror
-    if (g_udpFd >= 0) {
-        sendto(g_udpFd, oledBuffer.data(), oledBuffer.size(), 0, (struct sockaddr*)&g_macAddr, sizeof(g_macAddr));
+    {
+        std::lock_guard<std::mutex> lock(g_frameMutex);
+        // Swap rather than copy: scratch keeps the discarded buffer's storage.
+        g_pendingFrame.swap(scratch);
+        g_framePending = true;
     }
+    g_frameCv.notify_one();
 #endif
 }
 
 void ShutdownOled() {
 #if defined(__linux__)
+    if (g_displayThread.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(g_frameMutex);
+            g_displayRunning = false;
+            g_framePending = false; // drop any queued frame so the worker exits
+        }
+        g_frameCv.notify_one();
+        g_displayThread.join();
+        std::cout << "[OLED] Display push thread joined." << std::endl;
+    }
+
     if (g_dcFile.is_open()) g_dcFile.close();
     if (g_resFile.is_open()) g_resFile.close();
 

@@ -40,6 +40,7 @@ add_executable(seq1
     src/Sampler_Engine.cpp
     src/Master_FX.cpp
     src/UI_Draw.cpp
+    src/UI_Font.cpp
     src/UI_Screens.cpp
     src/Tape_Buffer_FX.cpp 
     src/RtMidi.cpp

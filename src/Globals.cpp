@@ -14,6 +14,32 @@ static void SafeRead(std::ifstream& file, T& val, T defaultVal) {
     }
 }
 
+static void WriteTrackGroove(std::ofstream& file, const Track& trk) {
+    file << trk.swing << "\n" << trk.keyRoot << "\n" << trk.keyScope << "\n" << trk.keyLock << "\n";
+}
+
+static void ReadTrackGroove(std::ifstream& file, Track& trk, int ver) {
+    if (ver >= 3) {
+        SafeRead(file, trk.swing, 0);
+        SafeRead(file, trk.keyRoot, 0);
+        SafeRead(file, trk.keyScope, 0);
+        trk.swing = std::clamp(trk.swing, 0, 99);
+        trk.keyRoot = std::clamp(trk.keyRoot, 0, 11);
+        trk.keyScope = std::clamp(trk.keyScope, 0, 1);
+        if (ver >= 4) {
+            SafeRead(file, trk.keyLock, 0);
+            trk.keyLock = std::clamp(trk.keyLock, 0, 1);
+        } else {
+            trk.keyLock = 1; // v3 files were always major
+        }
+    } else {
+        trk.swing = 0;
+        trk.keyRoot = 0;
+        trk.keyScope = 0;
+        trk.keyLock = 0;
+    }
+}
+
 // Complete StepParams serialize list (format v2). Order must match ReadStepParams.
 static void WriteStepParams(std::ofstream& file, const StepParams& sp) {
     file << sp.polyMode << "\n";
@@ -75,7 +101,9 @@ int cursorStep = 0;
 int activePage = 0;
 
 int masterLength = 32;     // Default to 32 steps
-int stepUtilFocus = 0;     // Default focus on Microtiming
+int stepUtilFocus = 0;     // TRK tab: start on TRACK LEN
+int globalKeyRoot = 0;     // C
+int globalKeyLock = 0;     // CHR default
 
 bool g_hardwareEncoderClicked = false;
 
@@ -101,7 +129,12 @@ bool systemMenuOpen = false;
 int systemMenuCursor = 0;
 int systemMenuState = 0;
 
-bool stepPopupOpen = false;
+bool settingsHubOpen = false;
+int settingsHubKind = 0;    // Default STEP/TRK hub
+int settingsHubTab = 0;     // 0 or 1 within the current kind
+int settingsHubSeqTab = 0;  // Remembered STEP/TRK tab
+int settingsHubFocus = 0;   // Start on tab bar
+int liveFxFocusCol = 0;
 int stepPopupFocusX = 0;
 int stepPopupFocusY = 0;
 int stepPopupCondCol = 0;
@@ -120,7 +153,6 @@ int g_typingCursor = 0;
 std::vector<std::string> g_fileList;
 
 // Initialize Global Performance FX states
-bool perfPopupOpen = false;
 int perfFilterCutoff = 99;   // Start fully open (clean bypass)
 int perfFilterResonance = 10; // Low resonance by default
 int perfFilterType = 0;      // Low-Pass by default
@@ -342,6 +374,10 @@ void InitializeTracks() {
         tracks[t].tapeMix = 0;
         tracks[t].tapeFX.reset();
         tracks[t].polyMode = 1;
+        tracks[t].swing = 0;
+        tracks[t].keyRoot = 0;
+        tracks[t].keyScope = 0;
+        tracks[t].keyLock = 0;
 
         // Populate granular defaults
         tracks[t].grainSize = 15;
@@ -519,6 +555,97 @@ std::string TransposeNote(const std::string& noteStr, int semitones) {
     return MidiToNote(midi);
 }
 
+static const int kMajorDegrees[7] = {0, 2, 4, 5, 7, 9, 11};
+
+static bool MidiInMajorScale(int midi, int root) {
+    int pc = (midi - root) % 12;
+    if (pc < 0) pc += 12;
+    for (int d : kMajorDegrees) {
+        if (pc == d) return true;
+    }
+    return false;
+}
+
+int ResolveTrackKeyRoot(int trackIdx) {
+    if (trackIdx < 0 || trackIdx >= 8) return globalKeyRoot;
+    if (tracks[trackIdx].keyScope == 0) return globalKeyRoot;
+    return tracks[trackIdx].keyRoot;
+}
+
+int ResolveTrackKeyLock(int trackIdx) {
+    if (trackIdx < 0 || trackIdx >= 8) return globalKeyLock;
+    if (tracks[trackIdx].keyScope == 0) return globalKeyLock;
+    return tracks[trackIdx].keyLock;
+}
+
+int SnapMidiToScale(int midi, int root, int lock) {
+    midi = std::clamp(midi, 0, 127);
+    if (lock == 0) return midi;
+    root = ((root % 12) + 12) % 12;
+    if (MidiInMajorScale(midi, root)) return midi;
+
+    int bestMidi = midi;
+    int bestDist = 99;
+    for (int delta = -12; delta <= 12; ++delta) {
+        int cand = midi + delta;
+        if (cand < 0 || cand > 127) continue;
+        if (!MidiInMajorScale(cand, root)) continue;
+        int dist = std::abs(delta);
+        if (dist < bestDist || (dist == bestDist && cand < bestMidi)) {
+            bestDist = dist;
+            bestMidi = cand;
+        }
+    }
+    return bestMidi;
+}
+
+int StepMidiInScale(int midi, int root, int dir, int lock) {
+    midi = std::clamp(midi, 0, 127);
+    if (dir == 0) return SnapMidiToScale(midi, root, lock);
+    if (lock == 0) {
+        return std::clamp(midi + dir, 0, 127);
+    }
+
+    root = ((root % 12) + 12) % 12;
+    midi = SnapMidiToScale(midi, root, 1);
+    int sign = (dir > 0) ? 1 : -1;
+    int steps = std::abs(dir);
+    for (int i = 0; i < steps; ++i) {
+        int cand = midi + sign;
+        while (cand >= 0 && cand <= 127 && !MidiInMajorScale(cand, root)) {
+            cand += sign;
+        }
+        if (cand < 0 || cand > 127) break;
+        midi = cand;
+    }
+    return midi;
+}
+
+int KeyRootMidiAtOctave(int root, int octave) {
+    root = ((root % 12) + 12) % 12;
+    int midi = (octave + 1) * 12 + root;
+    return std::clamp(midi, 0, 127);
+}
+
+void SnapTrackSequenceToKey(int trackIdx) {
+    if (trackIdx < 0 || trackIdx >= 8) return;
+    int lock = ResolveTrackKeyLock(trackIdx);
+    if (lock == 0) return;
+    int root = ResolveTrackKeyRoot(trackIdx);
+    Track& trk = tracks[trackIdx];
+    for (int s = 0; s < 32; ++s) {
+        Step& st = trk.steps[s];
+        if (st.note >= 0) {
+            st.note = (int8_t)SnapMidiToScale(st.note, root, 1);
+        }
+        for (int k = 0; k < 3; ++k) {
+            if (st.chordNotes[k] >= 0) {
+                st.chordNotes[k] = (int8_t)SnapMidiToScale(st.chordNotes[k], root, 1);
+            }
+        }
+    }
+}
+
 // Reset a single track's parameters back to startup defaults
 void ResetTrackToDefault(int t) {
     if (t == 0 || t >= 4) {
@@ -601,6 +728,10 @@ void ResetTrackToDefault(int t) {
         tracks[t].tapeMix = 0;
         tracks[t].tapeFX.reset();
     tracks[t].polyMode = 1;
+    tracks[t].swing = 0;
+    tracks[t].keyRoot = 0;
+    tracks[t].keyScope = 0;
+    tracks[t].keyLock = 0;
     tracks[t].grainSize = 15;
     tracks[t].grainDensity = 50;
     tracks[t].grainPosition = 12;
@@ -830,7 +961,7 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
     std::ofstream file(path);
     if (!file.is_open()) return false;
 
-    file << "SOUNDBOY_PAT 2\n";
+    file << "SOUNDBOY_PAT 4\n";
 
     // Temporarily dump global live tracks to RAM slot before writing
     for (int t = 0; t < 8; ++t) {
@@ -877,6 +1008,7 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
 
         // Save Poly/Mono Voice Mode
         file << trk.polyMode << "\n";
+        WriteTrackGroove(file, trk);
 
         // Save 32 steps
                 for (int s = 0; s < 32; ++s) {
@@ -912,7 +1044,7 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
 
     std::string magic;
     int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver != 2) return false;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || (ver != 2 && ver != 3 && ver != 4)) return false;
 
     Pattern& pat = patterns[patternIdx];
     for (int t = 0; t < 8; ++t) {
@@ -968,6 +1100,7 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
 
         // Safely load Poly Mode default
         SafeRead(file, trk.polyMode, 1);
+        ReadTrackGroove(file, trk, ver);
 
         // Inside the track loop (t) of LoadPattern:
         for (int s = 0; s < 32; ++s) {
@@ -1043,7 +1176,7 @@ bool SaveProject(int slot, const std::string& filename) {
     std::ofstream file(path);
     if (!file.is_open()) return false;
 
-    file << "SOUNDBOY_PRJ 2\n";
+    file << "SOUNDBOY_PRJ 4\n";
 
     // Sync live edits to current pattern slot
     for (int t = 0; t < 8; ++t) {
@@ -1063,6 +1196,8 @@ bool SaveProject(int slot, const std::string& filename) {
     file << globalFX.satLevel << "\n" << globalFX.satSymmetry << "\n" << globalFX.satOverdrive << "\n" << globalFX.satMix << "\n";
     file << globalFX.delayTime << "\n" << globalFX.delayFeedback << "\n" << globalFX.delayPingPong << "\n" << globalFX.delayMix << "\n";
     file << globalFX.autoPanTime << "\n" << globalFX.autoPanFeedback << "\n" << globalFX.autoPanWidth << "\n" << globalFX.autoPanMix << "\n";
+    file << globalKeyRoot << "\n";
+    file << globalKeyLock << "\n";
 
     // Save 8 patterns
     for (int p = 0; p < 8; ++p) {
@@ -1106,6 +1241,7 @@ bool SaveProject(int slot, const std::string& filename) {
 
             // Save Poly/Mono Voice Mode
             file << trk.polyMode << "\n";
+            WriteTrackGroove(file, trk);
 
             for (int s = 0; s < 32; ++s) {
                             const Step& step = trk.steps[s];
@@ -1141,7 +1277,7 @@ bool LoadProject(const std::string& filename) {
 
     std::string magic;
     int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || ver != 2) return false;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || (ver != 2 && ver != 3 && ver != 4)) return false;
 
     // Load and automatically crunch the 16 Sample Pool slots in the background [2]
     for (int i = 0; i < 16; ++i) {
@@ -1162,6 +1298,19 @@ bool LoadProject(const std::string& filename) {
     file >> globalFX.satLevel >> globalFX.satSymmetry >> globalFX.satOverdrive >> globalFX.satMix;
     file >> globalFX.delayTime >> globalFX.delayFeedback >> globalFX.delayPingPong >> globalFX.delayMix;
     file >> globalFX.autoPanTime >> globalFX.autoPanFeedback >> globalFX.autoPanWidth >> globalFX.autoPanMix;
+    if (ver >= 3) {
+        SafeRead(file, globalKeyRoot, 0);
+        globalKeyRoot = std::clamp(globalKeyRoot, 0, 11);
+        if (ver >= 4) {
+            SafeRead(file, globalKeyLock, 0);
+            globalKeyLock = std::clamp(globalKeyLock, 0, 1);
+        } else {
+            globalKeyLock = 1; // v3 projects were always major
+        }
+    } else {
+        globalKeyRoot = 0;
+        globalKeyLock = 0;
+    }
 
     for (int p = 0; p < 8; ++p) {
         Pattern& pat = patterns[p];
@@ -1218,6 +1367,7 @@ bool LoadProject(const std::string& filename) {
 
             // Safely load Poly Mode default
             SafeRead(file, trk.polyMode, 1);
+            ReadTrackGroove(file, trk, ver);
 
             for (int s = 0; s < 32; ++s) {
                             Step& step = trk.steps[s];

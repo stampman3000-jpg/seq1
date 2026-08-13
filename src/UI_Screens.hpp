@@ -11,5 +11,4 @@ void DrawSystemMenu(const UIState& state);
 void DrawModulationPopup(const UIState& state);
 void DrawPlaceholderPage(const UIState& state);
 void DrawDiagnosticsScreen(const UIState& state);
-void DrawStepPopup(const UIState& state);
-void DrawPerformancePopup(const UIState& state);
+void DrawSettingsHub(const UIState& state);

@@ -1183,7 +1183,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
 
                         for (int s = 0; s < tracks[t].stepLength; ++s) {
                             const Step& step = tracks[t].steps[s];
-                            int triggerTick = (s * 6 + step.microtiming);
+                            int triggerTick = (s * 6 + step.microtiming + ((s % 2 == 1) ? (tracks[t].swing * 5) / 99 : 0));
                             int localLengthTicks = tracks[t].stepLength * 6;
                             
                             triggerTick = triggerTick % localLengthTicks;

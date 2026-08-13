@@ -187,20 +187,22 @@ void MidiManager::midiCallback(double timeStamp, std::vector<unsigned char> *mes
     // Locate standard note-on processing in midiCallback:
         if (command == 0x90 && velocity > 0) {
             int mappedVelocity = (velocity < 43) ? 1 : ((velocity < 86) ? 2 : 3);
+            int snappedNote = SnapMidiToScale((int)note, ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
             
             if (channel == 15 && targetTrack == selectedTrack) {
                 bool isSeqPageOpen = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
                 if (isSeqPageOpen) {
                     Step& s = tracks[selectedTrack].steps[cursorStep];
-                    s.note = note; // 'note' is already a raw unsigned char! Store directly.
+                    s.note = (int8_t)snappedNote;
                     s.velocity = mappedVelocity;
                 }
             }
 
-            TriggerVoiceLive(targetTrack, note, mappedVelocity);
+            TriggerVoiceLive(targetTrack, snappedNote, mappedVelocity);
         }
     else if (command == 0x80 || (command == 0x90 && velocity == 0)) {
-        ReleaseVoiceLive(targetTrack, note);
+        int snappedNote = SnapMidiToScale((int)note, ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
+        ReleaseVoiceLive(targetTrack, snappedNote);
     }
 }
 
