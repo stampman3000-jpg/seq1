@@ -36,6 +36,7 @@ endif()
 add_executable(seq1
     src/main.cpp
     src/Globals.cpp
+    src/Chaos.cpp
     src/Audio_Engine.cpp
     src/Sampler_Engine.cpp
     src/Master_FX.cpp

@@ -16,12 +16,28 @@ extern int masterLength;   // Pattern loop limit: 16, 32, 64, or 0 (INF)
 extern int stepUtilFocus;  // TRK tab: 0 = Track Len, 1 = Global Len, 2 = Swing, 3 = Key
 extern int globalKeyRoot;  // 0=C .. 11=B
 extern int globalKeyLock;  // 0=CHR, 1=MAJ
+
+// --- GENERATIVE CHAOS (global; see Chaos.hpp) ---
+extern int g_chaos;              // 0..99 macro; scales every weight below
+extern int g_chaosLift;          // 0..99 weight: +7 / +12 / +24 voicing lifts
+extern int g_chaosFill;          // 0..99 weight: notes added on empty steps
+extern int g_chaosSkip;          // 0..99 weight: existing notes dropped
+extern int g_chaosRatchet;       // 0..99 weight: random retrigs
+extern int g_chaosTime;          // 0..99 weight: microtiming / velocity jitter
+extern int g_chaosRepeat;        // 0..8 bars before the dice repeat; 0 = never repeats
+extern unsigned int g_chaosSeed; // re-rolled to get a different variation
+extern int g_globalTranspose;    // semitones; applies to keyScope == GLOBAL tracks
 extern bool settingsHubOpen;
 extern int settingsHubKind;   // 0 = STEP/TRK, 1 = LIVE/ALGO
 extern int settingsHubTab;    // 0 or 1 within the current kind
 extern int settingsHubSeqTab; // remembered STEP/TRK tab
 extern int settingsHubFocus;  // 0 = tab bar, 1 = tab body
 extern int liveFxFocusCol;    // 0 = FRQ, 1 = RES, 2 = TYP
+// The ALGO tab is a grid: one macro row over two rows of five aligned columns.
+extern int algoRow;           // 0 = CHAOS macro, 1 = weights, 2 = utility strip
+extern int algoCol;           // 0..ALGO_COLS-1, kept while moving through row 0
+constexpr int ALGO_ROWS = 3;
+constexpr int ALGO_COLS = 5;
 extern int stepPopupFocusX;   // 0 = Left column, 1 = Right column (chord / microtiming)
 extern int stepPopupFocusY;   // Left: 0 Retrig, 1 Condit, 2 Length. Right: 0 Chord, 1 Microtiming
 extern int stepPopupCondCol;  // 0..15 focused condition bit
@@ -41,12 +57,21 @@ extern const std::vector<std::string> triggerOptions;
 extern bool liveKeyboardActive;
 // Global State Variables
 extern Track tracks[8];
+// Per-track tape delay lines, kept alongside the tracks rather than inside them
+// so pattern data stays copyable and small.
+extern TapeBufferFX g_trackTapeFX[8];
 extern int synthMode;
 extern const char* menuFeedback;
 extern SampleAsset g_samplePool[16];
 bool LoadSampleToPool(int slotIdx, const std::string& filename);
 extern bool g_hardwareEncoderClicked;
 extern float g_audioCpuLoad;
+// Audio-thread health, written by the callback and read by the diagnostics screen.
+extern float g_audioCpuPeak;            // peak-hold over the last second, uncapped
+extern unsigned int g_audioDeadlineMisses; // callbacks that took longer than their buffer
+extern float g_masterPeak;              // pre-limiter peak, so clipping is visible
+extern float g_limiterReduction;        // 0 = open, 1 = fully clamped
+extern int g_activeVoiceCount;          // voices sounding, the number chaos moves
 extern bool showDiagnostics;
 
 

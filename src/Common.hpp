@@ -351,11 +351,21 @@ struct Step {
     int8_t chordNotes[3] = {-1, -1, -1}; // Recorded custom chord notes (MIDI numbers, -1 for empty)
 };
 
+// The pattern as programmed, before the generative layer rewrites it. Only the
+// four fields the generator touches are mirrored, so the whole bank costs 1 KB.
+struct StepSource {
+    int8_t note = -1;
+    int8_t velocity = 0;
+    int8_t retrigger = 0;
+    int8_t microtiming = 0;
+};
+
 // --- SEQUENCER TRACK STRUCT ---
 struct Track {
     std::string name;
     Step steps[32];
-    
+    StepSource source[32]; // the "peace" pattern; steps[] is the rendered output
+
     int stepLength = 16; // <--- ADD THIS LINE (Polymeter active step limit)
        int localTick = -1;   // <--- ADD THIS LINE (Track-local clock accumulator)
     
@@ -475,8 +485,11 @@ struct Track {
         int tapeSmearSize = 40;
         int tapeMix = 0;          // Bypassed (mix at 0) on startup
 
-        // Local track instance
-        TapeBufferFX tapeFX;
+        // The tape DSP state itself lives in g_trackTapeFX, not here. It is a
+        // live delay line, not pattern data, and it carries an 88200-float
+        // buffer: holding it inside Track meant every pattern slot stored its
+        // own unused copy, and a pattern switch memcpy'd megabytes of audio
+        // history on the audio thread.
 
     bool muted = false;         // Shift+M Track Mute State
 };

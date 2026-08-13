@@ -44,6 +44,11 @@ static int GetParam(int stepVal, int trackVal) {
 }
 
 void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq, int noteLength) {
+    // Restarting the sample from position zero is the point of a retrigger, but
+    // the filter's stored energy is not part of that and clearing it mid-note
+    // adds a click on top.
+    bool wasSounding = active && (stage != ENV_IDLE);
+
     sampleBuffer = buffer;
     sampleLengthSamples = length;
     active = (buffer != nullptr && length > 0);
@@ -85,11 +90,13 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
     filterStage = FLT_ATTACK;
     filterEnvLevel = 0.0f;
     filterUpdateCounter = 9999; // Force instant coefficient calculation
-    filter.reset();
+    if (!wasSounding) filter.reset();
 
     // Reset smooth state flags to trigger instant snapping on first process frame
-    smoothCutoff = -1.0f;
-    smoothVol = -1.0f;
+    if (!wasSounding) {
+        smoothCutoff = -1.0f;
+        smoothVol = -1.0f;
+    }
 
     // Reset mod offsets
     modCutoffOffset = 0.0f;

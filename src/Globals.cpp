@@ -1,4 +1,5 @@
 #include "Globals.hpp"
+#include "Chaos.hpp"
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -16,6 +17,7 @@ static void SafeRead(std::ifstream& file, T& val, T defaultVal) {
 
 static void WriteTrackGroove(std::ofstream& file, const Track& trk) {
     file << trk.swing << "\n" << trk.keyRoot << "\n" << trk.keyScope << "\n" << trk.keyLock << "\n";
+    file << trk.stepLength << "\n";
 }
 
 static void ReadTrackGroove(std::ifstream& file, Track& trk, int ver) {
@@ -31,6 +33,12 @@ static void ReadTrackGroove(std::ifstream& file, Track& trk, int ver) {
             trk.keyLock = std::clamp(trk.keyLock, 0, 1);
         } else {
             trk.keyLock = 1; // v3 files were always major
+        }
+        // Polymeter length was never written before v5, so older files fall
+        // back to the 16 step default rather than reading past their data.
+        if (ver >= 5) {
+            SafeRead(file, trk.stepLength, 16);
+            trk.stepLength = std::clamp(trk.stepLength, 1, 32);
         }
     } else {
         trk.swing = 0;
@@ -105,12 +113,28 @@ int stepUtilFocus = 0;     // TRK tab: start on TRACK LEN
 int globalKeyRoot = 0;     // C
 int globalKeyLock = 0;     // CHR default
 
+int g_chaos        = 0;    // silent until the macro is raised
+int g_chaosLift    = 50;
+int g_chaosFill    = 50;
+int g_chaosSkip    = 50;
+int g_chaosRatchet = 30;
+int g_chaosTime    = 30;
+int g_chaosRepeat  = 0;    // keep evolving by default; set RPT for a phrase
+unsigned int g_chaosSeed = 1;
+int g_globalTranspose = 0;
+
 bool g_hardwareEncoderClicked = false;
 
 float g_audioCpuLoad = 0.0f;
+float g_audioCpuPeak = 0.0f;
+unsigned int g_audioDeadlineMisses = 0;
+float g_masterPeak = 0.0f;
+float g_limiterReduction = 0.0f;
+int g_activeVoiceCount = 0;
 bool showDiagnostics = false;
 // Global State Definitions
 Track tracks[8];
+TapeBufferFX g_trackTapeFX[8];
 int synthMode = 0;
 
 // Instantiate global sequencer clocks and master effects states
@@ -135,6 +159,8 @@ int settingsHubTab = 0;     // 0 or 1 within the current kind
 int settingsHubSeqTab = 0;  // Remembered STEP/TRK tab
 int settingsHubFocus = 0;   // Start on tab bar
 int liveFxFocusCol = 0;
+int algoRow = 0;
+int algoCol = 0;
 int stepPopupFocusX = 0;
 int stepPopupFocusY = 0;
 int stepPopupCondCol = 0;
@@ -372,7 +398,7 @@ void InitializeTracks() {
         tracks[t].tapeSmearRate = 0;
         tracks[t].tapeSmearSize = 40;
         tracks[t].tapeMix = 0;
-        tracks[t].tapeFX.reset();
+        g_trackTapeFX[t].reset();
         tracks[t].polyMode = 1;
         tracks[t].swing = 0;
         tracks[t].keyRoot = 0;
@@ -429,6 +455,11 @@ void InitializeTracks() {
         tracks[t].autoPanSend = 0;
         tracks[t].glideTime = 0;
         tracks[t].muted = false;
+    }
+
+    // The demo pattern is the starting chaos source.
+    for (int t = 0; t < 8; ++t) {
+        ChaosCaptureInto(tracks[t]);
     }
 
     // Pre-populate all 8 pattern slots in RAM on startup with clean defaults
@@ -726,7 +757,7 @@ void ResetTrackToDefault(int t) {
         tracks[t].tapeSmearRate = 0;
         tracks[t].tapeSmearSize = 40;
         tracks[t].tapeMix = 0;
-        tracks[t].tapeFX.reset();
+        g_trackTapeFX[t].reset();
     tracks[t].polyMode = 1;
     tracks[t].swing = 0;
     tracks[t].keyRoot = 0;
@@ -961,7 +992,7 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
     std::ofstream file(path);
     if (!file.is_open()) return false;
 
-    file << "SOUNDBOY_PAT 4\n";
+    file << "SOUNDBOY_PAT 5\n";
 
     // Temporarily dump global live tracks to RAM slot before writing
     for (int t = 0; t < 8; ++t) {
@@ -1013,11 +1044,15 @@ bool SavePattern(int patternIdx, int slot, const std::string& filename) {
         // Save 32 steps
                 for (int s = 0; s < 32; ++s) {
                     const Step& step = trk.steps[s];
-                    file << (step.note == -1 ? "-" : MidiToNote(step.note)) << "\n";
-                    file << step.velocity << "\n";
+                    // The pattern as programmed is what gets stored, so a file
+                    // saved with chaos running still reloads as the loop you
+                    // wrote rather than one bar of its mutations.
+                    const StepSource& src = trk.source[s];
+                    file << (src.note == -1 ? "-" : MidiToNote(src.note)) << "\n";
+                    file << (int)src.velocity << "\n";
                     file << "-" << "\n"; // Write standard dummy dash to protect format layout
-                    file << step.retrigger << "\n";
-                    file << step.microtiming << "\n";
+                    file << (int)src.retrigger << "\n";
+                    file << (int)src.microtiming << "\n";
 
                     // Popup details
                     file << step.condMask << "\n";
@@ -1044,7 +1079,7 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
 
     std::string magic;
     int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || (ver != 2 && ver != 3 && ver != 4)) return false;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver < 2 || ver > 5) return false;
 
     Pattern& pat = patterns[patternIdx];
     for (int t = 0; t < 8; ++t) {
@@ -1159,12 +1194,19 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
         if (trk.loopEnd < 1)        trk.loopEnd = 99;
     } // end of track (t) loop
 
+    // Pattern files store the pattern as programmed, so what we just read is
+    // the chaos source. Seed it before anything gets a chance to render.
+    for (int t = 0; t < 8; ++t) {
+        ChaosCaptureInto(pat.tracks[t]);
+    }
+
     // Force flush RAM tracks back to screen if we are loading into the currently active slot
     if (patternIdx == activePattern) {
         for (int t = 0; t < 8; ++t) {
             tracks[t] = pat.tracks[t];
         }
     }
+    g_chaosDirty.store(true);
 
     return true;
 }
@@ -1176,7 +1218,7 @@ bool SaveProject(int slot, const std::string& filename) {
     std::ofstream file(path);
     if (!file.is_open()) return false;
 
-    file << "SOUNDBOY_PRJ 4\n";
+    file << "SOUNDBOY_PRJ 5\n";
 
     // Sync live edits to current pattern slot
     for (int t = 0; t < 8; ++t) {
@@ -1198,6 +1240,10 @@ bool SaveProject(int slot, const std::string& filename) {
     file << globalFX.autoPanTime << "\n" << globalFX.autoPanFeedback << "\n" << globalFX.autoPanWidth << "\n" << globalFX.autoPanMix << "\n";
     file << globalKeyRoot << "\n";
     file << globalKeyLock << "\n";
+
+    // Generative chaos settings (format v5+)
+    file << g_chaos << "\n" << g_chaosLift << "\n" << g_chaosFill << "\n" << g_chaosSkip << "\n";
+    file << g_chaosRatchet << "\n" << g_chaosTime << "\n" << g_chaosRepeat << "\n" << g_chaosSeed << "\n";
 
     // Save 8 patterns
     for (int p = 0; p < 8; ++p) {
@@ -1245,11 +1291,14 @@ bool SaveProject(int slot, const std::string& filename) {
 
             for (int s = 0; s < 32; ++s) {
                             const Step& step = trk.steps[s];
-                            file << (step.note == -1 ? "-" : MidiToNote(step.note)) << "\n";
-                            file << step.velocity << "\n";
+                            // Store the pattern as programmed, not the bar of
+                            // chaos that happened to be on screen.
+                            const StepSource& src = trk.source[s];
+                            file << (src.note == -1 ? "-" : MidiToNote(src.note)) << "\n";
+                            file << (int)src.velocity << "\n";
                             file << "-" << "\n"; // Write standard dummy dash to protect format layout
-                            file << step.retrigger << "\n";
-                            file << step.microtiming << "\n";
+                            file << (int)src.retrigger << "\n";
+                            file << (int)src.microtiming << "\n";
 
                             // Popup details
                             file << step.condMask << "\n";
@@ -1277,7 +1326,7 @@ bool LoadProject(const std::string& filename) {
 
     std::string magic;
     int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || (ver != 2 && ver != 3 && ver != 4)) return false;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || ver < 2 || ver > 5) return false;
 
     // Load and automatically crunch the 16 Sample Pool slots in the background [2]
     for (int i = 0; i < 16; ++i) {
@@ -1311,6 +1360,26 @@ bool LoadProject(const std::string& filename) {
         globalKeyRoot = 0;
         globalKeyLock = 0;
     }
+
+    if (ver >= 5) {
+        SafeRead(file, g_chaos, 0);
+        SafeRead(file, g_chaosLift, 50);
+        SafeRead(file, g_chaosFill, 50);
+        SafeRead(file, g_chaosSkip, 50);
+        SafeRead(file, g_chaosRatchet, 30);
+        SafeRead(file, g_chaosTime, 30);
+        SafeRead(file, g_chaosRepeat, 0);
+        SafeRead(file, g_chaosSeed, 1u);
+        g_chaos        = std::clamp(g_chaos, 0, 99);
+        g_chaosLift    = std::clamp(g_chaosLift, 0, 99);
+        g_chaosFill    = std::clamp(g_chaosFill, 0, 99);
+        g_chaosSkip    = std::clamp(g_chaosSkip, 0, 99);
+        g_chaosRatchet = std::clamp(g_chaosRatchet, 0, 99);
+        g_chaosTime    = std::clamp(g_chaosTime, 0, 99);
+        g_chaosRepeat  = std::clamp(g_chaosRepeat, 0, 8);
+    }
+    // Transposition is a performance gesture, not part of the saved pattern.
+    g_globalTranspose = 0;
 
     for (int p = 0; p < 8; ++p) {
         Pattern& pat = patterns[p];
@@ -1423,6 +1492,9 @@ bool LoadProject(const std::string& filename) {
             if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
             if (trk.sampleLength < 1)   trk.sampleLength = 99;
             if (trk.loopEnd < 1)        trk.loopEnd = 99;
+            // What was just read is the pattern as programmed, so it is the
+            // chaos source.
+            ChaosCaptureInto(trk);
         } // end of track (t) loop
     } // end of pattern (p) loop
 
@@ -1430,10 +1502,15 @@ bool LoadProject(const std::string& filename) {
     for (int t = 0; t < 8; ++t) {
         tracks[t] = patterns[activePattern].tracks[t];
     }
+    g_chaosDirty.store(true);
 
     return true;
 }
 // Thread-safe memory swapper performs a pattern swap in RAM
+// Called from the audio callback on a queued pattern change. Track no longer
+// carries the tape delay line, so these sixteen copies are now a small fixed
+// memcpy; the only remaining heap-capable member is the four-character track
+// name, which stays inside the small-string buffer and never allocates.
 void SwitchPattern(int newPatternIndex) {
     if (newPatternIndex < 0 || newPatternIndex >= 8) return;
 
@@ -1445,8 +1522,11 @@ void SwitchPattern(int newPatternIndex) {
     // 2. Update pattern index
     activePattern = newPatternIndex;
 
-    // 3. Copy the target pattern slot's tracks back into global tracks[8]
+    // 3. Copy the target pattern slot's tracks back into global tracks[8].
+    // The source buffer travels inside Track, so the new pattern brings its own
+    // peace state with it and only needs a re-render.
     for (int t = 0; t < 8; ++t) {
         tracks[t] = patterns[activePattern].tracks[t];
     }
+    g_chaosDirty.store(true);
 }

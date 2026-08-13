@@ -7,6 +7,7 @@
 #include "boot_animation.h"
 #include "Common.hpp"
 #include "Globals.hpp"
+#include "Chaos.hpp"
 #include "UI_Draw.hpp"
 #include "UI_Screens.hpp"
 #include "Audio_Engine.hpp"
@@ -727,6 +728,7 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         if (stepPopupFocusY == 0) {
             if (popupEditChange != 0) {
                 step.retrigger = std::clamp(step.retrigger + popupEditChange, 0, 16);
+                ChaosSyncSource(activeTrackIdx, cursorStep);
             }
         }
         else if (stepPopupFocusY == 1) {
@@ -756,6 +758,7 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
         } else if (stepPopupFocusY == 1) {
             if (popupEditChange != 0) {
                 step.microtiming = std::clamp(step.microtiming + popupEditChange, -6, 6);
+                ChaosSyncSource(activeTrackIdx, cursorStep);
             }
         }
     }
@@ -865,6 +868,120 @@ static void HandleTrackTabInputs(int encoderTurn, bool encoderButton, bool isShi
     }
 }
 
+/// Handles input events inside the ALGO hub tab, where the note row doubles as
+/// a global transposition keyboard.
+static void HandleAlgoTabInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
+    // The note keys only transpose while this tab has the floor, so ordinary
+    // note entry and live play elsewhere are untouched.
+    if (!isShiftDown) {
+        for (int i = 0; i < NUM_NOTES; ++i) {
+            if (!IsKeyPressed(keyboardPiano[i].key)) continue;
+            int rel = i - globalKeyRoot;
+            while (rel >  6) rel -= 12; // always take the short way round
+            while (rel < -6) rel += 12;
+            g_globalTranspose = rel;
+            break;
+        }
+    }
+
+    // Unshifted arrows walk the grid, shifted ones edit, so moving about and
+    // changing a value never get confused for each other.
+    if (!isShiftDown) {
+        if (IsKeyPressed(KEY_UP)) {
+            if (algoRow <= 0) {
+                settingsHubFocus = 0; // off the top of the grid, back to the tabs
+                return;
+            }
+            algoRow--;
+        }
+        if (IsKeyPressed(KEY_DOWN) && algoRow < ALGO_ROWS - 1) algoRow++;
+
+        // The macro spans the whole top row, so sideways moves only apply to
+        // the two gridded rows, and the column is remembered while up there.
+        if (algoRow > 0) {
+            if (IsKeyPressed(KEY_LEFT)  && algoCol > 0)              algoCol--;
+            if (IsKeyPressed(KEY_RIGHT) && algoCol < ALGO_COLS - 1)  algoCol++;
+        }
+    }
+
+    // Both KEEP and ORIG close the macro first. That stops the generator before
+    // the buffers are swapped, so nothing can race the change, and it leaves the
+    // result standing still on the grid where you can see what you just did.
+    if (IsActionKeyPressed() && algoRow == 2) {
+        if (algoCol == 1) { ChaosReseed(); menuFeedback = "RESEEDED"; return; }
+        if (algoCol == 2) { g_globalTranspose = 0; menuFeedback = "TRANSPOSE CLEARED"; return; }
+        if (algoCol == 3) {
+            g_chaos = 0;
+            ChaosCaptureAll();   // the bar you are looking at becomes the pattern
+            menuFeedback = "MUTATION KEPT";
+            return;
+        }
+        if (algoCol == 4) {
+            g_chaos = 0;
+            ChaosRevertAll();    // hand back the pattern as programmed
+            menuFeedback = "ORIGINAL RESTORED";
+            return;
+        }
+    }
+
+    int editDirection = 0;
+    if (encoderTurn != 0) {
+        editDirection = (encoderTurn > 0) ? 1 : -1;
+    } else if (isShiftDown) {
+        static float algoEditTimer = 0.0f;
+        bool anyEditHeld = IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN) ||
+                           IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_RIGHT);
+        bool triggerEdit = false;
+        if (anyEditHeld) {
+            if (algoEditTimer == 0.0f) {
+                triggerEdit = true;
+                algoEditTimer += GetFrameTime();
+            } else {
+                algoEditTimer += GetFrameTime();
+                const float INITIAL_DELAY = 0.25f;
+                const float REPEAT_INTERVAL = 0.05f;
+                if (algoEditTimer >= INITIAL_DELAY) {
+                    triggerEdit = true;
+                    algoEditTimer -= REPEAT_INTERVAL;
+                }
+            }
+        } else {
+            algoEditTimer = 0.0f;
+        }
+
+        if (triggerEdit) {
+            if (IsKeyDown(KEY_LEFT))  editDirection = -1;
+            if (IsKeyDown(KEY_RIGHT)) editDirection = 1;
+            if (IsKeyDown(KEY_DOWN))  editDirection = -10;
+            if (IsKeyDown(KEY_UP))    editDirection = 10;
+        }
+    }
+
+    if (editDirection == 0) return;
+
+    int step1 = (editDirection > 0) ? 1 : -1; // cells that count rather than scale
+    int prevChaos = g_chaos;
+
+    if (algoRow == 0) {
+        g_chaos = std::clamp(g_chaos + editDirection, 0, 99);
+    } else if (algoRow == 1) {
+        int* weights[ALGO_COLS] = {
+            &g_chaosLift, &g_chaosFill, &g_chaosSkip, &g_chaosRatchet, &g_chaosTime
+        };
+        int& w = *weights[std::clamp(algoCol, 0, ALGO_COLS - 1)];
+        w = std::clamp(w + editDirection, 0, 99);
+    } else {
+        switch (algoCol) {
+            case 0: g_chaosRepeat = std::clamp(g_chaosRepeat + step1, 0, 8); break;
+            // Turning the seed walks through variations one at a time.
+            case 1: g_chaosSeed = (unsigned int)((int)g_chaosSeed + step1); break;
+            case 2: g_globalTranspose = std::clamp(g_globalTranspose + step1, -24, 24); return;
+            default: return; // CAP and REV are action cells, not values
+        }
+    }
+    ChaosNotifyParamChanged(prevChaos);
+}
+
 static void HandleSettingsHubInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
     if (IsKeyPressed(KEY_ESCAPE)) {
         settingsHubOpen = false;
@@ -893,6 +1010,9 @@ static void HandleSettingsHubInputs(int encoderTurn, bool encoderButton, bool is
                     stepPopupFocusY = 0;
                 } else if (settingsHubKind == 0 && settingsHubTab == 1) {
                     stepUtilFocus = 0;
+                } else if (settingsHubKind == 1 && settingsHubTab == 1) {
+                    algoRow = 0;
+                    algoCol = 0;
                 }
             }
         }
@@ -906,9 +1026,7 @@ static void HandleSettingsHubInputs(int encoderTurn, bool encoderButton, bool is
         settingsHubSeqTab = settingsHubTab;
     } else {
         if (settingsHubTab == 0) HandlePerformancePopupInputs(encoderTurn, encoderButton, isShiftDown);
-        else if (!isShiftDown && IsKeyPressed(KEY_UP)) {
-            settingsHubFocus = 0;
-        }
+        else                     HandleAlgoTabInputs(encoderTurn, encoderButton, isShiftDown);
     }
 }
 
@@ -1682,6 +1800,7 @@ int main() {
                 step.retrigger = 0;
                 step.microtiming = 0;
                 step.params.reset();
+                ChaosSyncSource(selectedTrack, cursorStep);
                 menuFeedback = "STEP CLEARED";
             }
         }
@@ -1728,6 +1847,7 @@ int main() {
                                         step.retrigger = 0;
                                         step.microtiming = 0;
                                         step.params.reset();
+                                        ChaosSyncSource(selectedTrack, s);
                                     }
                                     menuFeedback = "TRACK TRIGS CLEARED";
                                 } else {
@@ -1851,6 +1971,7 @@ int main() {
                     step.retrigger = 0;
                     step.microtiming = 0;
                     step.params.reset();
+                    ChaosSyncSource(selectedTrack, s);
                 }
                 menuFeedback = (activePage == 0) ? "PAGE 1 TRIGS RESET" : "PAGE 2 TRIGS RESET";
                     } else {
@@ -1887,6 +2008,7 @@ int main() {
             if (hasCopiedStep) {
                 int activeTrack = (currentScreen == SCREEN_SEQ_5_8) ? cursorTrack + 4 : cursorTrack;
                 tracks[activeTrack].steps[cursorStep] = copiedStep;
+                ChaosSyncSource(activeTrack, cursorStep);
                 menuFeedback = "STEP PASTED";
             }
         }
@@ -1965,6 +2087,7 @@ int main() {
                            int midiNote = SnapMidiToScale(NoteToMidi(noteStr), ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
                            tracks[targetTrack].steps[cursorStep].note = (int8_t)midiNote;
                            tracks[targetTrack].steps[cursorStep].velocity = 3;
+                           ChaosSyncSource(targetTrack, cursorStep);
                        }
                    }
                }
@@ -2057,6 +2180,9 @@ int main() {
                             }
 
                             if (step.note != noteBefore || step.velocity != velBefore) {
+                                // Mirror into the chaos source so the edit
+                                // survives the next regeneration.
+                                ChaosSyncSource(activeTrack, cursorStep);
                                 UiNoteParamEdit(CurrentFocusId());
                             }
                         }

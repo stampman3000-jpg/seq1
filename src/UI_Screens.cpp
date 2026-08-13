@@ -1542,6 +1542,8 @@ void DrawDiagnosticsScreen(const UIState& state) {
     DrawVDivider(82);
     // Right column divider
     DrawVDivider(166);
+    // Audio health column divider
+    DrawVDivider(216);
 
     // --- COLUMN 1: SYSTEM HEALTH METRICS ---
     Draw5x5String("DIAGNOSTICS", 4, 1, UI_LABEL);
@@ -1612,6 +1614,40 @@ void DrawDiagnosticsScreen(const UIState& state) {
             }
         }
     }
+
+    // --- COLUMN 4: AUDIO HEALTH ---
+    // Level trouble and CPU trouble sound alike through a speaker, so both are
+    // shown together: if OUT is pinned and LIM is working, it is a gain problem,
+    // and if PK runs past 100 with XR climbing, it is a CPU problem.
+    Draw5x5String("AUDIO", 220, 1, UI_LABEL);
+
+    char pkBuf[24];
+    snprintf(pkBuf, sizeof(pkBuf), "PK %3d%%", (int)g_audioCpuPeak);
+    Draw3x5String(pkBuf, 220, 12, g_audioCpuPeak >= 90.0f ? UI_ACTIVE : UI_VALUE);
+
+    char xrBuf[24];
+    snprintf(xrBuf, sizeof(xrBuf), "XR %u", g_audioDeadlineMisses);
+    Draw3x5String(xrBuf, 220, 21, g_audioDeadlineMisses > 0 ? UI_ACTIVE : UI_CHROME);
+
+    char outBuf[24];
+    snprintf(outBuf, sizeof(outBuf), "OUT%4d", (int)(g_masterPeak * 100.0f));
+    Draw3x5String(outBuf, 220, 30, g_masterPeak >= 0.99f ? UI_ACTIVE : UI_VALUE);
+
+    char limBuf[24];
+    snprintf(limBuf, sizeof(limBuf), "LIM%4d", (int)(g_limiterReduction * 100.0f));
+    Draw3x5String(limBuf, 220, 39, g_limiterReduction > 0.01f ? UI_ACTIVE : UI_CHROME);
+
+    char voxBuf[24];
+    snprintf(voxBuf, sizeof(voxBuf), "VOX %2d", g_activeVoiceCount);
+    Draw3x5String(voxBuf, 220, 48, UI_VALUE);
+
+    // Horizontal bar for output level with the limiter threshold marked, so
+    // the relationship between level and gain reduction is readable at a glance.
+    int barX = 220, barY = 57, barW = 32, barH = 5;
+    DrawPixelRectLines(barX, barY, barW, barH, UI_CHROME);
+    int fill = (int)(std::min(g_masterPeak, 1.0f) * (barW - 2));
+    if (fill > 0) DrawRectangle(barX + 1, barY + 1, fill, barH - 2, UI_VALUE);
+    DrawPixelLine(barX + (int)(0.85f * (barW - 2)), barY, barX + (int)(0.85f * (barW - 2)), barY + barH - 1, UI_ACTIVE);
 }
 // --- STEP PROPERTIES EDITING POPUP BODY ---
 static void DrawStepPopup(const UIState& state) {
@@ -1838,10 +1874,68 @@ static void DrawSettingsHubChrome(int kind, int tab, bool tabsFocused) {
     DrawPixelLine(mx + 4, my + 11, mx + mw - 5, my + 11, UI_VALUE);
 }
 
-static void DrawAlgoPlaceholder() {
+static void DrawAlgoTab() {
     int mx = 38, my = 4;
-    Draw3x5String("ALGORITHMIC", mx + 68, my + 24, UI_LABEL);
-    Draw3x5String("COMING SOON", mx + 68, my + 36, UI_CHROME);
+    bool bodyFocused = (settingsHubOpen && settingsHubKind == 1 && settingsHubTab == 1 && settingsHubFocus == 1);
+    auto focused = [&](int row, int col) {
+        return bodyFocused && algoRow == row && (row == 0 || algoCol == col);
+    };
+    // Both gridded rows sit on the same column pitch, so up and down always
+    // lands on the cell directly above or below the one you were on.
+    auto colX = [&](int col) { return mx + 8 + col * 30; };
+
+    char buf[16];
+
+    // --- Row 0: the macro, with the funnel as its intensity pictogram ---
+    int row0Y = my + 15;
+    bool macroSel = focused(0, 0);
+    DrawSelectableLabel3x5("CHAOS", colX(0), row0Y, macroSel, UI_VALUE);
+
+    int lineY = row0Y + 2;
+    int lineX0 = colX(1) + 6;
+    int lineX1 = colX(4);
+    Color macroColor = macroSel ? UI_ACTIVE : UI_VALUE;
+    DrawPixelLine(lineX0, lineY, lineX1, lineY, macroSel ? UI_VALUE : UI_CHROME);
+    int cursorX = lineX0 + (std::clamp(g_chaos, 0, 99) * (lineX1 - lineX0)) / 99;
+    DrawRectangle(cursorX - 1, lineY - 2, 3, 5, macroColor);
+
+    snprintf(buf, sizeof(buf), "%2d", g_chaos);
+    Draw3x5String(buf, colX(4) + 8, row0Y, macroColor);
+
+    DrawTornadoIcon(mx + 158, my + 12, std::clamp(g_chaos, 0, 99), UI_VALUE, g_chaos > 0);
+
+    // --- Row 1: the behaviour weights, label over value ---
+    static const char* kWeightLabels[ALGO_COLS] = { "LIFT", "FILL", "SKIP", "RTRG", "TIME" };
+    const int weightVals[ALGO_COLS] = { g_chaosLift, g_chaosFill, g_chaosSkip, g_chaosRatchet, g_chaosTime };
+
+    for (int c = 0; c < ALGO_COLS; ++c) {
+        bool sel = focused(1, c);
+        DrawSelectableLabel3x5(kWeightLabels[c], colX(c), my + 26, sel, UI_LABEL);
+        snprintf(buf, sizeof(buf), "%2d", weightVals[c]);
+        Draw3x5String(buf, colX(c) + 4, my + 34, sel ? UI_ACTIVE : UI_VALUE);
+    }
+
+    // --- Row 2: phrase length, variation, transpose, and the two actions ---
+    static const char* kUtilLabels[ALGO_COLS] = { "RPT", "SED", "TRP", "KEEP", "ORIG" };
+    int row2Y = my + 46;
+
+    for (int c = 0; c < ALGO_COLS; ++c) {
+        bool sel = focused(2, c);
+        DrawSelectableLabel3x5(kUtilLabels[c], colX(c), row2Y, sel, UI_LABEL);
+
+        buf[0] = '\0';
+        Color valColor = sel ? UI_ACTIVE : UI_VALUE;
+        if (c == 0) {
+            if (g_chaosRepeat <= 0) snprintf(buf, sizeof(buf), "--"); // never repeats
+            else                    snprintf(buf, sizeof(buf), "%d", g_chaosRepeat);
+        } else if (c == 1) {
+            snprintf(buf, sizeof(buf), "%03u", g_chaosSeed % 1000u);
+        } else if (c == 2) {
+            snprintf(buf, sizeof(buf), "%+d", g_globalTranspose);
+            if (!sel) valColor = (g_globalTranspose != 0) ? UI_ACTIVE : UI_CHROME;
+        }
+        if (buf[0] != '\0') Draw3x5String(buf, colX(c) + 14, row2Y, valColor);
+    }
 }
 
 void DrawSettingsHub(const UIState& state) {
@@ -1852,6 +1946,6 @@ void DrawSettingsHub(const UIState& state) {
         else                     DrawMicrotimingPopup(state);
     } else {
         if (settingsHubTab == 0) DrawPerformancePopup(state);
-        else                     DrawAlgoPlaceholder();
+        else                     DrawAlgoTab();
     }
 }

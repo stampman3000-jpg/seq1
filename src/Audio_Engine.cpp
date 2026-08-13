@@ -3,9 +3,38 @@
 #include "Master_FX.hpp"
 #include "Common.hpp"
 #include "Globals.hpp"
+#include "Chaos.hpp"
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <cstdlib> // std::abs, rand
+#if defined(__SSE2__) || defined(_M_X64)
+#include <pmmintrin.h>
+#endif
+
+// Denormals are the numbers that appear when a feedback tail decays past the
+// smallest normal float. Nothing here ever fully reaches zero on its own, so
+// the reverb, delay and tape buffers all settle into that range and stay
+// there, and on some CPUs every operation on one costs orders of magnitude
+// more than on a normal float. Flushing them to zero is inaudible.
+// The mode is a per-thread register setting, so it has to be armed from inside
+// the audio thread rather than at startup.
+static inline void EnableFlushToZero() {
+    static thread_local bool s_armed = false;
+    if (s_armed) return;
+    s_armed = true;
+#if defined(__SSE2__) || defined(_M_X64)
+    _mm_setcsr(_mm_getcsr() | 0x8040u); // FTZ | DAZ
+#elif defined(__aarch64__)
+    uint64_t fpcr;
+    __asm__ __volatile__("mrs %0, fpcr" : "=r"(fpcr));
+    __asm__ __volatile__("msr fpcr, %0" : : "r"(fpcr | (1ULL << 24))); // FZ
+#elif defined(__arm__)
+    uint32_t fpscr;
+    __asm__ __volatile__("vmrs %0, fpscr" : "=r"(fpscr));
+    __asm__ __volatile__("vmsr fpscr, %0" : : "r"(fpscr | (1u << 24))); // FZ
+#endif
+}
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "../miniaudio.h"
@@ -295,6 +324,11 @@ struct SynthVoice {
     enum FilterEnvStage { FLT_IDLE, FLT_ATTACK, FLT_DECAY, FLT_SUSTAIN, FLT_RELEASE } filterStage = FLT_IDLE;
     uint32_t filterUpdateCounter = 0;
 
+    // Coarse/fine interval ratios, refreshed with the rest of the block-rate
+    // parameters so the per-sample path is free of powf.
+    float pitchRatio1 = 1.0f;
+    float pitchRatio2 = 1.0f;
+
     // Voice Origin Tracker (Isolates live play from sequencer gate choking)
     bool triggeredBySequencer = false;
 
@@ -360,6 +394,13 @@ struct SynthVoice {
             }
 
             // --- NORMAL DETACHED TRIGGER ---
+            // Retriggering a voice that is still sounding must not slam its
+            // state to zero. Every zeroed variable below is a step change in
+            // the output, and ratchets and voice stealing hit this path
+            // constantly, so the clicks pile up into a continuous crunch.
+            // Re-enter attack from wherever the envelope already is instead.
+            bool wasSounding = active && (stage1 != ENV1_IDLE);
+
             if (stage1 == ENV1_IDLE || !active) {
                 currentFreq = targetFreq; // Start glide from target pitch if triggering from silence
             }
@@ -367,9 +408,11 @@ struct SynthVoice {
             active = true;
             stage1 = ENV1_ATTACK;
             stage2 = ENV2_ATTACK;
-            lastModOutput = 0.0f; // Flush feedback buffer on note trigger
-            envLevel1 = 0.0f;
-            envLevel2 = 0.0f;
+            if (!wasSounding) {
+                lastModOutput = 0.0f; // Flush feedback buffer on note trigger
+                envLevel1 = 0.0f;
+                envLevel2 = 0.0f;
+            }
             choking = false;     // Reset choke flags so note plays cleanly
             chokeVolume = 1.0f;
 
@@ -394,28 +437,37 @@ struct SynthVoice {
 
         // Initialize Noise Generator AHD Envelope
         noiseStage = NOISE_ATTACK;
-        noiseEnvLevel = 0.0f;
         noiseHoldCounter = 0;
+        if (!wasSounding) noiseEnvLevel = 0.0f;
 
         // Initialize Filter State and Envelope
         filterStage = FLT_ATTACK;
         filterEnvLevel = 0.0f;
         filterUpdateCounter = 9999; // Force instant coefficient calculation
-        filter.reset();
+        // s1 and s2 hold the filter's stored energy. Clearing them on a voice
+        // that is still ringing is the loudest click of the lot, especially
+        // with resonance up.
+        if (!wasSounding) filter.reset();
 
-        // Reset smooth state flags to trigger instant snapping on first process frame
-        smoothCutoff = -1.0f;
-        smoothMorph1 = -1.0f;
-        smoothMorph2 = -1.0f;
-        smoothVol1 = -1.0f;
-        smoothVol1Raw = -1.0f;
-        smoothVol2 = -1.0f;
-        
+        // Reset smooth state flags to trigger instant snapping on first process
+        // frame. A sounding voice already has valid smoothed values, so let it
+        // glide to the new ones rather than jumping.
+        if (!wasSounding) {
+            smoothCutoff = -1.0f;
+            smoothMorph1 = -1.0f;
+            smoothMorph2 = -1.0f;
+            smoothVol1 = -1.0f;
+            smoothVol1Raw = -1.0f;
+            smoothVol2 = -1.0f;
+        }
+
         // Reset analog emulation filters and drifts on note trigger
         osc1Drift = 0.0f;
         osc2Drift = 0.0f;
-        osc1LPState = 0.0f;
-        osc2LPState = 0.0f;
+        if (!wasSounding) {
+            osc1LPState = 0.0f;
+            osc2LPState = 0.0f;
+        }
         
         // Seed voice-local random generator uniquely based on trigger properties
         randomSeed = 0x12345678u + (uint32_t)(targetFreq * 100.0f);
@@ -468,40 +520,51 @@ struct SynthVoice {
                 return x * x;
             }
             return 0.0f;
-        }    // Process a single wave slice dynamically (expects normalized phase in [0, 1))
+        }    static inline float WaveTri(float normPhase) {
+        if (normPhase < 0.25f)      return normPhase * 4.0f;
+        else if (normPhase < 0.75f) return 2.0f - (normPhase * 4.0f);
+        else                        return (normPhase * 4.0f) - 4.0f;
+    }
+
+    // Band-limit the Saw wave (step of +2.0 at wrap point)
+    static inline float WaveSaw(float normPhase, float dt) {
+        return (1.0f - (normPhase * 2.0f)) + blep(normPhase, dt);
+    }
+
+    // Band-limit the Square wave (step of +1.0 at 0.0, and -1.0 at 0.5)
+    static inline float WaveSqr(float normPhase, float dt) {
+        float naiveSqr = (normPhase < 0.5f) ? 0.5f : -0.5f;
+        float phaseSquare2 = normPhase + 0.5f;
+        if (phaseSquare2 >= 1.0f) phaseSquare2 -= 1.0f; // Symmetrical wrap
+        return naiveSqr + 0.5f * blep(normPhase, dt) - 0.5f * blep(phaseSquare2, dt);
+    }
+
+    // Process a single wave slice dynamically (expects normalized phase in [0, 1))
+    // Only the two waveforms either side of the morph position are evaluated.
+    // This runs twice per voice per sample, so computing all four and discarding
+    // half of them was the largest avoidable cost in the engine: a sinf and up to
+    // four blep calls thrown away on every single sample.
     float ProcessWave(float normPhase, float dt, int morph) {
         // Wrap normalized phase to [0.0, 1.0)
         while (normPhase >= 1.0f) normPhase -= 1.0f;
         while (normPhase < 0.0f)  normPhase += 1.0f;
 
-        // Scale by 2*PI only at the moment of sine calculation
-        float sineSample = sinf(normPhase * 6.2831853f);
-        
-        float triSample = 0.0f;
-        if (normPhase < 0.25f)      triSample = normPhase * 4.0f;
-        else if (normPhase < 0.75f) triSample = 2.0f - (normPhase * 4.0f);
-        else                        triSample = (normPhase * 4.0f) - 4.0f;
-
-        // Band-limit the Saw wave (step of +2.0 at wrap point)
-        float naiveSaw = 1.0f - (normPhase * 2.0f);
-        float sawSample = naiveSaw + blep(normPhase, dt);
-
-        // Band-limit the Square wave (step of +1.0 at 0.0, and -1.0 at 0.5)
-        float naiveSqr = (normPhase < 0.5f) ? 0.5f : -0.5f;
-        float phaseSquare2 = normPhase + 0.5f;
-        if (phaseSquare2 >= 1.0f) phaseSquare2 -= 1.0f; // Symmetrical wrap
-        
-        float sqrSample = naiveSqr + 0.5f * blep(normPhase, dt) - 0.5f * blep(phaseSquare2, dt);
-
         if (morph < 33) {
+            // Scale by 2*PI only at the moment of sine calculation
             float t = morph / 33.0f;
-            return (1.0f - t) * sineSample + t * triSample;
+            float sineSample = sinf(normPhase * 6.2831853f);
+            if (t <= 0.0f) return sineSample;
+            return (1.0f - t) * sineSample + t * WaveTri(normPhase);
         } else if (morph < 66) {
             float t = (morph - 33) / 33.0f;
-            return (1.0f - t) * triSample + t * sawSample;
+            float triSample = WaveTri(normPhase);
+            if (t <= 0.0f) return triSample;
+            return (1.0f - t) * triSample + t * WaveSaw(normPhase, dt);
         } else {
             float t = (morph - 66) / 33.0f;
-            return (1.0f - t) * sawSample + t * sqrSample;
+            float sawSample = WaveSaw(normPhase, dt);
+            if (t <= 0.0f) return sawSample;
+            return (1.0f - t) * sawSample + t * WaveSqr(normPhase, dt);
         }
     }
 
@@ -790,6 +853,19 @@ struct SynthVoice {
 
             // Recalculate SVF coefficients
             filter.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
+
+            // --- BLOCK-RATE PITCH RATIOS ---
+            // These are pure interval ratios: coarse, fine and the pitch mod
+            // offset are all resolved in this same block, so nothing about them
+            // changes between samples. Running powf per sample per oscillator
+            // was buying no extra accuracy, only cost.
+            float bFine1 = std::clamp(GetParam(sp.fine, trk.fine) + modFine1Offset, -99.0f, 99.0f);
+            float bSemi1 = GetParam(sp.coarse, trk.coarse) + (bFine1 / 100.0f);
+            pitchRatio1 = powf(2.0f, (bSemi1 + modPitchOffset) / 12.0f);
+
+            float bFine2 = std::clamp(GetParam(sp.fine2, trk.fine2) + modFine2Offset, -99.0f, 99.0f);
+            float bSemi2 = GetParam(sp.coarse2, trk.coarse2) + (bFine2 / 100.0f);
+            pitchRatio2 = powf(2.0f, bSemi2 / 12.0f);
         }
 
         // --- 7. FREQUENCY CALCULATIONS & PORTAMENTO ---
@@ -807,9 +883,9 @@ struct SynthVoice {
                     currentFreq = baseFreq; // Snap instantly if glide is off
                 }
 
-                float fine1Mod = std::clamp(GetParam(sp.fine, trk.fine) + modFine1Offset, -99.0f, 99.0f);
-                float semitoneOffset1 = GetParam(sp.coarse, trk.coarse) + (fine1Mod / 100.0f);
-                float freq1 = currentFreq * pitchModFactor * powf(2.0f, (semitoneOffset1 + modPitchOffset) / 12.0f); // Modulated by pitch envelope
+                // currentFreq glides and pitchModFactor decays per sample; the
+                // interval ratio is block-rate and cached above.
+                float freq1 = currentFreq * pitchModFactor * pitchRatio1;
 
         float finalSample = 0.0f;
 
@@ -817,9 +893,7 @@ struct SynthVoice {
             // ==========================================
             // ALGORITHM A: DUAL-OSCILLATOR MIX (PARALLEL)
             // ==========================================
-            float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFine2Offset, -99.0f, 99.0f);
-            float semitoneOffset2 = GetParam(sp.coarse2, trk.coarse2) + (fine2Mod / 100.0f);
-            float freq2 = baseFreq * pitchModFactor * powf(2.0f, semitoneOffset2 / 12.0f);
+            float freq2 = baseFreq * pitchModFactor * pitchRatio2;
 
             float freq1AnalogScale = 1.0f;
             float freq2AnalogScale = 1.0f;
@@ -925,6 +999,12 @@ static int g_currentTick = -1; // -1 allows step 0 to trigger instantly on play
 // Keep track of bar loops per track to evaluate trigger conditions (e.g., 1:2)
 static int g_trackBarCount[8] = { 0 };
 
+// Trig conditions want a bar number that restarts with the pattern loop, but
+// the generator wants one that keeps climbing, otherwise chaos would replay the
+// same handful of bars forever instead of evolving. Reset only on transport
+// stop and pattern change, so a take is still reproducible from the top.
+static unsigned int g_chaosBar[8] = { 0 };
+
 // Sample-accurate retrigger state per track
 struct ActiveRetrig {
     int midiNote = -1;
@@ -963,9 +1043,32 @@ static bool EvaluateCondition(const std::string& cond, int trackIdx) {
 // REAL-TIME AUDIO DSP CALLBACK (24 PPQN Tick Clock with Synth & Sampler)
 // ==========================================================================
 void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    EnableFlushToZero();
     auto startTime = std::chrono::high_resolution_clock::now(); // Record start time
     float* pOutputF = (float*)pOutput;
     ma_uint32 samplesProcessed = 0;
+
+    // --- MASTER LIMITER STATE ---
+    // Threshold sits where the old soft clipper did so the character is
+    // unchanged, but the knee now drives a smoothed gain rather than the
+    // sample values themselves.
+    constexpr float kLimitThreshold = 0.85f;
+    static float s_limiterGain = 1.0f;
+    static double s_limiterCoefRate = 0.0;
+    static float kLimitAttackStore = 0.0f;
+    static float kLimitReleaseStore = 0.0f;
+    if (s_limiterCoefRate != g_sampleRate) {
+        s_limiterCoefRate = g_sampleRate;
+        // One-pole coefficients for a 1 ms grab and an 80 ms recovery.
+        kLimitAttackStore  = 1.0f - expf(-1.0f / (0.001f * (float)g_sampleRate));
+        kLimitReleaseStore = 1.0f - expf(-1.0f / (0.080f * (float)g_sampleRate));
+    }
+    const float kLimitAttack  = kLimitAttackStore;
+    const float kLimitRelease = kLimitReleaseStore;
+
+    float blockMasterPeak = 0.0f;
+    float blockMinGain = 1.0f;
+    int blockActiveVoices = 0;
 
     static int s_finalMem[8]  = {50};
     static int s_finalHds[8]  = {1};
@@ -1150,10 +1253,20 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 }
 
                 if (tickTriggered) {
+                    // A knob turn should be audible now rather than at the next
+                    // bar, so a dirty flag re-renders every track on this tick.
+                    bool chaosDirty = g_chaosDirty.exchange(false);
+
                     for (int t = 0; t < 8; ++t) {
                         int nextTick = (tracks[t].localTick + 1) % (tracks[t].stepLength * 6);
                         if (nextTick == 0 && tracks[t].localTick >= 0) {
                             g_trackBarCount[t]++;
+                            g_chaosBar[t]++;
+                            // Rendering exactly on the wrap means no step is
+                            // rewritten while the scan below is mid-bar on it.
+                            ChaosRenderTrack(t, g_chaosBar[t]);
+                        } else if (chaosDirty) {
+                            ChaosRenderTrack(t, g_chaosBar[t]);
                         }
                         tracks[t].localTick = nextTick;
                     }
@@ -1165,11 +1278,18 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                             for (int t = 0; t < 8; ++t) {
                                 tracks[t].localTick = -1;
                                 g_trackBarCount[t] = 0;
+                                g_chaosBar[t] = 0; // a new pattern starts its own evolution
                             }
                         } else if (masterLength > 0) {
                             for (int t = 0; t < 8; ++t) {
                                 tracks[t].localTick = -1;
                                 g_trackBarCount[t] = 0;
+                                // The master loop force-restarts every track, so
+                                // it is a bar boundary too. Counting it here is
+                                // what puts a fresh variation at the top of the
+                                // pattern rather than only halfway through it.
+                                g_chaosBar[t]++;
+                                ChaosRenderTrack(t, g_chaosBar[t]);
                             }
                         }
                     }
@@ -1203,6 +1323,12 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
 
                                     if (maskActive) {
                                         int midiNoteRoot = step.note; // Directly read the raw integer (NoteToMidi call removed!)
+                                        // Tracks pinned to their own key ignore the
+                                        // global transpose, so drums stay put while
+                                        // the melodic parts move.
+                                        if (midiNoteRoot >= 0 && tracks[t].keyScope == 0 && g_globalTranspose != 0) {
+                                            midiNoteRoot = std::clamp(midiNoteRoot + g_globalTranspose, 0, 127);
+                                        }
                                         if (midiNoteRoot >= 0) {
                                             // Fixed stack buffer: no heap in audio callback
                                             int midiNotesToTrigger[4];
@@ -1348,6 +1474,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 for (int t = 0; t < 8; ++t) {
                     tracks[t].localTick = -1;
                     g_trackBarCount[t] = 0;
+                    g_chaosBar[t] = 0;
                 }
             }
 
@@ -1356,6 +1483,9 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
             float satSendBusMono = 0.0f;
             float reverbSendBusMono = 0.0f;
             float autoPanSendBusMono = 0.0f;
+
+            int soundingTracks = 0;
+            int activeVoices = 0;
 
             for (int t = 0; t < 8; ++t) {
                 if (tracks[t].muted) {
@@ -1367,20 +1497,27 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 }
 
                 float trackSampleSum = 0.0f;
+                int trackVoicesSounding = 0;
                 for (int v = 0; v < 4; ++v) {
                     if (tracks[t].engineType == ENGINE_SYNTH) {
-                        trackSampleSum += g_trackVoices[t][v].Process(t);
+                        SynthVoice& vo = g_trackVoices[t][v];
+                        if (vo.active && vo.stage1 != SynthVoice::ENV1_IDLE) trackVoicesSounding++;
+                        trackSampleSum += vo.Process(t);
                     } else {
-                        trackSampleSum += g_samplerVoices[t][v].Process(t);
+                        SamplerVoice& vo = g_samplerVoices[t][v];
+                        if (vo.active && vo.stage != SamplerVoice::ENV_IDLE) trackVoicesSounding++;
+                        trackSampleSum += vo.Process(t);
                     }
                 }
+                activeVoices += trackVoicesSounding;
+                if (trackVoicesSounding > 0) soundingTracks++;
                 
                 float normalTrackSum = trackSampleSum * 0.25f;
                 int currentStepIdx = (tracks[t].localTick / 6) % tracks[t].stepLength;
                 if (currentStepIdx < 0) currentStepIdx = 0;
                 const Step& step = tracks[t].steps[currentStepIdx];
 
-                float processedSum = tracks[t].tapeFX.process(
+                float processedSum = g_trackTapeFX[t].process(
                                 normalTrackSum,
                                 s_finalMem[t], s_finalHds[t], s_finalSpr[t], s_finalSpd[t], s_finalTet[t],
                                 s_finalDrf[t], s_finalDrt[t], s_finalFdb[t], s_finalFsp[t], s_finalFsc[t],
@@ -1407,9 +1544,20 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 autoPanSendBusMono += processedSum * panSendNorm;
             }
 
-            // Replaced the punishing /16.0f division (ghost track attenuation)
-                        // with a standard master headroom scaling factor (0.35f ~ -9dB headroom)
-                        const float kMasterScale = 0.35f;
+            // --- MASTER HEADROOM ---
+                        // A fixed 0.35 was fine for one track and hopeless for eight:
+                        // the sum grew with track count until the limiter was pinned
+                        // permanently, which is exactly the state chaos puts you in.
+                        // Scaling by the square root of the number of tracks actually
+                        // sounding keeps the perceived level roughly constant as
+                        // density rises, and leaves a solo track exactly where it was.
+                        constexpr float kMasterScaleBase = 0.35f;
+                        static float s_masterScale = kMasterScaleBase;
+                        float targetMasterScale = kMasterScaleBase / sqrtf((float)std::max(1, soundingTracks));
+                        // Roughly 100 ms, slow enough that the level change is not
+                        // heard as pumping when a part drops in or out.
+                        s_masterScale += 0.00023f * (targetMasterScale - s_masterScale);
+                        const float kMasterScale = s_masterScale;
 
                         float masterL = masterDryMono * kMasterScale;
                         float masterR = masterDryMono * kMasterScale;
@@ -1450,61 +1598,74 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 }
             }
 
+            // These four run as sends: mixNorm is deliberately 1.0 so process()
+            // returns pure wet, which is then scaled by the global mix below.
+            // That means their internal "mix <= 0" early-outs can never fire, so
+            // all four used to run full DSP even with every mix at zero. The
+            // decision has to be made here instead.
+            float globalRevMix = std::clamp(((float)globalFX.reverbMix / 99.0f) + revMixMod, 0.0f, 1.0f);
             float reverbWetL = 0.0f;
             float reverbWetR = 0.0f;
-            g_masterReverb.process(
-                reverbSendL, reverbSendR, reverbWetL, reverbWetR,
-                (float)globalFX.reverbDecay / 99.0f,
-                (float)globalFX.reverbSize / 99.0f,
-                (float)globalFX.reverbPredelay / 99.0f,
-                1.0f,
-                (float)g_sampleRate
-            );
-            float globalRevMix = std::clamp(((float)globalFX.reverbMix / 99.0f) + revMixMod, 0.0f, 1.0f);
-            reverbWetL *= globalRevMix;
-            reverbWetR *= globalRevMix;
+            if (globalRevMix > 0.0f) {
+                g_masterReverb.process(
+                    reverbSendL, reverbSendR, reverbWetL, reverbWetR,
+                    (float)globalFX.reverbDecay / 99.0f,
+                    (float)globalFX.reverbSize / 99.0f,
+                    (float)globalFX.reverbPredelay / 99.0f,
+                    1.0f,
+                    (float)g_sampleRate
+                );
+                reverbWetL *= globalRevMix;
+                reverbWetR *= globalRevMix;
+            }
 
+            float globalDelayMixNorm = std::clamp(((float)globalFX.delayMix / 99.0f) + delMixMod, 0.0f, 1.0f);
             float delayWetL = 0.0f;
             float delayWetR = 0.0f;
-            g_masterDelay.process(
-                delaySendL, delaySendR, delayWetL, delayWetR,
-                (float)globalFX.delayTime / 99.0f,
-                (float)globalFX.delayFeedback / 99.0f,
-                globalFX.delayPingPong,
-                1.0f,
-                (float)g_sampleRate
-            );
-            float globalDelayMixNorm = std::clamp(((float)globalFX.delayMix / 99.0f) + delMixMod, 0.0f, 1.0f);
-            delayWetL *= globalDelayMixNorm;
-            delayWetR *= globalDelayMixNorm;
+            if (globalDelayMixNorm > 0.0f) {
+                g_masterDelay.process(
+                    delaySendL, delaySendR, delayWetL, delayWetR,
+                    (float)globalFX.delayTime / 99.0f,
+                    (float)globalFX.delayFeedback / 99.0f,
+                    globalFX.delayPingPong,
+                    1.0f,
+                    (float)g_sampleRate
+                );
+                delayWetL *= globalDelayMixNorm;
+                delayWetR *= globalDelayMixNorm;
+            }
 
+            float globalSatMixNorm = std::clamp(((float)globalFX.satMix / 99.0f) + satMixMod, 0.0f, 1.0f);
             float satWetL = 0.0f;
             float satWetR = 0.0f;
-            g_masterCompressor.process(
-                satSendL, satSendR, satWetL, satWetR,
-                (float)globalFX.satLevel / 99.0f,
-                (float)globalFX.satSymmetry / 99.0f,
-                (float)globalFX.satOverdrive / 99.0f,
-                1.0f,
-                (float)g_sampleRate
-            );
-            float globalSatMixNorm = std::clamp(((float)globalFX.satMix / 99.0f) + satMixMod, 0.0f, 1.0f);
-            satWetL *= globalSatMixNorm;
-            satWetR *= globalSatMixNorm;
+            if (globalSatMixNorm > 0.0f) {
+                g_masterCompressor.process(
+                    satSendL, satSendR, satWetL, satWetR,
+                    (float)globalFX.satLevel / 99.0f,
+                    (float)globalFX.satSymmetry / 99.0f,
+                    (float)globalFX.satOverdrive / 99.0f,
+                    1.0f,
+                    (float)g_sampleRate
+                );
+                satWetL *= globalSatMixNorm;
+                satWetR *= globalSatMixNorm;
+            }
 
+            float globalPanMix = std::clamp(((float)globalFX.autoPanMix / 99.0f) + panMixMod, 0.0f, 1.0f);
             float panWetL = 0.0f;
             float panWetR = 0.0f;
-            g_masterTornado.process(
-                panSendL, panSendR, panWetL, panWetR,
-                (float)globalFX.autoPanTime / 99.0f,
-                (float)globalFX.autoPanFeedback / 99.0f,
-                (float)globalFX.autoPanWidth / 99.0f,
-                1.0f,
-                (float)g_sampleRate
-            );
-            float globalPanMix = std::clamp(((float)globalFX.autoPanMix / 99.0f) + panMixMod, 0.0f, 1.0f);
-            panWetL *= globalPanMix;
-            panWetR *= globalPanMix;
+            if (globalPanMix > 0.0f) {
+                g_masterTornado.process(
+                    panSendL, panSendR, panWetL, panWetR,
+                    (float)globalFX.autoPanTime / 99.0f,
+                    (float)globalFX.autoPanFeedback / 99.0f,
+                    (float)globalFX.autoPanWidth / 99.0f,
+                    1.0f,
+                    (float)g_sampleRate
+                );
+                panWetL *= globalPanMix;
+                panWetR *= globalPanMix;
+            }
 
             // --- MASTER MIX SUM ---
             float finalL = masterL + reverbWetL + delayWetL + satWetL + panWetL;
@@ -1556,35 +1717,81 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 outR = g_masterPerfFilterR.process(outR, perfFilterType);
             }
 
-            // Master Soft-Limiter: 100% transparent below 0.85f, soft-knee tanh compression up to 1.0f
-                        auto ApplyMasterLimit = [](float sample) -> float {
-                            float absSample = std::abs(sample);
-                            if (absSample < 0.85f) {
-                                return sample; // Fully linear & transparent below 0.85f
-                            }
-                            float excess = absSample - 0.85f;
-                            // Asymptotically approaches 1.0f (0.85f + 0.15f * 1.0f)
-                            float compressed = 0.85f + 0.15f * tanhf(excess / 0.15f);
-                            return (sample > 0.0f) ? compressed : -compressed;
-                        };
+            // --- MASTER LIMITER ---
+            // The old version applied the soft knee to each sample directly. A
+            // memoryless waveshaper is a distortion unit: the curve reshapes the
+            // waveform itself and generates harmonics that move with the signal,
+            // which is the grind heard as soon as the mix crosses the threshold.
+            // Here the same knee only decides how much gain to ask for; that gain
+            // is then smoothed with a fast attack and slow release and applied to
+            // both channels, so loud passages are turned down instead of reshaped.
+            float peak = std::max(std::abs(outL), std::abs(outR));
+            if (peak > blockMasterPeak) blockMasterPeak = peak;
+            if (activeVoices > blockActiveVoices) blockActiveVoices = activeVoices;
 
-                        pOutputF[2 * outIdx]     = ApplyMasterLimit(outL);
-                        pOutputF[2 * outIdx + 1] = ApplyMasterLimit(outR);
+            float targetGain = 1.0f;
+            if (peak > kLimitThreshold) {
+                float excess = peak - kLimitThreshold;
+                float knee = kLimitThreshold + (1.0f - kLimitThreshold) * tanhf(excess / (1.0f - kLimitThreshold));
+                targetGain = knee / peak;
+            }
+
+            // Clamp down immediately, recover gently, so the gain change itself
+            // stays well below audio rate and does not become modulation.
+            float coef = (targetGain < s_limiterGain) ? kLimitAttack : kLimitRelease;
+            s_limiterGain += coef * (targetGain - s_limiterGain);
+
+            outL *= s_limiterGain;
+            outR *= s_limiterGain;
+
+            if (s_limiterGain < blockMinGain) blockMinGain = s_limiterGain;
+
+            // Backstop for transients faster than the attack time.
+            pOutputF[2 * outIdx]     = std::clamp(outL, -1.0f, 1.0f);
+            pOutputF[2 * outIdx + 1] = std::clamp(outR, -1.0f, 1.0f);
 
         } // End of i (chunkSize) loop
 
         samplesProcessed += chunkSize;
     } // End of while loop
 
+    // --- LEVEL METERING ---
+    // Peak falls back slowly so a transient stays readable on a 30 Hz display.
+    if (blockMasterPeak > g_masterPeak) g_masterPeak = blockMasterPeak;
+    else g_masterPeak *= 0.92f;
+
+    float blockReduction = 1.0f - blockMinGain;
+    if (blockReduction > g_limiterReduction) g_limiterReduction = blockReduction;
+    else g_limiterReduction *= 0.92f;
+
+    g_activeVoiceCount = blockActiveVoices;
+
     auto endTime = std::chrono::high_resolution_clock::now();
     double elapsedSec = std::chrono::duration<double>(endTime - startTime).count();
     double expectedSec = (double)frameCount / g_sampleRate;
     float instantCpu = (float)((elapsedSec / expectedSec) * 100.0);
-    if (instantCpu > 100.0f) instantCpu = 100.0f;
 
+    // No clamp. The old meter capped at 100 and then smoothed over roughly
+    // twenty callbacks, so an overrun could never reach the display, which is
+    // why a broken-sounding mix still read as comfortable.
     static float s_smoothedCpu = 0.0f;
     s_smoothedCpu += 0.05f * (instantCpu - s_smoothedCpu);
     g_audioCpuLoad = s_smoothedCpu;
+
+    if (instantCpu >= 100.0f) g_audioDeadlineMisses++;
+
+    // Peak-hold, decayed once a second so it tracks the recent worst case.
+    static double s_peakWindowSec = 0.0;
+    static float s_peakAccum = 0.0f;
+    if (instantCpu > s_peakAccum) s_peakAccum = instantCpu;
+    s_peakWindowSec += expectedSec;
+    if (s_peakWindowSec >= 1.0) {
+        g_audioCpuPeak = s_peakAccum;
+        s_peakAccum = 0.0f;
+        s_peakWindowSec = 0.0;
+    } else if (s_peakAccum > g_audioCpuPeak) {
+        g_audioCpuPeak = s_peakAccum;
+    }
 }
 // ==========================================
 // PUBLIC CONTROLLER INTERFACE
