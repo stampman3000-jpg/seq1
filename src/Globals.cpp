@@ -924,7 +924,7 @@ bool LoadSoundPreset(int trackIdx, const std::string& filename) {
 
     Track& trk = tracks[trackIdx];
     int engineTypeVal = 0;
-    file >> engineTypeVal; trk.engineType = (EngineType)engineTypeVal;
+    file >> engineTypeVal; trk.engineType = SanitizeEngineType(engineTypeVal, trackIdx);
     file >> trk.algorithm;
     file >> trk.morph >> trk.coarse >> trk.fine >> trk.volume;
     file >> trk.attack >> trk.decay >> trk.sustain >> trk.release;
@@ -1088,7 +1088,7 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
     for (int t = 0; t < 8; ++t) {
         Track& trk = pat.tracks[t];
         int engineVal = 0;
-        file >> engineVal; trk.engineType = (EngineType)engineVal;
+        file >> engineVal; trk.engineType = SanitizeEngineType(engineVal, t);
         file >> trk.algorithm;
         file >> trk.morph >> trk.coarse >> trk.fine >> trk.volume;
         file >> trk.attack >> trk.decay >> trk.sustain >> trk.release;
@@ -1389,7 +1389,7 @@ bool LoadProject(const std::string& filename) {
         for (int t = 0; t < 8; ++t) {
             Track& trk = pat.tracks[t];
             int engineVal = 0;
-            file >> engineVal; trk.engineType = (EngineType)engineVal;
+            file >> engineVal; trk.engineType = SanitizeEngineType(engineVal, t);
             file >> trk.algorithm;
             file >> trk.morph >> trk.coarse >> trk.fine >> trk.volume;
             file >> trk.attack >> trk.decay >> trk.sustain >> trk.release;

@@ -328,7 +328,33 @@ void DrawSynthScreen(const UIState& state) {
         return stepVal;
     };
 
-    if (trk.engineType == ENGINE_SAMPLER) {
+    if (trk.engineType == ENGINE_USB) {
+        Draw5x5String("ENG: USB IN", 76, 1, UI_LABEL);
+
+        int displayStep = isAltHeld ? (state.cursorStep + 1) : (state.playhead + 1);
+        std::string stepStr = "STEP: " + std::to_string(displayStep);
+        Draw5x5String(stepStr.c_str(), 168, 1, UI_VALUE);
+
+        bool srcSelected = (state.synthGridRow == 1 && state.synthGridCol == 0);
+        bool lvlSelected = (state.synthGridRow == 1 && state.synthGridCol == 1);
+
+        bool lLvl = false;
+        int effLvl = GetEffectiveVal(sp.masterVolume, trk.masterVolume, 214, 54, lLvl);
+
+        DrawSelectableLabel("SRC", 8, 20, srcSelected, UI_LABEL);
+        const char* capName = GetUsbCaptureName(GetUsbCaptureIndex());
+        char nameBuf[29];
+        int n = 0;
+        for (; capName[n] != '\0' && n < 28; ++n) nameBuf[n] = capName[n];
+        nameBuf[n] = '\0';
+        Draw3x5String(nameBuf, 8, 32, srcSelected ? UI_ACTIVE : UI_VALUE);
+        if (GetUsbCaptureCount() <= 0) {
+            Draw3x5String("SILENCE", 8, 42, UI_CHROME);
+        }
+
+        DrawLevelBars(effLvl, 214, 18, 13, 28, lvlSelected, UI_VALUE);
+        DrawSelectableLabel3x5("LVL", 212, 54, lvlSelected, UI_LABEL);
+    } else if (trk.engineType == ENGINE_SAMPLER) {
         // --- SAMPLER ENGINE VIEWPORT ---
         bool lockedAlgo = false;
         int effAlgo = GetEffectiveVal(sp.algorithm, trk.algorithm, 15, 53, lockedAlgo);
@@ -374,8 +400,11 @@ void DrawSynthScreen(const UIState& state) {
                 }
 
         if (effAlgo == ALGO_SAMPLE) {
-            bool lockedPos = false;
-            int activeSlice = GetEffectiveVal(sp.grainPosition, trk.grainPosition, 160, 46, lockedPos) % divs;
+            const Step& step = trk.steps[state.cursorStep];
+            int activeSlice = 0;
+            if (divs > 1 && step.note >= 0) {
+                activeSlice = SliceIndexFromMidi(step.note, divs);
+            }
             float sliceWidth = 97.0f / divs;
             
             for (int i = 1; i < divs; ++i) {
@@ -595,11 +624,9 @@ void DrawSynthScreen(const UIState& state) {
         DrawSlider(fineVal, -99, 99, 132, 46, 21, (state.synthGridRow == 2 && state.synthGridCol == 4), true, UI_VALUE);
         DrawSelectableLabel("FINE", 134, 54, state.synthGridRow == 2 && state.synthGridCol == 4, UI_LABEL);
 
-        // Only restrict POS range to slice indexes if slicing is enabled and slice count is greater than 1
-        int maxPosVal = (effAlgo == ALGO_SAMPLE && divs > 1) ? (divs - 1) : 99;
-        posVal = std::clamp(posVal, 0, maxPosVal);
-
-        DrawSlider(posVal, 0, maxPosVal, 157, 46, 21, (state.synthGridRow == 2 && state.synthGridCol == 5), true, UI_VALUE);
+        // POS is always 0..99. In slice mode it is a start point inside the
+        // slice the MIDI note selected, not a slice picker.
+        DrawSlider(posVal, 0, 99, 157, 46, 21, (state.synthGridRow == 2 && state.synthGridCol == 5), true, UI_VALUE);
         DrawSelectableLabel("POS", 161, 54, state.synthGridRow == 2 && state.synthGridCol == 5, UI_LABEL);
 
         // Columns 9, 10, 11

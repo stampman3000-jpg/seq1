@@ -9,6 +9,9 @@
 #include <chrono>
 #include <filesystem>
 #include <cstdlib> // std::abs, rand
+#include <vector>
+#include <string>
+#include <cstring>
 #if defined(__SSE2__) || defined(_M_X64)
 #include <pmmintrin.h>
 #endif
@@ -42,7 +45,21 @@ static inline void EnableFlushToZero() {
 
 // Real-time Audio Device state
 static ma_device g_audioDevice;
+static ma_context g_maContext;
 static bool g_audioInitialized = false;
+static bool g_maContextInit = false;
+
+struct UsbCaptureDev {
+    ma_device_id id;
+    std::string name;
+};
+static std::vector<UsbCaptureDev> g_usbCaptures;
+static int g_usbCaptureIndex = 0;       // last successfully opened capture
+static int g_usbCaptureRequested = 0;   // UI-thread pending SRC
+static bool g_usbDuplexActive = false;  // current device is duplex
+static bool g_usbCaptureLive = false;   // duplex opened with a real capture device
+static EngineType g_usbPreviousEngine = ENGINE_SYNTH;
+static int g_usbPreviousAlgo = ALGO_PARALLEL;
 
 static const double g_sampleRate = 44100.0;
 
@@ -88,6 +105,85 @@ static float FastRandFloat(uint32_t& seed) {
 // Fast, inline parameter-lock resolver
 static inline int GetParam(int stepVal, int trackVal) {
     return (stepVal == -1) ? trackVal : stepVal;
+}
+
+static int SamplerSliceForNote(int trackIdx, int midiNote, const StepParams* sp) {
+    const Track& trk = tracks[trackIdx];
+    int algo = sp ? GetParam(sp->algorithm, trk.algorithm) : trk.algorithm;
+    int sdiv = sp ? GetParam(sp->sliceDivisions, trk.sliceDivisions) : trk.sliceDivisions;
+    if (trk.engineType == ENGINE_SAMPLER && algo == ALGO_SAMPLE && sdiv > 1)
+        return SliceIndexFromMidi(midiNote, sdiv);
+    return -1;
+}
+
+// Track-8 USB: always-on mixer channel. Envelope is stuck at 1; gated notes later.
+static SvfFilter g_usbFilter;
+static float g_usbSmoothCutoff = -1.0f;
+static float g_usbSmoothVol = -1.0f;
+static int g_usbFilterCounter = 0;
+static float g_usbModCutoff = 0.0f;
+static float g_usbModRes = 0.0f;
+static float g_usbModVol = 0.0f;
+
+static void ResetUsbFilter() {
+    g_usbFilter.reset();
+    g_usbSmoothCutoff = -1.0f;
+    g_usbSmoothVol = -1.0f;
+    g_usbFilterCounter = 0;
+}
+
+static float UsbProcess(int trackIdx, float inL, float inR) {
+    Track& trk = tracks[trackIdx];
+    int currentStepIdx = (trk.localTick / 6) % trk.stepLength;
+    if (currentStepIdx < 0) currentStepIdx = 0;
+    const StepParams& sp = trk.steps[currentStepIdx].params;
+
+    g_usbFilterCounter++;
+    if (g_usbFilterCounter >= 64) {
+        g_usbFilterCounter = 0;
+        g_usbModCutoff = 0.0f;
+        g_usbModRes = 0.0f;
+        g_usbModVol = 0.0f;
+        for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
+            const Track& srcTrk = tracks[srcTrkIdx];
+            for (int s = 0; s < 3; ++s) {
+                const ModSlot& m1 = srcTrk.lfo1Slots[s];
+                if (m1.destType == 1 && m1.destTrack == trackIdx) {
+                    float modVal = g_globalLFOValues[srcTrkIdx][0] * (m1.depth / 99.0f);
+                    if (m1.destParam == DEST_CUTOFF)         g_usbModCutoff += modVal * 99.0f;
+                    else if (m1.destParam == DEST_RESONANCE) g_usbModRes += modVal * 99.0f;
+                    else if (m1.destParam == DEST_VOLUME)    g_usbModVol += modVal * 99.0f;
+                }
+                const ModSlot& m2 = srcTrk.lfo2Slots[s];
+                if (m2.destType == 1 && m2.destTrack == trackIdx) {
+                    float modVal = g_globalLFOValues[srcTrkIdx][1] * (m2.depth / 99.0f);
+                    if (m2.destParam == DEST_CUTOFF)         g_usbModCutoff += modVal * 99.0f;
+                    else if (m2.destParam == DEST_RESONANCE) g_usbModRes += modVal * 99.0f;
+                    else if (m2.destParam == DEST_VOLUME)    g_usbModVol += modVal * 99.0f;
+                }
+            }
+        }
+
+        float targetCutoff = std::clamp(GetParam(sp.filterCutoff, trk.filterCutoff) + g_usbModCutoff, 0.0f, 99.0f);
+        if (g_usbSmoothCutoff < 0.0f) g_usbSmoothCutoff = targetCutoff;
+        else g_usbSmoothCutoff += (targetCutoff - g_usbSmoothCutoff) * 0.25f; // block-rate slew
+
+        float normCut = std::clamp(g_usbSmoothCutoff / 99.0f, 0.0f, 1.0f);
+        float finalCutoffHz = 15.0f + (normCut * normCut * normCut * normCut) * 15985.0f;
+        float resNorm = std::clamp(GetParam(sp.filterResonance, trk.filterResonance) + g_usbModRes, 0.0f, 99.0f) / 99.0f;
+        g_usbFilter.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
+    }
+
+    float mono = 0.5f * (inL + inR);
+    int fType = GetParam(sp.filterType, trk.filterType);
+    float filtered = g_usbFilter.process(mono, fType);
+
+    float rawVol = std::clamp(GetParam(sp.masterVolume, trk.masterVolume) + g_usbModVol, 0.0f, 99.0f);
+    float targetVol = VolumeCurve(rawVol);
+    if (g_usbSmoothVol < 0.0f) g_usbSmoothVol = targetVol;
+    else g_usbSmoothVol += (targetVol - g_usbSmoothVol) * 0.005f;
+
+    return filtered * g_usbSmoothVol;
 }
 // Block-rate Global LFO phase generator engine
 static void UpdateGlobalLFOs() {
@@ -1051,6 +1147,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     EnableFlushToZero();
     auto startTime = std::chrono::high_resolution_clock::now(); // Record start time
     float* pOutputF = (float*)pOutput;
+    const float* pInputF = (const float*)pInput;
     ma_uint32 samplesProcessed = 0;
 
     // --- MASTER LIMITER STATE ---
@@ -1418,11 +1515,12 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                     }
                                                     g_trackVoices[t][targetIdx].Trigger(freq, depth, time, step.velocity, true, step.noteLength, glide); // Pass Glide Time
                                                     g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % finalPolyMode;
-                                                } else {
+                                                } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                                                     int slot = GetParam(step.params.sampleSlot, tracks[t].sampleSlot);
                                                     const int16_t* buffer = g_samplePool[slot].pcmData.data();
                                                     uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
-                                                    float noteOffset = (float)(midiNote - 60);
+                                                    int sliceIdx = SamplerSliceForNote(t, midiNote, &step.params);
+                                                    float noteOffset = (sliceIdx >= 0) ? 0.0f : (float)(midiNote - 60);
 
                                                     g_samplerVoiceIndex[t] = g_samplerVoiceIndex[t] % finalPolyMode;
                                                     int targetIdx = g_samplerVoiceIndex[t];
@@ -1430,7 +1528,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                     if (g_samplerVoices[t][targetIdx].active) {
                                                         g_samplerVoices[t][targetIdx].Choke();
                                                     }
-                                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength);
+                                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength, sliceIdx);
                                                     g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % finalPolyMode;
                                                 }
                                             }
@@ -1454,7 +1552,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                 g_trackVoices[t][v].Release();
                                             }
                                         }
-                                    } else {
+                                    } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                                         for (int v = 0; v < 4; ++v) {
                                             if (g_samplerVoices[t][v].triggeredBySequencer) {
                                                 g_samplerVoices[t][v].Release();
@@ -1488,14 +1586,15 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                     g_trackVoices[t][g_trackVoiceIndex[t]].Release();
                                     g_trackVoices[t][g_trackVoiceIndex[t]].Trigger(freq, depth, time, ar.velocity, true, 0, glide); // Pass Glide Time
                                     g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % 4;
-                                } else {
+                                } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                                     int slot = (step.params.sampleSlot == -1) ? tracks[t].sampleSlot : step.params.sampleSlot;
                                     const int16_t* buffer = g_samplePool[slot].pcmData.data();
                                     uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
-                                    float noteOffset = (float)(ar.midiNote - 60);
+                                    int sliceIdx = SamplerSliceForNote(t, ar.midiNote, &step.params);
+                                    float noteOffset = (sliceIdx >= 0) ? 0.0f : (float)(ar.midiNote - 60);
 
                                     g_samplerVoices[t][g_samplerVoiceIndex[t]].Release();
-                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, ar.velocity, true);
+                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, ar.velocity, true, 0, sliceIdx);
                                     g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % 4;
                                 }
                             }
@@ -1532,6 +1631,17 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                     continue;
                 }
 
+                if (tracks[t].engineType == ENGINE_USB) {
+                    float inL = 0.0f, inR = 0.0f;
+                    if (pInputF && g_usbCaptureLive) {
+                        inL = pInputF[2 * outIdx];
+                        inR = pInputF[2 * outIdx + 1];
+                    }
+                    trackDry[t] = UsbProcess(t, inL, inR);
+                    soundingTracks++;
+                    continue;
+                }
+
                 float trackSampleSum = 0.0f;
                 int trackVoicesSounding = 0;
                 for (int v = 0; v < 4; ++v) {
@@ -1539,7 +1649,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                         SynthVoice& vo = g_trackVoices[t][v];
                         if (vo.active && vo.stage1 != SynthVoice::ENV1_IDLE) trackVoicesSounding++;
                         trackSampleSum += vo.Process(t);
-                    } else {
+                    } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                         SamplerVoice& vo = g_samplerVoices[t][v];
                         if (vo.active && vo.stage != SamplerVoice::ENV_IDLE) trackVoicesSounding++;
                         trackSampleSum += vo.Process(t);
@@ -1831,33 +1941,185 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
 // ==========================================
 // PUBLIC CONTROLLER INTERFACE
 // ==========================================
-void InitAudioEngine() {
-    InitVolumeCurve();
-    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
-    deviceConfig.playback.format   = ma_format_f32;
-    deviceConfig.playback.channels = 2; // Stereo
-    deviceConfig.sampleRate        = (ma_uint32)g_sampleRate;
-    deviceConfig.dataCallback      = ma_audio_callback;
-    
-    deviceConfig.periodSizeInFrames = 512;
-        deviceConfig.periodSizeInMilliseconds = 0;
+static void RefreshUsbCaptureDevicesInternal() {
+    g_usbCaptures.clear();
+    if (!g_maContextInit) return;
 
-    // Initialize delay lines with device sample rate on launch [2]
-    g_masterDelay.init((float)g_sampleRate);
-    g_masterReverb.init((float)g_sampleRate);
-    g_masterTornado.init((float)g_sampleRate);
+    ma_device_info* pPlayback = nullptr;
+    ma_uint32 playbackCount = 0;
+    ma_device_info* pCapture = nullptr;
+    ma_uint32 captureCount = 0;
+    if (ma_context_get_devices(&g_maContext, &pPlayback, &playbackCount, &pCapture, &captureCount) != MA_SUCCESS)
+        return;
 
-    if (ma_device_init(NULL, &deviceConfig, &g_audioDevice) == MA_SUCCESS) {
-        ma_device_start(&g_audioDevice);
-        g_audioInitialized = true;
+    g_usbCaptures.reserve(captureCount);
+    for (ma_uint32 i = 0; i < captureCount; ++i) {
+        UsbCaptureDev d;
+        d.id = pCapture[i].id;
+        d.name = pCapture[i].name;
+        if (d.name.empty()) d.name = "CAPTURE " + std::to_string((int)i);
+        g_usbCaptures.push_back(d);
     }
+    if (g_usbCaptureRequested < 0) g_usbCaptureRequested = 0;
+    if (!g_usbCaptures.empty() && g_usbCaptureRequested >= (int)g_usbCaptures.size())
+        g_usbCaptureRequested = (int)g_usbCaptures.size() - 1;
 }
 
-void ShutdownAudioEngine() {
+static bool OpenAudioDevice(bool duplex, int captureIdx) {
+    ma_device_config deviceConfig = ma_device_config_init(duplex ? ma_device_type_duplex : ma_device_type_playback);
+    deviceConfig.playback.format   = ma_format_f32;
+    deviceConfig.playback.channels = 2;
+    deviceConfig.sampleRate        = (ma_uint32)g_sampleRate;
+    deviceConfig.dataCallback      = ma_audio_callback;
+    deviceConfig.periodSizeInFrames = 512;
+    deviceConfig.periodSizeInMilliseconds = 0;
+
+    if (duplex) {
+        deviceConfig.capture.format   = ma_format_f32;
+        deviceConfig.capture.channels = 2;
+        if (captureIdx >= 0 && captureIdx < (int)g_usbCaptures.size()) {
+            deviceConfig.capture.pDeviceID = &g_usbCaptures[captureIdx].id;
+        }
+    }
+
+    ma_context* ctx = g_maContextInit ? &g_maContext : nullptr;
+    if (ma_device_init(ctx, &deviceConfig, &g_audioDevice) != MA_SUCCESS)
+        return false;
+    if (ma_device_start(&g_audioDevice) != MA_SUCCESS) {
+        ma_device_uninit(&g_audioDevice);
+        return false;
+    }
+    g_audioInitialized = true;
+    g_usbDuplexActive = duplex;
+    g_usbCaptureLive = duplex;
+    if (duplex) g_usbCaptureIndex = captureIdx;
+    return true;
+}
+
+static void CloseSeqAudioDevice() {
     if (g_audioInitialized) {
         ma_device_uninit(&g_audioDevice);
         g_audioInitialized = false;
     }
+    g_usbDuplexActive = false;
+    g_usbCaptureLive = false;
+}
+
+static void ReinitAudioDevice(bool duplex, int captureIdx) {
+    CloseSeqAudioDevice();
+    if (OpenAudioDevice(duplex, captureIdx))
+        return;
+    // Duplex failed (missing capture, busy gadget): stay alive as playback-only.
+    if (duplex)
+        OpenAudioDevice(false, captureIdx);
+}
+
+void InitAudioEngine() {
+    InitVolumeCurve();
+    if (ma_context_init(nullptr, 0, nullptr, &g_maContext) == MA_SUCCESS)
+        g_maContextInit = true;
+    RefreshUsbCaptureDevicesInternal();
+
+    g_masterDelay.init((float)g_sampleRate);
+    g_masterReverb.init((float)g_sampleRate);
+    g_masterTornado.init((float)g_sampleRate);
+
+    OpenAudioDevice(false, g_usbCaptureRequested);
+}
+
+void ShutdownAudioEngine() {
+    CloseSeqAudioDevice();
+    if (g_maContextInit) {
+        ma_context_uninit(&g_maContext);
+        g_maContextInit = false;
+    }
+    g_usbCaptures.clear();
+}
+
+void RefreshUsbCaptureDevices() {
+    RefreshUsbCaptureDevicesInternal();
+}
+
+int GetUsbCaptureCount() {
+    return (int)g_usbCaptures.size();
+}
+
+int GetUsbCaptureIndex() {
+    return g_usbCaptureRequested;
+}
+
+void SetUsbCaptureIndex(int idx) {
+    int count = (int)g_usbCaptures.size();
+    if (count <= 0) {
+        g_usbCaptureRequested = 0;
+        return;
+    }
+    if (idx < 0) idx = count - 1;
+    if (idx >= count) idx = 0;
+    g_usbCaptureRequested = idx;
+}
+
+const char* GetUsbCaptureName(int idx) {
+    if (idx < 0 || idx >= (int)g_usbCaptures.size())
+        return "NO INPUT";
+    return g_usbCaptures[idx].name.c_str();
+}
+
+void ToggleTrack8Usb() {
+    Track& trk = tracks[7];
+    if (trk.engineType == ENGINE_USB) {
+        trk.engineType = (g_usbPreviousEngine == ENGINE_SAMPLER) ? ENGINE_SAMPLER : ENGINE_SYNTH;
+        trk.algorithm = g_usbPreviousAlgo;
+        if (trk.engineType == ENGINE_SAMPLER && trk.algorithm != ALGO_GRANULAR)
+            trk.algorithm = ALGO_SAMPLE;
+        if (trk.engineType == ENGINE_SYNTH && trk.algorithm != ALGO_CARRIER_MOD)
+            trk.algorithm = ALGO_PARALLEL;
+        menuFeedback = (trk.engineType == ENGINE_SAMPLER) ? "T8 SAMPLER" : "T8 SYNTH";
+    } else {
+        g_usbPreviousEngine = trk.engineType;
+        g_usbPreviousAlgo = trk.algorithm;
+        for (int v = 0; v < 4; ++v) {
+            g_trackVoices[7][v].Release();
+            g_samplerVoices[7][v].Release();
+        }
+        ResetUsbFilter();
+        RefreshUsbCaptureDevicesInternal();
+        trk.engineType = ENGINE_USB;
+        menuFeedback = "T8 USB IN";
+    }
+}
+
+void PollUsbAudioDevice() {
+    bool wantDuplex = (tracks[7].engineType == ENGINE_USB);
+    int wantCap = g_usbCaptureRequested;
+
+    if (wantDuplex && g_usbCaptures.empty()) {
+        static auto s_lastEmptyRefresh = std::chrono::steady_clock::now() - std::chrono::seconds(3);
+        auto now = std::chrono::steady_clock::now();
+        if (now - s_lastEmptyRefresh > std::chrono::seconds(2)) {
+            s_lastEmptyRefresh = now;
+            RefreshUsbCaptureDevicesInternal();
+        }
+    }
+
+    // Reinit only when the request changes. A failed duplex must not retry
+    // every frame (that would stop/start the DAC in a loop).
+    static bool s_appliedDuplex = false;
+    static int s_appliedCap = -1;
+    static int s_appliedListCount = -1;
+    int listCount = (int)g_usbCaptures.size();
+    bool listGrewWhileSilent = wantDuplex && !g_usbCaptureLive && listCount != s_appliedListCount;
+
+    if (g_audioInitialized && wantDuplex == s_appliedDuplex
+        && (!wantDuplex || wantCap == s_appliedCap)
+        && !listGrewWhileSilent) {
+        return;
+    }
+
+    ReinitAudioDevice(wantDuplex, wantCap);
+    s_appliedDuplex = wantDuplex;
+    s_appliedCap = wantCap;
+    s_appliedListCount = listCount;
 }
 
 bool LoadSampleToPool(int slotIdx, const std::string& filename) {
@@ -2023,11 +2285,12 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
         }
         g_trackVoices[trackIdx][targetIdx].Trigger(freq, depth, time, velocity, false, 0, glide); // Pass Glide Time
         g_trackVoiceIndex[trackIdx] = (g_trackVoiceIndex[trackIdx] + 1) % finalPolyMode;
-    } else {
+    } else if (trk.engineType == ENGINE_SAMPLER) {
         int slot = trk.sampleSlot;
         const int16_t* buffer = g_samplePool[slot].pcmData.data();
         uint32_t length = (uint32_t)g_samplePool[slot].pcmData.size();
-        float noteOffset = (float)(midiNote - 60);
+        int sliceIdx = SamplerSliceForNote(trackIdx, midiNote, nullptr);
+        float noteOffset = (sliceIdx >= 0) ? 0.0f : (float)(midiNote - 60);
 
         g_samplerVoiceIndex[trackIdx] = g_samplerVoiceIndex[trackIdx] % finalPolyMode;
         int targetIdx = g_samplerVoiceIndex[trackIdx];
@@ -2035,7 +2298,7 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
         if (g_samplerVoices[trackIdx][targetIdx].active) {
             g_samplerVoices[trackIdx][targetIdx].Choke();
         }
-        g_samplerVoices[trackIdx][g_samplerVoiceIndex[trackIdx]].Trigger(buffer, length, noteOffset, (float)trk.fine2, depth, time, velocity, false);
+        g_samplerVoices[trackIdx][g_samplerVoiceIndex[trackIdx]].Trigger(buffer, length, noteOffset, (float)trk.fine2, depth, time, velocity, false, 0, sliceIdx);
         g_samplerVoiceIndex[trackIdx] = (g_samplerVoiceIndex[trackIdx] + 1) % finalPolyMode;
     }
 }
@@ -2051,7 +2314,7 @@ void ReleaseVoiceLive(int trackIdx, int midiNote) {
                 g_trackVoices[trackIdx][v].Release();
             }
         }
-    } else {
+    } else if (tracks[trackIdx].engineType == ENGINE_SAMPLER) {
         // Releases sampler voices on key release
         for (int v = 0; v < 4; ++v) {
             if (g_samplerVoices[trackIdx][v].active) {

@@ -299,7 +299,7 @@ static void HandlePianoKeysInput(int octaveValue) {
             if (octaveToUse > 8) octaveToUse = 8;
         }
         std::string noteStr = noteName + std::to_string(octaveToUse);
-        int midiNote = SnapMidiToScale(NoteToMidi(noteStr), ResolveTrackKeyRoot(selectedTrack), ResolveTrackKeyLock(selectedTrack));
+        int midiNote = MaybeSnapMidi(NoteToMidi(noteStr), selectedTrack);
 
         if (IsKeyPressed(keyboardPiano[i].key)) {
             TriggerVoiceLive(selectedTrack, midiNote, 3);
@@ -1066,7 +1066,8 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
             if (currentScreen == SCREEN_SYNTH) {
                 isVolumeCol = (tracks[selectedTrack].engineType == ENGINE_SYNTH && synthGridCol == 3) ||
                               (synthGridCol == 11) ||
-                              (tracks[selectedTrack].engineType == ENGINE_SAMPLER && synthGridRow == 1 && synthGridCol == 12);
+                              (tracks[selectedTrack].engineType == ENGINE_SAMPLER && synthGridRow == 1 && synthGridCol == 12) ||
+                              (tracks[selectedTrack].engineType == ENGINE_USB && synthGridCol == 1);
             }
             else if (currentScreen == SCREEN_TRACK_PARAMS) {
                 // VOY is a toggle (1..4), but PRT (0..99) is a standard continuous range
@@ -1172,6 +1173,16 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                 else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.grainSize, trk.grainSize, change, 0, 99); else trk.grainSize = std::clamp(trk.grainSize + change, 0, 99); }
                 else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.grainDensity, trk.grainDensity, change, 0, 99); else trk.grainDensity = std::clamp(trk.grainDensity + change, 0, 99); }
                 else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.grainScatter, trk.grainScatter, change, 0, 99); else trk.grainScatter = std::clamp(trk.grainScatter + change, 0, 99); }
+            }
+        } else if (trk.engineType == ENGINE_USB) {
+            if (synthGridCol == 0) {
+                RefreshUsbCaptureDevices();
+                int dir = (change > 0) ? 1 : ((change < 0) ? -1 : 0);
+                if (dir != 0)
+                    SetUsbCaptureIndex(GetUsbCaptureIndex() + dir);
+            } else if (synthGridCol == 1) {
+                if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99);
+                else trk.masterVolume = std::clamp(trk.masterVolume + change, 0, 99);
             }
         } else {
             if (synthGridRow == 1) {
@@ -1438,6 +1449,7 @@ int main() {
 
     while (!WindowShouldClose()) {
         UiTickClock(GetFrameTime());
+        PollUsbAudioDevice();
         bool blinkOn = UiBlink(UI_BLINK_PERIOD);
 
         // Detect Modifier Keys
@@ -1806,19 +1818,33 @@ int main() {
         }
 
         if (isShiftDown && !isCtrlDown) {
-            // Shift + E: Swap Engine
+            // Shift + E: Swap Engine (synth/sampler only — USB is Shift+T on track 8)
             if (IsKeyPressed(KEY_E)) {
-                if (tracks[selectedTrack].engineType == ENGINE_SYNTH) {
-                    tracks[selectedTrack].engineType = ENGINE_SAMPLER;
-                    tracks[selectedTrack].algorithm = ALGO_SAMPLE;
+                Track& trk = tracks[selectedTrack];
+                if (trk.engineType == ENGINE_USB) {
+                    ToggleTrack8Usb();
+                } else if (trk.engineType == ENGINE_SYNTH) {
+                    trk.engineType = ENGINE_SAMPLER;
+                    trk.algorithm = ALGO_SAMPLE;
                 } else {
-                    tracks[selectedTrack].engineType = ENGINE_SYNTH;
-                    tracks[selectedTrack].algorithm = ALGO_PARALLEL;
+                    trk.engineType = ENGINE_SYNTH;
+                    trk.algorithm = ALGO_PARALLEL;
                 }
+            }
+            // Shift + T: track 8 USB bonus. Consume T so it does not play live F#.
+            if (IsKeyPressed(KEY_T)) {
+                if (selectedTrack == 7)
+                    ToggleTrack8Usb();
+            }
+            if (tracks[selectedTrack].engineType == ENGINE_USB) {
+                synthGridRow = 1;
+                if (synthGridCol > 1) synthGridCol = 0;
             }
             // Shift + R: Switch Engine Algorithm Mode
             if (IsKeyPressed(KEY_W)) {
-                if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
+                if (tracks[selectedTrack].engineType == ENGINE_USB) {
+                    // USB has no algorithm cycle
+                } else if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
                     tracks[selectedTrack].algorithm = (tracks[selectedTrack].algorithm == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
                 } else {
                     if (tracks[selectedTrack].algorithm == ALGO_PARALLEL) {
@@ -2084,7 +2110,7 @@ int main() {
                            int targetTrack = trackOffset + ((cursorTrack + n) % 4);
                            
                            // Translate string notation to MIDI numbers on keypress
-                           int midiNote = SnapMidiToScale(NoteToMidi(noteStr), ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
+                           int midiNote = MaybeSnapMidi(NoteToMidi(noteStr), targetTrack);
                            tracks[targetTrack].steps[cursorStep].note = (int8_t)midiNote;
                            tracks[targetTrack].steps[cursorStep].velocity = 3;
                            ChaosSyncSource(targetTrack, cursorStep);
@@ -2280,9 +2306,15 @@ int main() {
                         if (IsKeyDown(KEY_RIGHT)) cursorStep = (cursorStep + 1) % 16;
                     } else {
                         if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_DOWN)) {
-                            synthGridRow = (synthGridRow == 1) ? 2 : 1;
+                            if (tracks[selectedTrack].engineType == ENGINE_USB) {
+                                synthGridRow = 1;
+                            } else {
+                                synthGridRow = (synthGridRow == 1) ? 2 : 1;
+                            }
                             int maxCol = 11;
-                            if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
+                            if (tracks[selectedTrack].engineType == ENGINE_USB) {
+                                maxCol = 1;
+                            } else if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
                                 if (synthGridRow == 1) maxCol = 12;
                                 else if (synthGridRow == 2) maxCol = 8;
                             }
@@ -2292,7 +2324,10 @@ int main() {
                         }
                         
                         int maxCol = 11;
-                        if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
+                        if (tracks[selectedTrack].engineType == ENGINE_USB) {
+                            synthGridRow = 1;
+                            maxCol = 1;
+                        } else if (tracks[selectedTrack].engineType == ENGINE_SAMPLER) {
                             if (synthGridRow == 1)      maxCol = 12;
                             else if (synthGridRow == 2) maxCol = 8;
                         }

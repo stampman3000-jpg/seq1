@@ -69,7 +69,8 @@ enum Screen {
 // --- CORE ENGINE DEFINITIONS ---
 enum EngineType {
     ENGINE_SYNTH,
-    ENGINE_SAMPLER
+    ENGINE_SAMPLER,
+    ENGINE_USB
 };
 
 enum SynthAlgo {
@@ -493,6 +494,29 @@ struct Track {
 
     bool muted = false;         // Shift+M Track Mute State
 };
+
+// Sampler slice mode: DIV > 1 on the sample engine. Keys pick slices, not pitch.
+inline bool TrackIsSliceMode(const Track& trk) {
+    return trk.engineType == ENGINE_SAMPLER && trk.algorithm == ALGO_SAMPLE && trk.sliceDivisions > 1;
+}
+
+// USB is track 8 only. Old projects and presets cannot put it on 1–7.
+inline EngineType SanitizeEngineType(int engineVal, int trackIdx) {
+    if (engineVal == (int)ENGINE_USB)
+        return (trackIdx == 7) ? ENGINE_USB : ENGINE_SYNTH;
+    if (engineVal == (int)ENGINE_SAMPLER)
+        return ENGINE_SAMPLER;
+    return ENGINE_SYNTH;
+}
+
+// C4 (MIDI 60) is slice 0; chromatic notes wrap forever around the kit.
+inline int SliceIndexFromMidi(int midiNote, int sdiv) {
+    if (sdiv < 2) return 0;
+    int n = midiNote - 60;
+    int m = n % sdiv;
+    if (m < 0) m += sdiv;
+    return m;
+}
 
 // --- SEQUENCER PATTERN STRUCT ---
 struct Pattern {

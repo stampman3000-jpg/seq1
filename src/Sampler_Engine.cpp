@@ -43,7 +43,7 @@ static int GetParam(int stepVal, int trackVal) {
     return (stepVal == -1) ? trackVal : stepVal;
 }
 
-void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq, int noteLength) {
+void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq, int noteLength, int sliceIdx) {
     // Restarting the sample from position zero is the point of a retrigger, but
     // the filter's stored energy is not part of that and clearing it mid-note
     // adds a click on top.
@@ -55,8 +55,10 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
     choking = false;      // Reset choke flags so sample plays cleanly
     chokeVolume = 1.0f;
     
-    // Store keyboard note pitch tracking offset (relative to C4)
-    notePitchOffset = pitchCoarse;
+    // Store keyboard note pitch tracking offset (relative to C4).
+    // Slice mode latches a kit index instead and plays every key at one pitch.
+    sliceIndex = sliceIdx;
+    notePitchOffset = (sliceIdx >= 0) ? 0.0f : pitchCoarse;
 
     // Store if triggered by sequencer or live
     triggeredBySequencer = isSeq;
@@ -451,12 +453,16 @@ float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
         activeRangeWidth = totalRange - posOffset; // Dynamic remaining space for bounds check
     }
     else {
-        // Slice Mode (sdiv > 1): Exactly matches your original, loved slicing math!
-        uint32_t sliceWidth = totalRange / sdiv;
-        int activeSlice = std::clamp((int)(GetParam(sp.grainPosition, trk.grainPosition) + modMorphOffset), 0, 99) % sdiv;
-        
-        sliceStart = startIdx + activeSlice * sliceWidth;
-        activeRangeWidth = sliceWidth;
+        // Slice Mode: MIDI note picked the slice at trigger. POS is a start
+        // point inside that slice, same idea as the single-sample scrub.
+        uint32_t sliceWidth = totalRange / (uint32_t)sdiv;
+        int slice = (sliceIndex >= 0) ? (sliceIndex % sdiv) : 0;
+        if (slice < 0) slice = 0;
+        float normPos = std::clamp((float)(GetParam(sp.grainPosition, trk.grainPosition) + modMorphOffset), 0.0f, 99.0f) / 99.0f;
+        uint32_t posOffset = (uint32_t)(normPos * (float)sliceWidth);
+
+        sliceStart = startIdx + (uint32_t)slice * sliceWidth + posOffset;
+        activeRangeWidth = sliceWidth - posOffset;
     }
 
     // --- LOOP END FUNCTIONALITY (LE) ---

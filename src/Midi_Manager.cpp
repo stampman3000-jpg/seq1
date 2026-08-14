@@ -187,7 +187,7 @@ void MidiManager::midiCallback(double timeStamp, std::vector<unsigned char> *mes
     // Locate standard note-on processing in midiCallback:
         if (command == 0x90 && velocity > 0) {
             int mappedVelocity = (velocity < 43) ? 1 : ((velocity < 86) ? 2 : 3);
-            int snappedNote = SnapMidiToScale((int)note, ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
+            int snappedNote = MaybeSnapMidi((int)note, targetTrack);
             
             if (channel == 15 && targetTrack == selectedTrack) {
                 bool isSeqPageOpen = (currentScreen == SCREEN_SEQ_1_4 || currentScreen == SCREEN_SEQ_5_8);
@@ -201,7 +201,7 @@ void MidiManager::midiCallback(double timeStamp, std::vector<unsigned char> *mes
             TriggerVoiceLive(targetTrack, snappedNote, mappedVelocity);
         }
     else if (command == 0x80 || (command == 0x90 && velocity == 0)) {
-        int snappedNote = SnapMidiToScale((int)note, ResolveTrackKeyRoot(targetTrack), ResolveTrackKeyLock(targetTrack));
+        int snappedNote = MaybeSnapMidi((int)note, targetTrack);
         ReleaseVoiceLive(targetTrack, snappedNote);
     }
 }

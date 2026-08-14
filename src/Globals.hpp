@@ -134,6 +134,13 @@ int StepMidiInScale(int midi, int root, int dir, int lock);
 int KeyRootMidiAtOctave(int root, int octave);
 void SnapTrackSequenceToKey(int trackIdx);
 
+// Slice-mode kits are chromatic: scale lock would skip slices.
+inline int MaybeSnapMidi(int midi, int trackIdx) {
+    if (trackIdx < 0 || trackIdx >= 8) return midi;
+    if (TrackIsSliceMode(tracks[trackIdx])) return midi;
+    return SnapMidiToScale(midi, ResolveTrackKeyRoot(trackIdx), ResolveTrackKeyLock(trackIdx));
+}
+
 // Directory & Disk Serialization Functions
 void SetupDirectories();
 std::vector<std::string> GetFileList(const std::string& directory, const std::string& extension);

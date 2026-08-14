@@ -70,6 +70,8 @@ struct SamplerVoice {
 
     // Standard Keyboard Pitch Tracking State
     float notePitchOffset = 0.0f;
+    // Latched at trigger: >= 0 means slice mode, ignore note pitch, POS is in-slice start.
+    int sliceIndex = -1;
 
     // Velocity Gain Scaling State
     float velocityScale = 1.0f;
@@ -97,7 +99,7 @@ struct SamplerVoice {
     uint32_t samplesSinceLastGrain = 0;
 
     // Interface Functions
-    void Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0);
+    void Trigger(const int16_t* buffer, uint32_t length, float pitchCoarse, float pitchFine, int depth, int time, int velocity, bool isSeq = false, int noteLength = 0, int sliceIdx = -1);
     void Release();
     void Choke(); // Click-free fadeout Choke
     float Process(int trackIdx);

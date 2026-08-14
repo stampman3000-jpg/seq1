@@ -89,7 +89,9 @@ void ChaosRenderTrack(int trackIdx, unsigned int rawBar) {
                 // The one interval that can still misfire is a fifth off the
                 // seventh degree, which lands a tritone above the root, so the
                 // scale snap catches it when a key is set.
-                lifted = SnapMidiToScale(lifted, keyRoot, keyLock);
+                if (!TrackIsSliceMode(trk)) {
+                    lifted = SnapMidiToScale(lifted, keyRoot, keyLock);
+                }
                 if (lifted <= 127) note = lifted;
             }
 
