@@ -348,8 +348,11 @@ void DrawSynthScreen(const UIState& state) {
         for (; capName[n] != '\0' && n < 28; ++n) nameBuf[n] = capName[n];
         nameBuf[n] = '\0';
         Draw3x5String(nameBuf, 8, 32, srcSelected ? UI_ACTIVE : UI_VALUE);
+        char rateBuf[24];
+        snprintf(rateBuf, sizeof(rateBuf), "%d %d", GetAudioSampleRate(), GetAudioPeriodFrames());
+        Draw3x5String(rateBuf, 8, 42, UI_CHROME);
         if (GetUsbCaptureCount() <= 0) {
-            Draw3x5String("SILENCE", 8, 42, UI_CHROME);
+            Draw3x5String("SILENCE", 80, 42, UI_CHROME);
         }
 
         DrawLevelBars(effLvl, 214, 18, 13, 28, lvlSelected, UI_VALUE);

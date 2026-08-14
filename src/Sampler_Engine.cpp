@@ -24,8 +24,6 @@ static float FastRandFloat(uint32_t& seed) {
 SamplerVoice g_samplerVoices[8][4];
 int g_samplerVoiceIndex[8] = { 0 };
 
-static double g_sampleRate = 44100.0;
-
 // 1ms..15s, exponent 1.5: snappy 0-40 for perc, usable mid, pads from ~80 up
 static float GetEnvTime(float val) {
     float norm = std::clamp(val, 0.0f, 99.0f) / 99.0f;
@@ -434,7 +432,7 @@ float SamplerVoice::ProcessStandard(const Track& trk, const StepParams& sp) {
     uint32_t totalRange = endIdx - startIdx;
 
     // Pitch speed factor calculations...
-    float baseSpeed = 32000.0f / 44100.0f;
+    float baseSpeed = 32000.0f / (float)g_sampleRate;
     float playbackSpeed = baseSpeed * pitchModFactor * pitchRatio;
 
     int sdiv = GetParam(sp.sliceDivisions, trk.sliceDivisions);
@@ -623,7 +621,7 @@ void SamplerVoice::SpawnGrain(const Track& trk, const StepParams& sp) {
             g.durationSamples = (uint32_t)(durationSec * g_sampleRate);
 
             // Speed matching pitch CRS / FINE modulated by envelope, keyboard tracking, and LFO modulation
-            float baseSpeed = 32000.0f / 44100.0f;
+            float baseSpeed = 32000.0f / (float)g_sampleRate;
             float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFineOffset, -99.0f, 99.0f);
             float semitoneOffset = notePitchOffset + GetParam(sp.sampleTune, trk.sampleTune) + (fine2Mod / 100.0f) + modPitchOffset;
             float speedFactor = baseSpeed * pitchModFactor * powf(2.0f, semitoneOffset / 12.0f);

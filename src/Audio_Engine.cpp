@@ -60,8 +60,9 @@ static bool g_usbDuplexActive = false;  // current device is duplex
 static bool g_usbCaptureLive = false;   // duplex opened with a real capture device
 static EngineType g_usbPreviousEngine = ENGINE_SYNTH;
 static int g_usbPreviousAlgo = ALGO_PARALLEL;
+static ma_uint32 g_audioPeriodFrames = 256;
 
-static const double g_sampleRate = 44100.0;
+double g_sampleRate = 48000.0;
 
 // --- MASTER PERFORMANCE FX DSP STATES ---
 #define STUTTER_BUF_SIZE 176400 // 4 seconds of stereo buffer at 44.1kHz
@@ -225,7 +226,7 @@ static void UpdateGlobalLFOs() {
         {
             float normSpeed = lfo1Speed / 99.0f;
             float lfoHz = 0.05f * powf(400.0f, normSpeed); // Exponential mapping: 0.05Hz to 20Hz
-            float phaseInc = (2.0f * 3.14159265f * lfoHz * 64.0f) / 44100.0f;
+            float phaseInc = (2.0f * 3.14159265f * lfoHz * 64.0f) / (float)g_sampleRate;
 
             trk.lfo1Phase += phaseInc;
             bool wrapped = false;
@@ -271,7 +272,7 @@ static void UpdateGlobalLFOs() {
         {
             float normSpeed = lfo2Speed / 99.0f;
             float lfoHz = 0.05f * powf(400.0f, normSpeed); // Exponential mapping: 0.05Hz to 20Hz
-            float phaseInc = (2.0f * 3.14159265f * lfoHz * 64.0f) / 44100.0f;
+            float phaseInc = (2.0f * 3.14159265f * lfoHz * 64.0f) / (float)g_sampleRate;
 
             trk.lfo2Phase += phaseInc;
             bool wrapped = false;
@@ -1965,14 +1966,24 @@ static void RefreshUsbCaptureDevicesInternal() {
         g_usbCaptureRequested = (int)g_usbCaptures.size() - 1;
 }
 
-static bool OpenAudioDevice(bool duplex, int captureIdx) {
+static bool OpenAudioDeviceOnce(bool duplex, int captureIdx, ma_uint32 rate, ma_uint32 period,
+                                bool alsaNoMMap, bool alsaNoAutoResample) {
     ma_device_config deviceConfig = ma_device_config_init(duplex ? ma_device_type_duplex : ma_device_type_playback);
     deviceConfig.playback.format   = ma_format_f32;
     deviceConfig.playback.channels = 2;
-    deviceConfig.sampleRate        = (ma_uint32)g_sampleRate;
+    deviceConfig.sampleRate        = rate;
     deviceConfig.dataCallback      = ma_audio_callback;
-    deviceConfig.periodSizeInFrames = 512;
+    deviceConfig.periodSizeInFrames = period;
     deviceConfig.periodSizeInMilliseconds = 0;
+    deviceConfig.periods = duplex ? 4 : 3;
+    deviceConfig.resampling.linear.lpfOrder = 8;
+#if defined(__APPLE__)
+    deviceConfig.coreaudio.allowNominalSampleRateChange = MA_TRUE;
+#endif
+#if defined(__linux__)
+    deviceConfig.alsa.noMMap = alsaNoMMap ? MA_TRUE : MA_FALSE;
+    deviceConfig.alsa.noAutoResample = alsaNoAutoResample ? MA_TRUE : MA_FALSE;
+#endif
 
     if (duplex) {
         deviceConfig.capture.format   = ma_format_f32;
@@ -1993,7 +2004,27 @@ static bool OpenAudioDevice(bool duplex, int captureIdx) {
     g_usbDuplexActive = duplex;
     g_usbCaptureLive = duplex;
     if (duplex) g_usbCaptureIndex = captureIdx;
+    if (g_audioDevice.sampleRate != 0)
+        g_sampleRate = (double)g_audioDevice.sampleRate;
+    g_audioPeriodFrames = g_audioDevice.playback.internalPeriodSizeInFrames;
+    if (g_audioPeriodFrames == 0)
+        g_audioPeriodFrames = period;
     return true;
+}
+
+static bool OpenAudioDevice(bool duplex, int captureIdx) {
+    // 48 kHz / 256 frames is the Digitone's native USB rate and a period that
+    // matches it. The old 44.1k / 512 path put a linear resampler on both
+    // legs of the duplex ring buffer, which is the stutter.
+#if defined(__linux__)
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, 256, duplex, true))  return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, 256, duplex, false)) return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, 256, duplex, false)) return true;
+#else
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, 256, false, false)) return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, 256, false, false)) return true;
+#endif
+    return false;
 }
 
 static void CloseSeqAudioDevice() {
@@ -2005,13 +2036,24 @@ static void CloseSeqAudioDevice() {
     g_usbCaptureLive = false;
 }
 
+static double s_fxInitedRate = 0.0;
+static void EnsureFxRate() {
+    if (s_fxInitedRate == g_sampleRate && s_fxInitedRate > 0.0) return;
+    s_fxInitedRate = g_sampleRate;
+    g_masterDelay.init((float)g_sampleRate);
+    g_masterReverb.init((float)g_sampleRate);
+    g_masterTornado.init((float)g_sampleRate);
+}
+
 static void ReinitAudioDevice(bool duplex, int captureIdx) {
     CloseSeqAudioDevice();
-    if (OpenAudioDevice(duplex, captureIdx))
+    if (OpenAudioDevice(duplex, captureIdx)) {
+        EnsureFxRate();
         return;
+    }
     // Duplex failed (missing capture, busy gadget): stay alive as playback-only.
-    if (duplex)
-        OpenAudioDevice(false, captureIdx);
+    if (duplex && OpenAudioDevice(false, captureIdx))
+        EnsureFxRate();
 }
 
 void InitAudioEngine() {
@@ -2020,11 +2062,8 @@ void InitAudioEngine() {
         g_maContextInit = true;
     RefreshUsbCaptureDevicesInternal();
 
-    g_masterDelay.init((float)g_sampleRate);
-    g_masterReverb.init((float)g_sampleRate);
-    g_masterTornado.init((float)g_sampleRate);
-
     OpenAudioDevice(false, g_usbCaptureRequested);
+    EnsureFxRate();
 }
 
 void ShutdownAudioEngine() {
@@ -2063,6 +2102,14 @@ const char* GetUsbCaptureName(int idx) {
     if (idx < 0 || idx >= (int)g_usbCaptures.size())
         return "NO INPUT";
     return g_usbCaptures[idx].name.c_str();
+}
+
+int GetAudioSampleRate() {
+    return (int)g_sampleRate;
+}
+
+int GetAudioPeriodFrames() {
+    return (int)g_audioPeriodFrames;
 }
 
 void ToggleTrack8Usb() {

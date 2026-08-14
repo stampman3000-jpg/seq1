@@ -10,7 +10,7 @@ static inline float saturate(float x) {
 }
 
 TapeBufferFX::TapeBufferFX() {
-    delayBuf.assign(88200, 0.0f); // 2 seconds max at 44.1kHz
+    delayBuf.assign(96000, 0.0f); // 2 seconds max at 48kHz
     noiseSeed = 0x12345678u;
     reset();
 }
@@ -79,7 +79,7 @@ float TapeBufferFX::process(float input,
 
         float memorySec = 0.05f + (memoryVal / 99.0f) * 1.95f;
         cachedMemSamples = std::floor(memorySec * sampleRate);
-        if (cachedMemSamples > 88200.0f) cachedMemSamples = 88200.0f;
+        if (cachedMemSamples > 96000.0f) cachedMemSamples = 96000.0f;
         if (cachedMemSamples < 2205.0f)  cachedMemSamples = 2205.0f;
         cachedMemLen = (int)cachedMemSamples;
 

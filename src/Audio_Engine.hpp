@@ -11,6 +11,8 @@ int GetUsbCaptureCount();
 int GetUsbCaptureIndex();
 void SetUsbCaptureIndex(int idx);
 const char* GetUsbCaptureName(int idx);
+int GetAudioSampleRate();
+int GetAudioPeriodFrames();
 
 // Public interface functions to trigger and release track voices in real-time
 void TriggerVoiceLive(int trackIdx, int midiNote, int velocity);

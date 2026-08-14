@@ -8,6 +8,11 @@
 #include "raylib.h"
 #include "Tape_Buffer_FX.hpp"
 
+// Engine sample rate. Requested as 48000 so a USB class device (Digitone etc)
+// can pass into the callback without a 48k→44.1k convert sitting in the
+// duplex ring buffer — that convert is what reads as stutter on the Pi.
+extern double g_sampleRate;
+
 // --- GLOBAL RESOLUTION & SCALING CONFIGURATION ---
 constexpr int OLED_WIDTH = 256;
 constexpr int OLED_HEIGHT = 64;
@@ -487,7 +492,7 @@ struct Track {
         int tapeMix = 0;          // Bypassed (mix at 0) on startup
 
         // The tape DSP state itself lives in g_trackTapeFX, not here. It is a
-        // live delay line, not pattern data, and it carries an 88200-float
+        // live delay line, not pattern data, and it carries a 96000-float
         // buffer: holding it inside Track meant every pattern slot stored its
         // own unused copy, and a pattern switch memcpy'd megabytes of audio
         // history on the audio thread.
