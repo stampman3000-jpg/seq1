@@ -1114,8 +1114,47 @@ struct ActiveRetrig {
     ma_uint32 sampleInterval = 0;
     ma_uint32 sampleCounter = 0;
     int velocity = 3; // Tracks velocity on ratchets
+    int voiceIndex = 0;   // sampler ratchets reuse this slot
+    int polyMode = 4;     // synth ratchets stay inside poly
+    ma_uint32 samplesLeftInStep = 0;
 };
 static ActiveRetrig g_activeRetrigs[8];
+
+static int StealSynthVoice(int t, int polyMode) {
+    int best = 0;
+    float bestScore = 1e30f;
+    for (int v = 0; v < polyMode; ++v) {
+        const SynthVoice& vo = g_trackVoices[t][v];
+        if (!vo.active || vo.stage1 == SynthVoice::ENV1_IDLE)
+            return v;
+        float score = vo.envLevel1;
+        if (vo.stage1 == SynthVoice::ENV1_ATTACK)
+            score += 2.0f;
+        if (score < bestScore) {
+            bestScore = score;
+            best = v;
+        }
+    }
+    return best;
+}
+
+static int StealSamplerVoice(int t, int polyMode) {
+    int best = 0;
+    float bestScore = 1e30f;
+    for (int v = 0; v < polyMode; ++v) {
+        const SamplerVoice& vo = g_samplerVoices[t][v];
+        if (!vo.active || vo.stage == SamplerVoice::ENV_IDLE)
+            return v;
+        float score = vo.envLevel;
+        if (vo.stage == SamplerVoice::ENV_ATTACK)
+            score += 2.0f;
+        if (score < bestScore) {
+            bestScore = score;
+            best = v;
+        }
+    }
+    return best;
+}
 
 // Dynamic fraction parser: matches loop expressions of form "N:M" (e.g., "3:4", "7:8")
 static bool EvaluateCondition(const std::string& cond, int trackIdx) {
@@ -1442,6 +1481,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                             if (triggerTick < 0) triggerTick += localLengthTicks;
 
                             if (triggerTick == tracks[t].localTick) {
+                                g_activeRetrigs[t].remainingTriggers = 0;
                                 if (step.velocity > 0 && step.note >= 0) { // Changed Note String check to quick Integer sentinel check
                                     int cycleLength = 1;
                                     for (int c = 0; c < 8; ++c) {
@@ -1502,20 +1542,20 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                             if (finalPolyMode > 4) finalPolyMode = 4;
 
                                             int notesCount = std::min(noteCount, finalPolyMode);
+                                            int samplerRetrigVoice = 0;
 
                                             for (int n = 0; n < notesCount; ++n) {
                                                 int midiNote = midiNotesToTrigger[n];
                                                 float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
 
                                                 if (tracks[t].engineType == ENGINE_SYNTH) {
-                                                    g_trackVoiceIndex[t] = g_trackVoiceIndex[t] % finalPolyMode;
-                                                    int targetIdx = g_trackVoiceIndex[t];
+                                                    int targetIdx = StealSynthVoice(t, finalPolyMode);
 
                                                     if (g_trackVoices[t][targetIdx].active) {
                                                         g_trackVoices[t][targetIdx].Choke();
                                                     }
                                                     g_trackVoices[t][targetIdx].Trigger(freq, depth, time, step.velocity, true, step.noteLength, glide); // Pass Glide Time
-                                                    g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % finalPolyMode;
+                                                    g_trackVoiceIndex[t] = (targetIdx + 1) % finalPolyMode;
                                                 } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                                                     int slot = GetParam(step.params.sampleSlot, tracks[t].sampleSlot);
                                                     const int16_t* buffer = g_samplePool[slot].pcmData.data();
@@ -1523,14 +1563,14 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                     int sliceIdx = SamplerSliceForNote(t, midiNote, &step.params);
                                                     float noteOffset = (sliceIdx >= 0) ? 0.0f : (float)(midiNote - 60);
 
-                                                    g_samplerVoiceIndex[t] = g_samplerVoiceIndex[t] % finalPolyMode;
-                                                    int targetIdx = g_samplerVoiceIndex[t];
+                                                    int targetIdx = StealSamplerVoice(t, finalPolyMode);
 
                                                     if (g_samplerVoices[t][targetIdx].active) {
                                                         g_samplerVoices[t][targetIdx].Choke();
                                                     }
-                                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength, sliceIdx);
-                                                    g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % finalPolyMode;
+                                                    g_samplerVoices[t][targetIdx].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, step.velocity, true, step.noteLength, sliceIdx);
+                                                    g_samplerVoiceIndex[t] = (targetIdx + 1) % finalPolyMode;
+                                                    if (n == 0) samplerRetrigVoice = targetIdx;
                                                 }
                                             }
 
@@ -1541,6 +1581,9 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                 ar.sampleInterval = samplesPerStep / step.retrigger;
                                                 ar.sampleCounter = 0;
                                                 ar.velocity = step.velocity;
+                                                ar.voiceIndex = samplerRetrigVoice;
+                                                ar.polyMode = finalPolyMode;
+                                                ar.samplesLeftInStep = samplesPerStep;
                                             } else {
                                                 g_activeRetrigs[t].remainingTriggers = 0;
                                             }
@@ -1570,8 +1613,13 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 for (int t = 0; t < 8; ++t) {
                     ActiveRetrig& ar = g_activeRetrigs[t];
                     if (ar.remainingTriggers > 0 && !tracks[t].muted) {
+                        if (ar.samplesLeftInStep > 0)
+                            ar.samplesLeftInStep--;
+                        else
+                            ar.remainingTriggers = 0;
+
                         ar.sampleCounter++;
-                        if (ar.sampleCounter >= ar.sampleInterval) {
+                        if (ar.remainingTriggers > 0 && ar.sampleCounter >= ar.sampleInterval) {
                             ar.sampleCounter = 0;
                             ar.remainingTriggers--;
 
@@ -1583,10 +1631,15 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                 int time = (step.params.pitchSweepTime == -1) ? tracks[t].pitchSweepTime : step.params.pitchSweepTime;
                                 int glide = (step.params.glideTime == -1) ? tracks[t].glideTime : step.params.glideTime; // Resolve Glide Time
 
+                                int retrigPoly = ar.polyMode;
+                                if (retrigPoly < 1) retrigPoly = 1;
+                                if (retrigPoly > 4) retrigPoly = 4;
+
                                 if (tracks[t].engineType == ENGINE_SYNTH) {
-                                    g_trackVoices[t][g_trackVoiceIndex[t]].Release();
-                                    g_trackVoices[t][g_trackVoiceIndex[t]].Trigger(freq, depth, time, ar.velocity, true, 0, glide); // Pass Glide Time
-                                    g_trackVoiceIndex[t] = (g_trackVoiceIndex[t] + 1) % 4;
+                                    int targetIdx = StealSynthVoice(t, retrigPoly);
+                                    g_trackVoices[t][targetIdx].Release();
+                                    g_trackVoices[t][targetIdx].Trigger(freq, depth, time, ar.velocity, true, 0, glide);
+                                    g_trackVoiceIndex[t] = (targetIdx + 1) % retrigPoly;
                                 } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                                     int slot = (step.params.sampleSlot == -1) ? tracks[t].sampleSlot : step.params.sampleSlot;
                                     const int16_t* buffer = g_samplePool[slot].pcmData.data();
@@ -1594,9 +1647,13 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                     int sliceIdx = SamplerSliceForNote(t, ar.midiNote, &step.params);
                                     float noteOffset = (sliceIdx >= 0) ? 0.0f : (float)(ar.midiNote - 60);
 
-                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Release();
-                                    g_samplerVoices[t][g_samplerVoiceIndex[t]].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, ar.velocity, true, 0, sliceIdx);
-                                    g_samplerVoiceIndex[t] = (g_samplerVoiceIndex[t] + 1) % 4;
+                                    int targetIdx = ar.voiceIndex;
+                                    if (targetIdx < 0) targetIdx = 0;
+                                    if (targetIdx > 3) targetIdx = 3;
+
+                                    g_samplerVoices[t][targetIdx].Trigger(buffer, length, noteOffset, (float)tracks[t].fine2, depth, time, ar.velocity, true, 0, sliceIdx);
+                                    g_samplerVoices[t][targetIdx].gateTimerSamples = ar.samplesLeftInStep;
+                                    g_samplerVoices[t][targetIdx].useGateTimer = true;
                                 }
                             }
                         }
@@ -1648,10 +1705,18 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 for (int v = 0; v < 4; ++v) {
                     if (tracks[t].engineType == ENGINE_SYNTH) {
                         SynthVoice& vo = g_trackVoices[t][v];
+                        bool sounding = vo.choking
+                            || vo.stage1 != SynthVoice::ENV1_IDLE
+                            || vo.stage2 != SynthVoice::ENV2_IDLE
+                            || vo.noiseStage != SynthVoice::NOISE_IDLE
+                            || vo.filterStage != SynthVoice::FLT_IDLE;
+                        if (!sounding) continue;
                         if (vo.active && vo.stage1 != SynthVoice::ENV1_IDLE) trackVoicesSounding++;
                         trackSampleSum += vo.Process(t);
                     } else if (tracks[t].engineType == ENGINE_SAMPLER) {
                         SamplerVoice& vo = g_samplerVoices[t][v];
+                        if (!vo.active && !vo.choking) continue;
+                        if (vo.stage == SamplerVoice::ENV_IDLE && !vo.choking) continue;
                         if (vo.active && vo.stage != SamplerVoice::ENV_IDLE) trackVoicesSounding++;
                         trackSampleSum += vo.Process(t);
                     }
@@ -2013,16 +2078,16 @@ static bool OpenAudioDeviceOnce(bool duplex, int captureIdx, ma_uint32 rate, ma_
 }
 
 static bool OpenAudioDevice(bool duplex, int captureIdx) {
-    // 48 kHz / 256 frames is the Digitone's native USB rate and a period that
-    // matches it. The old 44.1k / 512 path put a linear resampler on both
-    // legs of the duplex ring buffer, which is the stutter.
+    // Playback-only gets 512 frames so an overloaded callback has twice the
+    // deadline. Duplex/USB stays at 256 to match the Digitone's USB period.
+    const ma_uint32 period = duplex ? 256 : 512;
 #if defined(__linux__)
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, 256, duplex, true))  return true;
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, 256, duplex, false)) return true;
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, 256, duplex, false)) return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, period, duplex, true))  return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, period, duplex, false)) return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, period, duplex, false)) return true;
 #else
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, 256, false, false)) return true;
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, 256, false, false)) return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, period, false, false)) return true;
+    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, period, false, false)) return true;
 #endif
     return false;
 }
@@ -2324,14 +2389,13 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
     if (finalPolyMode > 4) finalPolyMode = 4;
 
     if (trk.engineType == ENGINE_SYNTH) {
-        g_trackVoiceIndex[trackIdx] = g_trackVoiceIndex[trackIdx] % finalPolyMode;
-        int targetIdx = g_trackVoiceIndex[trackIdx];
+        int targetIdx = StealSynthVoice(trackIdx, finalPolyMode);
 
         if (g_trackVoices[trackIdx][targetIdx].active) {
             g_trackVoices[trackIdx][targetIdx].Choke();
         }
         g_trackVoices[trackIdx][targetIdx].Trigger(freq, depth, time, velocity, false, 0, glide); // Pass Glide Time
-        g_trackVoiceIndex[trackIdx] = (g_trackVoiceIndex[trackIdx] + 1) % finalPolyMode;
+        g_trackVoiceIndex[trackIdx] = (targetIdx + 1) % finalPolyMode;
     } else if (trk.engineType == ENGINE_SAMPLER) {
         int slot = trk.sampleSlot;
         const int16_t* buffer = g_samplePool[slot].pcmData.data();
@@ -2339,14 +2403,13 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
         int sliceIdx = SamplerSliceForNote(trackIdx, midiNote, nullptr);
         float noteOffset = (sliceIdx >= 0) ? 0.0f : (float)(midiNote - 60);
 
-        g_samplerVoiceIndex[trackIdx] = g_samplerVoiceIndex[trackIdx] % finalPolyMode;
-        int targetIdx = g_samplerVoiceIndex[trackIdx];
+        int targetIdx = StealSamplerVoice(trackIdx, finalPolyMode);
 
         if (g_samplerVoices[trackIdx][targetIdx].active) {
             g_samplerVoices[trackIdx][targetIdx].Choke();
         }
-        g_samplerVoices[trackIdx][g_samplerVoiceIndex[trackIdx]].Trigger(buffer, length, noteOffset, (float)trk.fine2, depth, time, velocity, false, 0, sliceIdx);
-        g_samplerVoiceIndex[trackIdx] = (g_samplerVoiceIndex[trackIdx] + 1) % finalPolyMode;
+        g_samplerVoices[trackIdx][targetIdx].Trigger(buffer, length, noteOffset, (float)trk.fine2, depth, time, velocity, false, 0, sliceIdx);
+        g_samplerVoiceIndex[trackIdx] = (targetIdx + 1) % finalPolyMode;
     }
 }
 

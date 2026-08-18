@@ -133,20 +133,12 @@ float TapeBufferFX::process(float input,
         }
     }
 
-    float* buf = delayBuf.data();
-    const int memLen = cachedMemLen > 0 ? cachedMemLen : (int)cachedMemSamples;
-
-    if (cachedMixParam <= 0.0f) {
-        int w = (int)writePos;
-        if (w < 0) w = 0;
-        else if (w >= memLen && memLen > 0) w = 0;
-        buf[w] = saturate(input);
-        writePos += 1.0f;
-        if (writePos >= cachedMemSamples) {
-            writePos = 0.0f;
-        }
+    if (mixVal <= 0 || cachedMixParam <= 0.0f) {
         return input;
     }
+
+    float* buf = delayBuf.data();
+    const int memLen = cachedMemLen > 0 ? cachedMemLen : (int)cachedMemSamples;
 
     // --- SLEW WRITE GAIN ---
     float targetGain = 1.0f - cachedFreezeParam;
