@@ -340,6 +340,62 @@ constexpr int kVolCurveSize = 128;
 float g_volCurveLUT[kVolCurveSize]; // Shared global array
 
 // Populate the exponential dB fader curve once at startup
+constexpr int kSineLutSize = 2048;
+static float g_sineLUT[kSineLutSize + 1];
+
+static void InitSineLut() {
+    for (int i = 0; i <= kSineLutSize; ++i)
+        g_sineLUT[i] = sinf((float)i * 6.2831853f / (float)kSineLutSize);
+}
+
+static inline float FastSine(float normPhase) {
+    float x = normPhase * (float)kSineLutSize;
+    int i = (int)x;
+    float frac = x - (float)i;
+    return g_sineLUT[i] + frac * (g_sineLUT[i + 1] - g_sineLUT[i]);
+}
+
+TrackVoiceMod g_trackVoiceMod[8];
+
+static void AccumulateTrackVoiceMods() {
+    for (int t = 0; t < 8; ++t)
+        g_trackVoiceMod[t] = TrackVoiceMod{};
+
+    for (int src = 0; src < 8; ++src) {
+        const Track& srcTrk = tracks[src];
+        for (int s = 0; s < 3; ++s) {
+            const ModSlot* slots[2] = { &srcTrk.lfo1Slots[s], &srcTrk.lfo2Slots[s] };
+            const float lfoVal[2] = { g_globalLFOValues[src][0], g_globalLFOValues[src][1] };
+            for (int L = 0; L < 2; ++L) {
+                const ModSlot& m = *slots[L];
+                if (m.destType != 1) continue;
+                if (m.destTrack < 0 || m.destTrack > 7) continue;
+                TrackVoiceMod& d = g_trackVoiceMod[m.destTrack];
+                float modVal = lfoVal[L] * (m.depth / 99.0f);
+                float scaled99 = modVal * 99.0f;
+                switch (m.destParam) {
+                    case DEST_CUTOFF:     d.cutoff += scaled99; break;
+                    case DEST_RESONANCE:  d.res += scaled99; break;
+                    case DEST_VOLUME:     d.vol += scaled99; break;
+                    case DEST_MORPH1:     d.morph1 += scaled99; break;
+                    case DEST_MORPH2:     d.morph2 += scaled99; break;
+                    case DEST_PITCH:      d.pitch += modVal * 12.0f; break;
+                    case DEST_DECAY:      d.decay += scaled99; break;
+                    case DEST_VOLUME2:    d.vol2 += scaled99; break;
+                    case DEST_FINE1:      d.fine1 += scaled99; break;
+                    case DEST_FINE2:      d.fine2 += scaled99; break;
+                    case DEST_SAMP_POS:   d.morph1 += scaled99; break;
+                    case DEST_SAMP_START: d.sampStart += scaled99; break;
+                    case DEST_GRAN_SIZE:  d.granSize += scaled99; break;
+                    case DEST_GRAN_DENS:  d.granDens += scaled99; break;
+                    case DEST_GRAN_SCAT:  d.granScat += scaled99; break;
+                    default: break;
+                }
+            }
+        }
+    }
+}
+
 void InitVolumeCurve() {
     constexpr float kMinDb = -40.0f; // Lower to -50.0f or -60.0f for more attenuation
     for (int i = 0; i < kVolCurveSize; ++i) {
@@ -653,7 +709,7 @@ struct SynthVoice {
         if (morph < 33) {
             // Scale by 2*PI only at the moment of sine calculation
             float t = morph / 33.0f;
-            float sineSample = sinf(normPhase * 6.2831853f);
+            float sineSample = FastSine(normPhase);
             if (t <= 0.0f) return sineSample;
             return (1.0f - t) * sineSample + t * WaveTri(normPhase);
         } else if (morph < 66) {
@@ -840,6 +896,24 @@ struct SynthVoice {
             default: break;
         }
 
+        // Below ~-60 dB the oscillators are inaudible; stop running them.
+        constexpr float kSilentAmp = 0.001f;
+        if (stage1 != ENV1_ATTACK && envLevel1 <= kSilentAmp
+            && stage2 != ENV2_ATTACK && envLevel2 <= kSilentAmp
+            && (noiseStage == NOISE_IDLE || noiseEnvLevel <= kSilentAmp)
+            && !choking) {
+            envLevel1 = 0.0f;
+            envLevel2 = 0.0f;
+            noiseEnvLevel = 0.0f;
+            filterEnvLevel = 0.0f;
+            stage1 = ENV1_IDLE;
+            stage2 = ENV2_IDLE;
+            noiseStage = NOISE_IDLE;
+            filterStage = FLT_IDLE;
+            active = false;
+            return 0.0f;
+        }
+
         // --- 5. PROCESS REAL-TIME PITCH DECAY SWEEP ---
         if (pitchModFactor > 1.0f) {
             pitchModFactor = 1.0f + (pitchModFactor - 1.0f) * pitchDecayRate;
@@ -864,56 +938,18 @@ struct SynthVoice {
             // Recalculate envelope parameters at block rate instead of per sample
             float invSampleRate = 1.0f / (float)g_sampleRate;
 
-            // Reset mod offsets, then sum LFO targets before envelope coeffs
-            // so DEST_DECAY can lengthen/shorten amp decay in this same block.
-            modCutoffOffset = 0.0f;
-            modResOffset = 0.0f;
-            modVol1Offset = 0.0f;
-            modVol2Offset = 0.0f;
-            modMorph1Offset = 0.0f;
-            modMorph2Offset = 0.0f;
-            modPitchOffset = 0.0f;
-            modDecayOffset = 0.0f;
-            modFine1Offset = 0.0f;
-            modFine2Offset = 0.0f;
-
-            for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
-                const Track& srcTrk = tracks[srcTrkIdx];
-
-                for (int s = 0; s < 3; ++s) {
-                    const ModSlot& m = srcTrk.lfo1Slots[s];
-                    if (m.destType == 1 && m.destTrack == trackIdx) {
-                        float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
-                        if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                        else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                        else if (m.destParam == DEST_VOLUME)     modVol1Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_MORPH1)     modMorph1Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_MORPH2)     modMorph2Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                        else if (m.destParam == DEST_DECAY)      modDecayOffset += modVal * 99.0f;
-                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_FINE1)      modFine1Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_FINE2)      modFine2Offset += modVal * 99.0f;
-                    }
-                }
-
-                for (int s = 0; s < 3; ++s) {
-                    const ModSlot& m = srcTrk.lfo2Slots[s];
-                    if (m.destType == 1 && m.destTrack == trackIdx) {
-                        float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
-                        if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                        else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                        else if (m.destParam == DEST_VOLUME)     modVol1Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_MORPH1)     modMorph1Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_MORPH2)     modMorph2Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                        else if (m.destParam == DEST_DECAY)      modDecayOffset += modVal * 99.0f;
-                        else if (m.destParam == DEST_VOLUME2)    modVol2Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_FINE1)      modFine1Offset += modVal * 99.0f;
-                        else if (m.destParam == DEST_FINE2)      modFine2Offset += modVal * 99.0f;
-                    }
-                }
-            }
+            // LFO offsets are track-rate (filled once per chunk).
+            const TrackVoiceMod& tm = g_trackVoiceMod[trackIdx];
+            modCutoffOffset = tm.cutoff;
+            modResOffset = tm.res;
+            modVol1Offset = tm.vol;
+            modVol2Offset = tm.vol2;
+            modMorph1Offset = tm.morph1;
+            modMorph2Offset = tm.morph2;
+            modPitchOffset = tm.pitch;
+            modDecayOffset = tm.decay;
+            modFine1Offset = tm.fine1;
+            modFine2Offset = tm.fine2;
 
             envAtkRate1 = invSampleRate / GetEnvTime((float)GetParam(sp.attack, trk.attack));
             float decTime1 = GetEnvTime((float)GetParam(sp.decay, trk.decay) + modDecayOffset);
@@ -1252,6 +1288,7 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
         ma_uint32 chunkSize = (frameCount - samplesProcessed < 64) ? (frameCount - samplesProcessed) : 64;
 
         UpdateGlobalLFOs();
+        AccumulateTrackVoiceMods();
 
         // Master FX mix modulation reads only g_globalLFOValues, which updates
         // once per chunk. Computing it per sample was 48 Track-straddling
@@ -1736,13 +1773,16 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 if (currentStepIdx < 0) currentStepIdx = 0;
                 const Step& step = tracks[t].steps[currentStepIdx];
 
-                float processedSum = g_trackTapeFX[t].process(
+                float processedSum = trackDry[t];
+                if (s_finalMix[t] > 0) {
+                    processedSum = g_trackTapeFX[t].process(
                                 trackDry[t],
                                 s_finalMem[t], s_finalHds[t], s_finalSpr[t], s_finalSpd[t], s_finalTet[t],
                                 s_finalDrf[t], s_finalDrt[t], s_finalFdb[t], s_finalFsp[t], s_finalFsc[t],
                                 s_finalFrz[t], s_finalSmr[t], s_finalSms[t], s_finalMix[t],
                                 g_sampleRate
                             );
+                }
 
                 masterDryMono += processedSum;
 
@@ -2078,16 +2118,30 @@ static bool OpenAudioDeviceOnce(bool duplex, int captureIdx, ma_uint32 rate, ma_
 }
 
 static bool OpenAudioDevice(bool duplex, int captureIdx) {
-    // Playback-only gets 512 frames so an overloaded callback has twice the
-    // deadline. Duplex/USB stays at 256 to match the Digitone's USB period.
-    const ma_uint32 period = duplex ? 256 : 512;
+    if (duplex) {
+        // Kept for Digitone USB revisit (Shift+T). Default playback does not
+        // take this path.
+        const ma_uint32 usbPeriod = 256;
 #if defined(__linux__)
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, period, duplex, true))  return true;
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, period, duplex, false)) return true;
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, period, duplex, false)) return true;
+        if (OpenAudioDeviceOnce(true, captureIdx, 48000, usbPeriod, true, true))   return true;
+        if (OpenAudioDeviceOnce(true, captureIdx, 48000, usbPeriod, true, false))  return true;
+        if (OpenAudioDeviceOnce(true, captureIdx, 44100, usbPeriod, true, false))  return true;
 #else
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 48000, period, false, false)) return true;
-    if (OpenAudioDeviceOnce(duplex, captureIdx, 44100, period, false, false)) return true;
+        if (OpenAudioDeviceOnce(true, captureIdx, 48000, usbPeriod, false, false)) return true;
+        if (OpenAudioDeviceOnce(true, captureIdx, 44100, usbPeriod, false, false)) return true;
+#endif
+        return false;
+    }
+
+    // Playback: 44.1 kHz / 512 frames (~9% fewer samples than 48k).
+    const ma_uint32 period = 512;
+#if defined(__linux__)
+    if (OpenAudioDeviceOnce(false, captureIdx, 44100, period, false, true))  return true;
+    if (OpenAudioDeviceOnce(false, captureIdx, 44100, period, false, false)) return true;
+    if (OpenAudioDeviceOnce(false, captureIdx, 48000, period, false, false)) return true;
+#else
+    if (OpenAudioDeviceOnce(false, captureIdx, 44100, period, false, false)) return true;
+    if (OpenAudioDeviceOnce(false, captureIdx, 48000, period, false, false)) return true;
 #endif
     return false;
 }
@@ -2123,6 +2177,7 @@ static void ReinitAudioDevice(bool duplex, int captureIdx) {
 
 void InitAudioEngine() {
     InitVolumeCurve();
+    InitSineLut();
     if (ma_context_init(nullptr, 0, nullptr, &g_maContext) == MA_SUCCESS)
         g_maContextInit = true;
     RefreshUsbCaptureDevicesInternal();

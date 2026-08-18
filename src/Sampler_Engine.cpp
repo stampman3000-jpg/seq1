@@ -256,6 +256,23 @@ float SamplerVoice::Process(int trackIdx) {
          default: break;
      }
 
+    // Below ~-60 dB the playhead is inaudible; skip the rest of the voice.
+    constexpr float kSilentAmp = 0.001f;
+    if (stage != ENV_ATTACK && envLevel <= kSilentAmp && !choking) {
+        envLevel = 0.0f;
+        filterEnvLevel = 0.0f;
+        stage = ENV_IDLE;
+        filterStage = FLT_IDLE;
+        active = false;
+        for (int i = 0; i < MAX_GRAINS; ++i) {
+            if (grainPool[i].active) {
+                grainPool[i].active = false;
+                g_globalActiveGrains--;
+            }
+        }
+        return 0.0f;
+    }
+
      // 2. Process Filter Envelope (ADSR)
      switch (filterStage) {
          case FLT_ATTACK:
@@ -291,60 +308,19 @@ float SamplerVoice::Process(int trackIdx) {
         // Recalculate envelope parameters at block rate instead of per sample
         float invSampleRate = 1.0f / (float)g_sampleRate;
 
-        // Reset mod offsets, then sum LFO targets before envelope coeffs
-        modCutoffOffset = 0.0f;
-        modResOffset = 0.0f;
-        modVolOffset = 0.0f;
-        modPitchOffset = 0.0f;
-        modMorphOffset = 0.0f;
-        modFineOffset = 0.0f;
-        modDecayOffset = 0.0f;
-        modSampStartOffset = 0.0f;
-        modGranSizeOffset = 0.0f;
-        modGranDensOffset = 0.0f;
-        modGranScatOffset = 0.0f;
-
-        for (int srcTrkIdx = 0; srcTrkIdx < 8; ++srcTrkIdx) {
-            const Track& srcTrk = tracks[srcTrkIdx];
-
-            for (int s = 0; s < 3; ++s) {
-                const ModSlot& m = srcTrk.lfo1Slots[s];
-                if (m.destType == 1 && m.destTrack == trackIdx) {
-                    float modVal = g_globalLFOValues[srcTrkIdx][0] * (m.depth / 99.0f);
-                    if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f; // alias: POS
-                    else if (m.destParam == DEST_SAMP_POS)   modMorphOffset += modVal * 99.0f; // explicit POS
-                    else if (m.destParam == DEST_FINE2)      modFineOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_DECAY)      modDecayOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;
-                }
-            }
-
-            for (int s = 0; s < 3; ++s) {
-                const ModSlot& m = srcTrk.lfo2Slots[s];
-                if (m.destType == 1 && m.destTrack == trackIdx) {
-                    float modVal = g_globalLFOValues[srcTrkIdx][1] * (m.depth / 99.0f);
-                    if (m.destParam == DEST_CUTOFF)          modCutoffOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_RESONANCE)  modResOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_VOLUME)     modVolOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_PITCH)      modPitchOffset += modVal * 12.0f;
-                    else if (m.destParam == DEST_MORPH1)     modMorphOffset += modVal * 99.0f; // alias: POS
-                    else if (m.destParam == DEST_SAMP_POS)   modMorphOffset += modVal * 99.0f; // explicit POS
-                    else if (m.destParam == DEST_FINE2)      modFineOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_DECAY)      modDecayOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_SAMP_START) modSampStartOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_GRAN_SIZE)  modGranSizeOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_GRAN_DENS)  modGranDensOffset += modVal * 99.0f;
-                    else if (m.destParam == DEST_GRAN_SCAT)  modGranScatOffset += modVal * 99.0f;
-                }
-            }
-        }
+        // LFO offsets are track-rate (filled once per chunk).
+        const TrackVoiceMod& tm = g_trackVoiceMod[trackIdx];
+        modCutoffOffset = tm.cutoff;
+        modResOffset = tm.res;
+        modVolOffset = tm.vol;
+        modPitchOffset = tm.pitch;
+        modMorphOffset = tm.morph1;
+        modFineOffset = tm.fine2;
+        modDecayOffset = tm.decay;
+        modSampStartOffset = tm.sampStart;
+        modGranSizeOffset = tm.granSize;
+        modGranDensOffset = tm.granDens;
+        modGranScatOffset = tm.granScat;
 
         envAtkRate = invSampleRate / GetEnvTime((float)GetParam(sp.attack, trk.attack));
         float decTime = GetEnvTime((float)GetParam(sp.decay, trk.decay) + modDecayOffset);
