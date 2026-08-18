@@ -112,7 +112,7 @@ void DrawFocusFrame(int x, int y, int w, int h);
 // label with a leftover number. The focus id ties the readout to the control
 // that was actually edited, so moving to another encoder clears it at once.
 void UiBeginFocusCapture();
-void UiNoteParamEdit(int focusId);
+void UiNoteParamEdit(int focusId, bool editAll = false);
 void UiCaptureFocusLabel(const char* label);
 void UiCaptureFocusValue(int value);
 void UiCaptureFocusText(const char* label, const char* value);

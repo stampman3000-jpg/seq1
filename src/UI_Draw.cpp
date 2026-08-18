@@ -197,6 +197,7 @@ static char  g_focusValue[16] = {0};
 static bool  g_hasLabel = false; // both set during the current frame's draw
 static bool  g_hasValue = false;
 static int   g_editFocusId = -1; // the control that was being edited
+static bool  g_editAll = false;  // Ctrl+encoder: same delta on all 8 tracks
 static float g_lastEditTime = -1000.0f;
 
 static const float kEditOverlayHold = 0.45f; // fully bright
@@ -213,9 +214,10 @@ void UiBeginFocusCapture() {
     g_hasValue = false;
 }
 
-void UiNoteParamEdit(int focusId) {
+void UiNoteParamEdit(int focusId, bool editAll) {
     g_editFocusId = focusId;
     g_lastEditTime = g_uiTime;
+    g_editAll = editAll;
 }
 
 void UiCaptureFocusLabel(const char* label) {
@@ -253,7 +255,13 @@ void DrawEditOverlay(int focusId) {
         trim = (t < 0.5f) ? UI_LABEL : UI_CHROME;
     }
 
-    int labelW = MeasureText3x5(g_focusLabel);
+    char allLabel[28];
+    const char* label = g_focusLabel;
+    if (g_editAll) {
+        snprintf(allLabel, sizeof(allLabel), "ALL %s", g_focusLabel);
+        label = allLabel;
+    }
+    int labelW = MeasureText3x5(label);
     int valueW = MeasureText5x7(g_focusValue);
     int inner = (labelW > valueW) ? labelW : valueW;
 
@@ -266,7 +274,7 @@ void DrawEditOverlay(int focusId) {
     DrawRectangle(x, y, w, h, UI_BG);
     DrawPixelRectLines(x, y, w, h, trim);
 
-    Draw3x5String(g_focusLabel, x + (w - labelW) / 2, y + padY, trim);
+    Draw3x5String(label, x + (w - labelW) / 2, y + padY, trim);
     Draw5x7String(g_focusValue, x + (w - valueW) / 2, y + padY + FONT_HEIGHT_3x5 + gap, accent);
 }
 

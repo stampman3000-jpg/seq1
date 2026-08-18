@@ -1031,7 +1031,7 @@ static void HandleSettingsHubInputs(int encoderTurn, bool encoderButton, bool is
 }
 
 // Manages real-time value increments and bounds editing for active synth and master FX screens
-static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, bool isShiftDown, float frameTime) {
+static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, bool isShiftDown, bool isCtrlDown, float frameTime) {
     static float keyRepeatTimer = 0.0f;
     bool triggerAction = false;
     
@@ -1105,21 +1105,60 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
 
         if (change == 0) return;
 
-    // Single choke point for every parameter edit, so the large readout does
-    // not need a hook per parameter. The sequencer pages are excluded because
-    // none of the branches below serve them; their note and velocity edits
-    // report the readout themselves.
-    if (currentScreen != SCREEN_SEQ_1_4 && currentScreen != SCREEN_SEQ_5_8) {
-        UiNoteParamEdit(CurrentFocusId());
-    }
-
     Track& trk = tracks[selectedTrack];
     StepParams& sp = trk.steps[cursorStep].params;
     bool isStepLock = IsKeyDown(KEY_X) || encoderButton;
 
+    // Ctrl + encoder: same delta on all 8 tracks. Ctrl + arrows stay page
+    // nav. X / encoder click still lock the selected step only. USB capture
+    // and the master FX page are not per-track.
+    bool editAll = isCtrlDown && encoderTurn != 0 && !isStepLock
+        && currentScreen != SCREEN_GLOBAL_FX
+        && currentScreen != SCREEN_SEQ_1_4
+        && currentScreen != SCREEN_SEQ_5_8;
+    if (editAll && currentScreen == SCREEN_SYNTH && trk.engineType == ENGINE_USB && synthGridCol == 0)
+        editAll = false;
+
+    if (currentScreen != SCREEN_SEQ_1_4 && currentScreen != SCREEN_SEQ_5_8) {
+        UiNoteParamEdit(CurrentFocusId(), editAll);
+    }
+
     auto EditParam = [&](int& stepVal, int trackVal, int changeAmt, int minV, int maxV) {
         int base = (stepVal == -1) ? trackVal : stepVal;
         stepVal = std::clamp(base + changeAmt, minV, maxV);
+    };
+
+    auto SetTrk = [&](int Track::* member, int changeAmt, int minV, int maxV) {
+        if (editAll) {
+            for (int t = 0; t < 8; ++t)
+                tracks[t].*member = std::clamp(tracks[t].*member + changeAmt, minV, maxV);
+        } else {
+            trk.*member = std::clamp(trk.*member + changeAmt, minV, maxV);
+        }
+    };
+
+    auto ToggleTrk = [&](int Track::* member, int a, int b) {
+        if (editAll) {
+            for (int t = 0; t < 8; ++t)
+                tracks[t].*member = (tracks[t].*member == a) ? b : a;
+        } else {
+            trk.*member = (trk.*member == a) ? b : a;
+        }
+    };
+
+    auto WrapTrk = [&](int Track::* member, int changeAmt, int minV, int maxV) {
+        auto wrap = [&](int& v) {
+            int n = v + changeAmt;
+            int span = maxV - minV + 1;
+            while (n < minV) n += span;
+            while (n > maxV) n -= span;
+            v = n;
+        };
+        if (editAll) {
+            for (int t = 0; t < 8; ++t) wrap(tracks[t].*member);
+        } else {
+            wrap(trk.*member);
+        }
     };
 
     if (currentScreen == SCREEN_SYNTH) {
@@ -1127,20 +1166,20 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
             if (synthGridRow == 1) {
                 if (synthGridCol == 0) {
                     if (isStepLock) sp.sampleLoop = (sp.sampleLoop == -1) ? ((trk.sampleLoop == 0) ? 1 : 0) : ((sp.sampleLoop == 0) ? 1 : 0);
-                    else            trk.sampleLoop = (trk.sampleLoop == 0) ? 1 : 0;
+                    else            ToggleTrk(&Track::sampleLoop, 0, 1);
                 }
-                else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.sampleStart, trk.sampleStart, change, 0, 99); else trk.sampleStart = std::clamp(trk.sampleStart + change, 0, 99); }
-                else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.sampleLength, trk.sampleLength, change, 0, 99); else trk.sampleLength = std::clamp(trk.sampleLength + change, 0, 99); }
-                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.loopStart, trk.loopStart, change, 0, 99); else trk.loopStart = std::clamp(trk.loopStart + change, 0, 99); }
-                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.loopEnd, trk.loopEnd, change, 0, 99); else trk.loopEnd = std::clamp(trk.loopEnd + change, 0, 99); }
-                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.attack, trk.attack, change, 0, 99); else trk.attack = std::clamp(trk.attack + change, 0, 99); }
-                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.decay, trk.decay, change, 0, 99); else trk.decay = std::clamp(trk.decay + change, 0, 99); }
-                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.sustain, trk.sustain, change, 0, 99); else trk.sustain = std::clamp(trk.sustain + change, 0, 99); }
-                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.release, trk.release, change, 0, 99); else trk.release = std::clamp(trk.release + change, 0, 99); }
-                else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.pitchSweepDepth, trk.pitchSweepDepth, change, 0, 99); else trk.pitchSweepDepth = std::clamp(trk.pitchSweepDepth + change, 0, 99); }
-                else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.pitchSweepTime, trk.pitchSweepTime, change, 0, 99); else trk.pitchSweepTime = std::clamp(trk.pitchSweepTime + change, 0, 99); }
-                else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.bitRed, trk.bitRed, change, 0, 99); else trk.bitRed = std::clamp(trk.bitRed + change, 0, 99); }
-                else if (synthGridCol == 12){ if (isStepLock) EditParam(sp.volume, trk.volume, change, 0, 99); else trk.volume = std::clamp(trk.volume + change, 0, 99); }
+                else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.sampleStart, trk.sampleStart, change, 0, 99); else SetTrk(&Track::sampleStart, change, 0, 99); }
+                else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.sampleLength, trk.sampleLength, change, 0, 99); else SetTrk(&Track::sampleLength, change, 0, 99); }
+                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.loopStart, trk.loopStart, change, 0, 99); else SetTrk(&Track::loopStart, change, 0, 99); }
+                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.loopEnd, trk.loopEnd, change, 0, 99); else SetTrk(&Track::loopEnd, change, 0, 99); }
+                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.attack, trk.attack, change, 0, 99); else SetTrk(&Track::attack, change, 0, 99); }
+                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.decay, trk.decay, change, 0, 99); else SetTrk(&Track::decay, change, 0, 99); }
+                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.sustain, trk.sustain, change, 0, 99); else SetTrk(&Track::sustain, change, 0, 99); }
+                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.release, trk.release, change, 0, 99); else SetTrk(&Track::release, change, 0, 99); }
+                else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.pitchSweepDepth, trk.pitchSweepDepth, change, 0, 99); else SetTrk(&Track::pitchSweepDepth, change, 0, 99); }
+                else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.pitchSweepTime, trk.pitchSweepTime, change, 0, 99); else SetTrk(&Track::pitchSweepTime, change, 0, 99); }
+                else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.bitRed, trk.bitRed, change, 0, 99); else SetTrk(&Track::bitRed, change, 0, 99); }
+                else if (synthGridCol == 12){ if (isStepLock) EditParam(sp.volume, trk.volume, change, 0, 99); else SetTrk(&Track::volume, change, 0, 99); }
             }
             else if (synthGridRow == 2) {
                 if (synthGridCol == 0) {
@@ -1149,12 +1188,12 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                         int base = (sp.algorithm == -1) ? trk.algorithm : sp.algorithm;
                         sp.algorithm = (base == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
                     } else {
-                        trk.algorithm = (trk.algorithm == ALGO_SAMPLE) ? ALGO_GRANULAR : ALGO_SAMPLE;
+                        ToggleTrk(&Track::algorithm, ALGO_SAMPLE, ALGO_GRANULAR);
                     }
                 }
                 else if (synthGridCol == 1) {
                     if (isStepLock) EditParam(sp.sampleSlot, trk.sampleSlot, change, 0, 15);
-                    else            trk.sampleSlot = std::clamp(trk.sampleSlot + change, 0, 15);
+                    else            SetTrk(&Track::sampleSlot, change, 0, 15);
                 }
                 else if (synthGridCol == 2) {
                     int effAlgo = (isStepLock && sp.algorithm != -1) ? sp.algorithm : trk.algorithm;
@@ -1164,15 +1203,23 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                         if (change > 0)      newSdiv = std::clamp(baseSdiv * 2, 1, 64);
                         else if (change < 0) newSdiv = std::clamp(baseSdiv / 2, 1, 64);
                         if (isStepLock) sp.sliceDivisions = newSdiv;
-                        else            trk.sliceDivisions = newSdiv;
+                        else if (editAll) {
+                            for (int t = 0; t < 8; ++t) {
+                                int b = tracks[t].sliceDivisions;
+                                if (change > 0)      tracks[t].sliceDivisions = std::clamp(b * 2, 1, 64);
+                                else if (change < 0) tracks[t].sliceDivisions = std::clamp(b / 2, 1, 64);
+                            }
+                        } else {
+                            trk.sliceDivisions = newSdiv;
+                        }
                     }
                 }
-                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.sampleTune, trk.sampleTune, change, -24, 24); else trk.sampleTune = std::clamp(trk.sampleTune + change, -24, 24); }
-                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.fine2, trk.fine2, change, -99, 99); else trk.fine2 = std::clamp(trk.fine2 + change, -99, 99); }
-                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.grainPosition, trk.grainPosition, change, 0, 99); else trk.grainPosition = std::clamp(trk.grainPosition + change, 0, 99); }
-                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.grainSize, trk.grainSize, change, 0, 99); else trk.grainSize = std::clamp(trk.grainSize + change, 0, 99); }
-                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.grainDensity, trk.grainDensity, change, 0, 99); else trk.grainDensity = std::clamp(trk.grainDensity + change, 0, 99); }
-                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.grainScatter, trk.grainScatter, change, 0, 99); else trk.grainScatter = std::clamp(trk.grainScatter + change, 0, 99); }
+                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.sampleTune, trk.sampleTune, change, -24, 24); else SetTrk(&Track::sampleTune, change, -24, 24); }
+                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.fine2, trk.fine2, change, -99, 99); else SetTrk(&Track::fine2, change, -99, 99); }
+                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.grainPosition, trk.grainPosition, change, 0, 99); else SetTrk(&Track::grainPosition, change, 0, 99); }
+                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.grainSize, trk.grainSize, change, 0, 99); else SetTrk(&Track::grainSize, change, 0, 99); }
+                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.grainDensity, trk.grainDensity, change, 0, 99); else SetTrk(&Track::grainDensity, change, 0, 99); }
+                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.grainScatter, trk.grainScatter, change, 0, 99); else SetTrk(&Track::grainScatter, change, 0, 99); }
             }
         } else if (trk.engineType == ENGINE_USB) {
             if (synthGridCol == 0) {
@@ -1182,88 +1229,88 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                     SetUsbCaptureIndex(GetUsbCaptureIndex() + dir);
             } else if (synthGridCol == 1) {
                 if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99);
-                else trk.masterVolume = std::clamp(trk.masterVolume + change, 0, 99);
+                else SetTrk(&Track::masterVolume, change, 0, 99);
             }
         } else {
             if (synthGridRow == 1) {
-                if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.morph, trk.morph, change, 0, 99); else trk.morph = std::clamp(trk.morph + change, 0, 99); }
-                else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.coarse, trk.coarse, change, -24, 24); else trk.coarse = std::clamp(trk.coarse + change, -24, 24); }
-                else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.fine, trk.fine, change, -99, 99); else trk.fine = std::clamp(trk.fine + change, -99, 99); }
-                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.volume, trk.volume, change, 0, 99); else trk.volume = std::clamp(trk.volume + change, 0, 99); }
-                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.attack, trk.attack, change, 0, 99); else trk.attack = std::clamp(trk.attack + change, 0, 99); }
-                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.decay, trk.decay, change, 0, 99); else trk.decay = std::clamp(trk.decay + change, 0, 99); }
-                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.sustain, trk.sustain, change, 0, 99); else trk.sustain = std::clamp(trk.sustain + change, 0, 99); }
-                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.release, trk.release, change, 0, 99); else trk.release = std::clamp(trk.release + change, 0, 99); }
-                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.pitchSweepDepth, trk.pitchSweepDepth, change, 0, 99); else trk.pitchSweepDepth = std::clamp(trk.pitchSweepDepth + change, 0, 99); }
-                else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.pitchSweepTime, trk.pitchSweepTime, change, 0, 99); else trk.pitchSweepTime = std::clamp(trk.pitchSweepTime + change, 0, 99); }
-                else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.fmFeedback, trk.fmFeedback, change, 0, 99); else trk.fmFeedback = std::clamp(trk.fmFeedback + change, 0, 99); }
-                else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99); else trk.masterVolume = std::clamp(trk.masterVolume + change, 0, 99); }
+                if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.morph, trk.morph, change, 0, 99); else SetTrk(&Track::morph, change, 0, 99); }
+                else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.coarse, trk.coarse, change, -24, 24); else SetTrk(&Track::coarse, change, -24, 24); }
+                else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.fine, trk.fine, change, -99, 99); else SetTrk(&Track::fine, change, -99, 99); }
+                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.volume, trk.volume, change, 0, 99); else SetTrk(&Track::volume, change, 0, 99); }
+                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.attack, trk.attack, change, 0, 99); else SetTrk(&Track::attack, change, 0, 99); }
+                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.decay, trk.decay, change, 0, 99); else SetTrk(&Track::decay, change, 0, 99); }
+                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.sustain, trk.sustain, change, 0, 99); else SetTrk(&Track::sustain, change, 0, 99); }
+                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.release, trk.release, change, 0, 99); else SetTrk(&Track::release, change, 0, 99); }
+                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.pitchSweepDepth, trk.pitchSweepDepth, change, 0, 99); else SetTrk(&Track::pitchSweepDepth, change, 0, 99); }
+                else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.pitchSweepTime, trk.pitchSweepTime, change, 0, 99); else SetTrk(&Track::pitchSweepTime, change, 0, 99); }
+                else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.fmFeedback, trk.fmFeedback, change, 0, 99); else SetTrk(&Track::fmFeedback, change, 0, 99); }
+                else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.masterVolume, trk.masterVolume, change, 0, 99); else SetTrk(&Track::masterVolume, change, 0, 99); }
             }
             else if (synthGridRow == 2) {
-                if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.morph2, trk.morph2, change, 0, 99); else trk.morph2 = std::clamp(trk.morph2 + change, 0, 99); }
+                if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.morph2, trk.morph2, change, 0, 99); else SetTrk(&Track::morph2, change, 0, 99); }
                 else if (synthGridCol == 1) {
                     if (trk.algorithm == ALGO_CARRIER_MOD) {
                         int baseC2 = (isStepLock && sp.coarse2 != -1) ? sp.coarse2 : trk.coarse2;
                         int newC2 = std::clamp(baseC2 + ((change > 0) ? 1 : ((change < 0) ? -1 : 0)), 1, 16);
                         if (isStepLock) sp.coarse2 = newC2;
-                        else            trk.coarse2 = newC2;
+                        else            SetTrk(&Track::coarse2, (change > 0) ? 1 : ((change < 0) ? -1 : 0), 1, 16);
                     } else {
                         if (isStepLock) EditParam(sp.coarse2, trk.coarse2, change, -24, 24);
-                        else            trk.coarse2 = std::clamp(trk.coarse2 + change, -24, 24);
+                        else            SetTrk(&Track::coarse2, change, -24, 24);
                     }
                 }
-                else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.fine2, trk.fine2, change, -99, 99); else trk.fine2 = std::clamp(trk.fine2 + change, -99, 99); }
-                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.volume2, trk.volume2, change, 0, 99); else trk.volume2 = std::clamp(trk.volume2 + change, 0, 99); }
-                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.attack2, trk.attack2, change, 0, 99); else trk.attack2 = std::clamp(trk.attack2 + change, 0, 99); }
-                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.decay2, trk.decay2, change, 0, 99); else trk.decay2 = std::clamp(trk.decay2 + change, 0, 99); }
-                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.sustain2, trk.sustain2, change, 0, 99); else trk.sustain2 = std::clamp(trk.sustain2 + change, 0, 99); }
-                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.release2, trk.release2, change, 0, 99); else trk.release2 = std::clamp(trk.release2 + change, 0, 99); }
-                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.noiseAttack, trk.noiseAttack, change, 0, 99); else trk.noiseAttack = std::clamp(trk.noiseAttack + change, 0, 99); }
-                else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.noiseHold, trk.noiseHold, change, 0, 99); else trk.noiseHold = std::clamp(trk.noiseHold + change, 0, 99); }
-                else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.noiseDecay, trk.noiseDecay, change, 0, 99); else trk.noiseDecay = std::clamp(trk.noiseDecay + change, 0, 99); }
-                else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.noiseVolume, trk.noiseVolume, change, 0, 99); else trk.noiseVolume = std::clamp(trk.noiseVolume + change, 0, 99); }
+                else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.fine2, trk.fine2, change, -99, 99); else SetTrk(&Track::fine2, change, -99, 99); }
+                else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.volume2, trk.volume2, change, 0, 99); else SetTrk(&Track::volume2, change, 0, 99); }
+                else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.attack2, trk.attack2, change, 0, 99); else SetTrk(&Track::attack2, change, 0, 99); }
+                else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.decay2, trk.decay2, change, 0, 99); else SetTrk(&Track::decay2, change, 0, 99); }
+                else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.sustain2, trk.sustain2, change, 0, 99); else SetTrk(&Track::sustain2, change, 0, 99); }
+                else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.release2, trk.release2, change, 0, 99); else SetTrk(&Track::release2, change, 0, 99); }
+                else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.noiseAttack, trk.noiseAttack, change, 0, 99); else SetTrk(&Track::noiseAttack, change, 0, 99); }
+                else if (synthGridCol == 9) { if (isStepLock) EditParam(sp.noiseHold, trk.noiseHold, change, 0, 99); else SetTrk(&Track::noiseHold, change, 0, 99); }
+                else if (synthGridCol == 10){ if (isStepLock) EditParam(sp.noiseDecay, trk.noiseDecay, change, 0, 99); else SetTrk(&Track::noiseDecay, change, 0, 99); }
+                else if (synthGridCol == 11){ if (isStepLock) EditParam(sp.noiseVolume, trk.noiseVolume, change, 0, 99); else SetTrk(&Track::noiseVolume, change, 0, 99); }
             }
         }
     }
     else if (currentScreen == SCREEN_TRACK_PARAMS) {
         if (synthGridRow == 1) {
-            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.filterCutoff, trk.filterCutoff, change, 0, 99); else trk.filterCutoff = std::clamp(trk.filterCutoff + change, 0, 99); }
-            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.filterResonance, trk.filterResonance, change, 0, 99); else trk.filterResonance = std::clamp(trk.filterResonance + change, 0, 99); }
+            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.filterCutoff, trk.filterCutoff, change, 0, 99); else SetTrk(&Track::filterCutoff, change, 0, 99); }
+            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.filterResonance, trk.filterResonance, change, 0, 99); else SetTrk(&Track::filterResonance, change, 0, 99); }
             else if (synthGridCol == 2) {
                 int baseT = (isStepLock && sp.filterType != -1) ? sp.filterType : trk.filterType;
                 int newT = baseT + change;
                 if (newT < 0) newT = 2; if (newT > 2) newT = 0;
                 if (isStepLock) sp.filterType = newT;
-                else            trk.filterType = newT;
+                else            WrapTrk(&Track::filterType, change, 0, 2);
             }
-            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterEnvDepth, trk.filterEnvDepth, change, 0, 99); else trk.filterEnvDepth = std::clamp(trk.filterEnvDepth + change, 0, 99); }
+            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterEnvDepth, trk.filterEnvDepth, change, 0, 99); else SetTrk(&Track::filterEnvDepth, change, 0, 99); }
             else if (synthGridCol == 4) {
                 int baseW = (isStepLock && sp.lfo1Wave != -1) ? sp.lfo1Wave : trk.lfo1Wave;
                 int newW = baseW + change;
                 if (newW < 0) newW = 5; if (newW > 5) newW = 0;
                 if (isStepLock) sp.lfo1Wave = newW;
-                else            trk.lfo1Wave = newW;
+                else            WrapTrk(&Track::lfo1Wave, change, 0, 5);
             }
-            else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.lfo1Speed, trk.lfo1Speed, change, 0, 99); else trk.lfo1Speed = std::clamp(trk.lfo1Speed + change, 0, 99); }
-            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.lfo1Depth, trk.lfo1Depth, change, 0, 99); else trk.lfo1Depth = std::clamp(trk.lfo1Depth + change, 0, 99); }
+            else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.lfo1Speed, trk.lfo1Speed, change, 0, 99); else SetTrk(&Track::lfo1Speed, change, 0, 99); }
+            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.lfo1Depth, trk.lfo1Depth, change, 0, 99); else SetTrk(&Track::lfo1Depth, change, 0, 99); }
             else if (synthGridCol == 7) {
                 int baseTrg = (isStepLock && sp.lfo1Trigger != -1) ? sp.lfo1Trigger : trk.lfo1Trigger;
                 int newTrg = (baseTrg == 0) ? 1 : 0;
                 if (isStepLock) sp.lfo1Trigger = newTrg;
-                else            trk.lfo1Trigger = newTrg;
+                else            ToggleTrk(&Track::lfo1Trigger, 0, 1);
             }
             else if (synthGridCol == 8) {
                 int baseSync = (isStepLock && sp.lfo1Sync != -1) ? sp.lfo1Sync : trk.lfo1Sync;
                 int newSync = (baseSync == 0) ? 1 : 0;
                 if (isStepLock) sp.lfo1Sync = newSync;
-                else            trk.lfo1Sync = newSync;
+                else            ToggleTrk(&Track::lfo1Sync, 0, 1);
             }
         }
         else if (synthGridRow == 3) {
-            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.filterAttack, trk.filterAttack, change, 0, 99); else trk.filterAttack = std::clamp(trk.filterAttack + change, 0, 99); }
-            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.filterDecay, trk.filterDecay, change, 0, 99); else trk.filterDecay = std::clamp(trk.filterDecay + change, 0, 99); }
-            else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.filterSustain, trk.filterSustain, change, 0, 99); else trk.filterSustain = std::clamp(trk.filterSustain + change, 0, 99); }
-            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterRelease, trk.filterRelease, change, 0, 99); else trk.filterRelease = std::clamp(trk.filterRelease + change, 0, 99); }
+            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.filterAttack, trk.filterAttack, change, 0, 99); else SetTrk(&Track::filterAttack, change, 0, 99); }
+            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.filterDecay, trk.filterDecay, change, 0, 99); else SetTrk(&Track::filterDecay, change, 0, 99); }
+            else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.filterSustain, trk.filterSustain, change, 0, 99); else SetTrk(&Track::filterSustain, change, 0, 99); }
+            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterRelease, trk.filterRelease, change, 0, 99); else SetTrk(&Track::filterRelease, change, 0, 99); }
             else if (synthGridCol == 4) { // VOY & PRT Slot
                                 // Both parameters require Shift combinations because Shift-less arrows navigate.
                                 if (encoderTurn != 0) {
@@ -1273,14 +1320,14 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                                             int base = (sp.glideTime == -1) ? trk.glideTime : sp.glideTime;
                                             sp.glideTime = std::clamp(base + encoderTurn, 0, 99);
                                         } else {
-                                            trk.glideTime = std::clamp(trk.glideTime + encoderTurn, 0, 99);
+                                            SetTrk(&Track::glideTime, encoderTurn, 0, 99);
                                         }
                                     } else {
                                         if (isStepLock) {
                                             int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
                                             sp.polyMode = std::clamp(base + encoderTurn, 1, 4);
                                         } else {
-                                            trk.polyMode = std::clamp(trk.polyMode + encoderTurn, 1, 4);
+                                            SetTrk(&Track::polyMode, encoderTurn, 1, 4);
                                         }
                                     }
                                 }
@@ -1298,7 +1345,7 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                                             int base = (sp.polyMode == -1) ? trk.polyMode : sp.polyMode;
                                             sp.polyMode = std::clamp(base + voyDir, 1, 4);
                                         } else {
-                                            trk.polyMode = std::clamp(trk.polyMode + voyDir, 1, 4);
+                                            SetTrk(&Track::polyMode, voyDir, 1, 4);
                                         }
                                     }
                                     else if (pressRight || pressLeft) {
@@ -1308,7 +1355,7 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                                             int base = (sp.glideTime == -1) ? trk.glideTime : sp.glideTime;
                                             sp.glideTime = std::clamp(base + prtDir, 0, 99);
                                         } else {
-                                            trk.glideTime = std::clamp(trk.glideTime + prtDir, 0, 99);
+                                            SetTrk(&Track::glideTime, prtDir, 0, 99);
                                         }
                                     }
                                 }
@@ -1318,46 +1365,46 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                 int newW2 = baseW2 + change;
                 if (newW2 < 0) newW2 = 5; if (newW2 > 5) newW2 = 0;
                 if (isStepLock) sp.lfo2Wave = newW2;
-                else            trk.lfo2Wave = newW2;
+                else            WrapTrk(&Track::lfo2Wave, change, 0, 5);
             }
-            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.lfo2Speed, trk.lfo2Speed, change, 0, 99); else trk.lfo2Speed = std::clamp(trk.lfo2Speed + change, 0, 99); }
-            else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.lfo2Depth, trk.lfo2Depth, change, 0, 99); else trk.lfo2Depth = std::clamp(trk.lfo2Depth + change, 0, 99); }
+            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.lfo2Speed, trk.lfo2Speed, change, 0, 99); else SetTrk(&Track::lfo2Speed, change, 0, 99); }
+            else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.lfo2Depth, trk.lfo2Depth, change, 0, 99); else SetTrk(&Track::lfo2Depth, change, 0, 99); }
             else if (synthGridCol == 8) {
                 int baseTrg2 = (isStepLock && sp.lfo2Trigger != -1) ? sp.lfo2Trigger : trk.lfo2Trigger;
                 int newTrg2 = (baseTrg2 == 0) ? 1 : 0;
                 if (isStepLock) sp.lfo2Trigger = newTrg2;
-                else            trk.lfo2Trigger = newTrg2;
+                else            ToggleTrk(&Track::lfo2Trigger, 0, 1);
             }
             else if (synthGridCol == 9) {
                 int baseSync2 = (isStepLock && sp.lfo2Sync != -1) ? sp.lfo2Sync : trk.lfo2Sync;
                 int newSync2 = (baseSync2 == 0) ? 1 : 0;
                 if (isStepLock) sp.lfo2Sync = newSync2;
-                else            trk.lfo2Sync = newSync2;
+                else            ToggleTrk(&Track::lfo2Sync, 0, 1);
             }
         }
     }
     else if (currentScreen == SCREEN_PLACEHOLDER) {
         if (synthGridRow == 1) {
-            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.tapeMemory, trk.tapeMemory, change, 0, 99); else trk.tapeMemory = std::clamp(trk.tapeMemory + change, 0, 99); }
-            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.tapeHeads, trk.tapeHeads, change, 1, 4); else trk.tapeHeads = std::clamp(trk.tapeHeads + change, 1, 4); }
-            else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.tapeSpread, trk.tapeSpread, change, 0, 99); else trk.tapeSpread = std::clamp(trk.tapeSpread + change, 0, 99); }
-            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.tapeSpeed, trk.tapeSpeed, change, 0, 99); else trk.tapeSpeed = std::clamp(trk.tapeSpeed + change, 0, 99); }
-            else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.tapeTether, trk.tapeTether, change, 0, 99); else trk.tapeTether = std::clamp(trk.tapeTether + change, 0, 99); }
-            else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.tapeDrift, trk.tapeDrift, change, 0, 99); else trk.tapeDrift = std::clamp(trk.tapeDrift + change, 0, 99); }
-            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.tapeDriftRate, trk.tapeDriftRate, change, 0, 99); else trk.tapeDriftRate = std::clamp(trk.tapeDriftRate + change, 0, 99); }
-            else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.reverbSend, trk.reverbSend, change, 0, 99); else trk.reverbSend = std::clamp(trk.reverbSend + change, 0, 99); }
-            else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.delaySend, trk.delaySend, change, 0, 99); else trk.delaySend = std::clamp(trk.delaySend + change, 0, 99); }
+            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.tapeMemory, trk.tapeMemory, change, 0, 99); else SetTrk(&Track::tapeMemory, change, 0, 99); }
+            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.tapeHeads, trk.tapeHeads, change, 1, 4); else SetTrk(&Track::tapeHeads, change, 1, 4); }
+            else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.tapeSpread, trk.tapeSpread, change, 0, 99); else SetTrk(&Track::tapeSpread, change, 0, 99); }
+            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.tapeSpeed, trk.tapeSpeed, change, 0, 99); else SetTrk(&Track::tapeSpeed, change, 0, 99); }
+            else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.tapeTether, trk.tapeTether, change, 0, 99); else SetTrk(&Track::tapeTether, change, 0, 99); }
+            else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.tapeDrift, trk.tapeDrift, change, 0, 99); else SetTrk(&Track::tapeDrift, change, 0, 99); }
+            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.tapeDriftRate, trk.tapeDriftRate, change, 0, 99); else SetTrk(&Track::tapeDriftRate, change, 0, 99); }
+            else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.reverbSend, trk.reverbSend, change, 0, 99); else SetTrk(&Track::reverbSend, change, 0, 99); }
+            else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.delaySend, trk.delaySend, change, 0, 99); else SetTrk(&Track::delaySend, change, 0, 99); }
         }
         else if (synthGridRow == 3) {
-            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.tapeFeedback, trk.tapeFeedback, change, 0, 99); else trk.tapeFeedback = std::clamp(trk.tapeFeedback + change, 0, 99); }
-            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.tapeFbSpread, trk.tapeFbSpread, change, 0, 99); else trk.tapeFbSpread = std::clamp(trk.tapeFbSpread + change, 0, 99); }
-            else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.tapeFbSource, trk.tapeFbSource, change, 0, 99); else trk.tapeFbSource = std::clamp(trk.tapeFbSource + change, 0, 99); }
-            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.tapeFreeze, trk.tapeFreeze, change, 0, 99); else trk.tapeFreeze = std::clamp(trk.tapeFreeze + change, 0, 99); }
-            else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.tapeSmearRate, trk.tapeSmearRate, change, 0, 99); else trk.tapeSmearRate = std::clamp(trk.tapeSmearRate + change, 0, 99); }
-            else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.tapeSmearSize, trk.tapeSmearSize, change, 0, 99); else trk.tapeSmearSize = std::clamp(trk.tapeSmearSize + change, 0, 99); }
-            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.tapeMix, trk.tapeMix, change, 0, 99); else trk.tapeMix = std::clamp(trk.tapeMix + change, 0, 99); }
-            else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.saturationSend, trk.saturationSend, change, 0, 99); else trk.saturationSend = std::clamp(trk.saturationSend + change, 0, 99); }
-            else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.autoPanSend, trk.autoPanSend, change, 0, 99); else trk.autoPanSend = std::clamp(trk.autoPanSend + change, 0, 99); }
+            if (synthGridCol == 0)      { if (isStepLock) EditParam(sp.tapeFeedback, trk.tapeFeedback, change, 0, 99); else SetTrk(&Track::tapeFeedback, change, 0, 99); }
+            else if (synthGridCol == 1) { if (isStepLock) EditParam(sp.tapeFbSpread, trk.tapeFbSpread, change, 0, 99); else SetTrk(&Track::tapeFbSpread, change, 0, 99); }
+            else if (synthGridCol == 2) { if (isStepLock) EditParam(sp.tapeFbSource, trk.tapeFbSource, change, 0, 99); else SetTrk(&Track::tapeFbSource, change, 0, 99); }
+            else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.tapeFreeze, trk.tapeFreeze, change, 0, 99); else SetTrk(&Track::tapeFreeze, change, 0, 99); }
+            else if (synthGridCol == 4) { if (isStepLock) EditParam(sp.tapeSmearRate, trk.tapeSmearRate, change, 0, 99); else SetTrk(&Track::tapeSmearRate, change, 0, 99); }
+            else if (synthGridCol == 5) { if (isStepLock) EditParam(sp.tapeSmearSize, trk.tapeSmearSize, change, 0, 99); else SetTrk(&Track::tapeSmearSize, change, 0, 99); }
+            else if (synthGridCol == 6) { if (isStepLock) EditParam(sp.tapeMix, trk.tapeMix, change, 0, 99); else SetTrk(&Track::tapeMix, change, 0, 99); }
+            else if (synthGridCol == 7) { if (isStepLock) EditParam(sp.saturationSend, trk.saturationSend, change, 0, 99); else SetTrk(&Track::saturationSend, change, 0, 99); }
+            else if (synthGridCol == 8) { if (isStepLock) EditParam(sp.autoPanSend, trk.autoPanSend, change, 0, 99); else SetTrk(&Track::autoPanSend, change, 0, 99); }
         }
     }
     else if (currentScreen == SCREEN_GLOBAL_FX) {
@@ -2215,7 +2262,7 @@ int main() {
         }
 
         // --- MANAGE GRID PARAMETER CONTROLS ---
-        HandleParameterEditingInput(encoderTurn, encoderButton, isShiftDown, GetFrameTime());
+        HandleParameterEditingInput(encoderTurn, encoderButton, isShiftDown, isCtrlDown, GetFrameTime());
 
         // --- NAVIGATION INTERCEPT FOR SCREENS (Ctrl + Keys) ---
         if (isCtrlDown) {
