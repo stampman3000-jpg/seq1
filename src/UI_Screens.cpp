@@ -1098,9 +1098,9 @@ void DrawGlobalFXPage(const UIState& state) {
             DrawFXControl("PNG", globalFX.delayPingPong, 0, 1, 4, 2, 6);
             DrawFXControl("MIX", globalFX.delayMix, 0, 99, 5, 2, 36);
         } else {
-                    DrawFXControl("TIM", globalFX.autoPanTime, 0, 99, 6, 1, 6);
-                    DrawFXControl("FB",  globalFX.autoPanFeedback, 0, 99, 7, 1, 36);
-                    DrawFXControl("WDT", globalFX.autoPanWidth, 0, 99, 6, 2, 6);
+                    DrawFXControl("RAT", globalFX.autoPanTime, 0, 99, 6, 1, 6);
+                    DrawFXControl("VOI", globalFX.autoPanFeedback, 0, 99, 7, 1, 36);
+                    DrawFXControl("DEP", globalFX.autoPanWidth, 0, 99, 6, 2, 6);
                     DrawFXControl("MIX", globalFX.autoPanMix, 0, 99, 7, 2, 36);
                 }
             }

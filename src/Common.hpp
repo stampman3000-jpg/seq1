@@ -471,7 +471,7 @@ struct Track {
     float lfo2LastVal = 0.0f;   // Used for Sample-and-Hold random steps
 
     int saturationSend = 0;     // Saturation/Compression Send (Sun Icon)
-    int autoPanSend = 0;        // Chorus/Auto-Pan Send (Tornado Icon)
+    int autoPanSend = 0;        // Stereo chorus send (Tornado icon)
     int masterVolume = 99;
     int glideTime = 0;
     
@@ -545,10 +545,11 @@ struct GlobalFX {
     int delayPingPong = 0; // Toggle (0 or 1)
     int delayMix = 99; // Default mix to maximum
 
-    // Column 4: Chorus/Auto-Pan (Tornado)
-    int autoPanTime = 25;
-    int autoPanFeedback = 20;
-    int autoPanWidth = 40;
+    // Column 4: Stereo chorus (Tornado). Field names keep save-format order:
+    // autoPanTime=RATE, autoPanFeedback=VOICE spread, autoPanWidth=DEPTH.
+    int autoPanTime = 20;
+    int autoPanFeedback = 35;
+    int autoPanWidth = 30;
     int autoPanMix = 99; // Default mix to maximum
 };
 

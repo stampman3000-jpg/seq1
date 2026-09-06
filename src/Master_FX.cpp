@@ -243,9 +243,12 @@ void StereoReverb::process(float inL, float inR, float& outL, float& outR, float
 }
 
 // ==========================================
-// 4. CHORUS & QUAD-LFO AUTO-PAN (TORNADO)
+// 4. DUAL-VOICE STEREO CHORUS (TORNADO)
 // ==========================================
+// Wet-only send chorus: slow rate, shallow delay modulation, no feedback,
+// no amplitude autopan. Designed for the mono send bus in Audio_Engine.
 void TornadoEffect::init(float sampleRate) {
+    (void)sampleRate;
     maxDelaySamples = 2048;
     delayBufferL.assign(maxDelaySamples, 0.0f);
     delayBufferR.assign(maxDelaySamples, 0.0f);
@@ -253,9 +256,11 @@ void TornadoEffect::init(float sampleRate) {
     lfoPhase = 0.0f;
 }
 
-void TornadoEffect::process(float inL, float inR, float& outL, float& outR, float rateNorm, float feedbackNorm, float widthNorm, float mixNorm, float sampleRate) {
+void TornadoEffect::process(float inL, float inR, float& outL, float& outR,
+                            float rateNorm, float voiceNorm, float depthNorm, float mixNorm,
+                            float sampleRate) {
     // Buffers are owned by EnsureFxRate()/init() — never allocate here.
-    if (delayBufferL.empty() || maxDelaySamples == 0) {
+    if (delayBufferL.empty() || delayBufferR.empty() || maxDelaySamples == 0) {
         outL = inL; outR = inR; return;
     }
 
@@ -263,57 +268,59 @@ void TornadoEffect::process(float inL, float inR, float& outL, float& outR, floa
         outL = inL; outR = inR; return;
     }
 
-    // 1. Process Stereo LFO (Quadrature Phase shift: Left is Sine, Right is Cosine!)
-    float lfoHz = 0.1f + rateNorm * 11.9f; // LFO speed from 0.1Hz to 12Hz
-    lfoPhase += (2.0f * 3.14159265f * lfoHz) / sampleRate;
-    if (lfoPhase >= 2.0f * 3.14159265f) {
-        lfoPhase -= 2.0f * 3.14159265f;
+    constexpr float kTwoPi = 6.28318530718f;
+
+    // Squared rate curve: more encoder travel at the slow end (0.05–1.2 Hz).
+    float rateShaped = rateNorm * rateNorm;
+    float lfoHz = 0.05f + rateShaped * 1.15f;
+    lfoPhase += (kTwoPi * lfoHz) / sampleRate;
+    if (lfoPhase >= kTwoPi) {
+        lfoPhase -= kTwoPi;
     }
 
+    // VOI: LFO phase offset + slight fixed delay skew between L/R voices.
+    float phaseOffset = voiceNorm * (kTwoPi * 0.33333334f); // up to ~120 deg
     float lfoL = sinf(lfoPhase);
-    float lfoR = cosf(lfoPhase); // 90-degree phase shift for maximum stereo wideness [2]
+    float lfoR = sinf(lfoPhase + phaseOffset);
 
-    // 2. Modulate Delay Chorus Lines (5ms to 25ms delay sweeps)
-    float baseDelaySec = 0.015f;
-    float modDepthSec = widthNorm * 0.010f; // Modulate depth based on WIDTH
+    // Fixed ~12 ms base; DEP modulates up to ~4.5 ms; VOI adds up to ~3 ms on R.
+    constexpr float kBaseDelaySec = 0.012f;
+    float modDepthSec = depthNorm * 0.0045f;
+    float voiceOffsetSec = voiceNorm * 0.003f;
 
-    float delaySecL = baseDelaySec + lfoL * modDepthSec;
-    float delaySecR = baseDelaySec + lfoR * modDepthSec;
+    float delaySecL = kBaseDelaySec + lfoL * modDepthSec;
+    float delaySecR = kBaseDelaySec + voiceOffsetSec + lfoR * modDepthSec;
+
+    // Keep taps inside the buffer with headroom for linear interpolation.
+    float maxDelaySec = (float)(maxDelaySamples - 2) / sampleRate;
+    if (delaySecL < 0.001f) delaySecL = 0.001f;
+    if (delaySecR < 0.001f) delaySecR = 0.001f;
+    if (delaySecL > maxDelaySec) delaySecL = maxDelaySec;
+    if (delaySecR > maxDelaySec) delaySecR = maxDelaySec;
 
     float delaySamplesL = delaySecL * sampleRate;
     float delaySamplesR = delaySecR * sampleRate;
 
-    // Fractional delay reads
     float readPtrL = (float)writePtr - delaySamplesL;
-    if (readPtrL < 0.0f) readPtrL += maxDelaySamples;
+    if (readPtrL < 0.0f) readPtrL += (float)maxDelaySamples;
     uint32_t rL0 = (uint32_t)readPtrL % maxDelaySamples;
     uint32_t rL1 = (rL0 + 1) % maxDelaySamples;
     float fracL = readPtrL - (float)((uint32_t)readPtrL);
-    float chorusL = delayBufferL[rL0] * (1.0f - fracL) + delayBufferL[rL1] * fracL;
+    float wetL = delayBufferL[rL0] * (1.0f - fracL) + delayBufferL[rL1] * fracL;
 
     float readPtrR = (float)writePtr - delaySamplesR;
-    if (readPtrR < 0.0f) readPtrR += maxDelaySamples;
+    if (readPtrR < 0.0f) readPtrR += (float)maxDelaySamples;
     uint32_t rR0 = (uint32_t)readPtrR % maxDelaySamples;
     uint32_t rR1 = (rR0 + 1) % maxDelaySamples;
     float fracR = readPtrR - (float)((uint32_t)readPtrR);
-    float chorusR = delayBufferR[rR0] * (1.0f - fracR) + delayBufferR[rR1] * fracR;
+    float wetR = delayBufferR[rR0] * (1.0f - fracR) + delayBufferR[rR1] * fracR;
 
-    // Write delay buffers with modulated feedback (feedbackNorm)
-    float fbGain = feedbackNorm * 0.85f;
-    delayBufferL[writePtr] = inL + chorusL * fbGain;
-    delayBufferR[writePtr] = inR + chorusR * fbGain;
-
+    // Mono send → both delay lines; no regeneration (feedback removed).
+    float monoIn = 0.5f * (inL + inR);
+    delayBufferL[writePtr] = monoIn;
+    delayBufferR[writePtr] = monoIn;
     writePtr = (writePtr + 1) % maxDelaySamples;
 
-    // 3. Process Quadrature Auto-Pan Stage
-    // Modulation sweeps left and right channels in opposition
-    float panL = 1.0f - widthNorm * (0.5f + lfoL * 0.5f);
-    float panR = 1.0f - widthNorm * (0.5f + lfoR * 0.5f);
-
-    float wetL = chorusL * panL;
-    float wetR = chorusR * panR;
-
-    // Parallel Wet/Dry Mix
     outL = inL * (1.0f - mixNorm) + wetL * mixNorm;
     outR = inR * (1.0f - mixNorm) + wetR * mixNorm;
 }

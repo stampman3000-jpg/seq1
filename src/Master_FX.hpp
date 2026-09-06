@@ -45,7 +45,8 @@ struct StereoReverb {
     void process(float inL, float inR, float& outL, float& outR, float decayNorm, float sizeNorm, float predelayNorm, float mixNorm, float sampleRate);
 };
 
-// Swirling Quad-LFO Stereo Chorus and Auto-Pan (Tornado)
+// Restrained dual-voice stereo chorus (Tornado send).
+// Params: rateNorm, voiceNorm (stereo spread), depthNorm, mixNorm.
 struct TornadoEffect {
     float lfoPhase = 0.0f;
     std::vector<float> delayBufferL;
@@ -54,7 +55,9 @@ struct TornadoEffect {
     uint32_t maxDelaySamples = 2048;
 
     void init(float sampleRate);
-    void process(float inL, float inR, float& outL, float& outR, float rateNorm, float feedbackNorm, float widthNorm, float mixNorm, float sampleRate);
+    void process(float inL, float inR, float& outL, float& outR,
+                 float rateNorm, float voiceNorm, float depthNorm, float mixNorm,
+                 float sampleRate);
 };
 
 extern StereoDelay g_masterDelay;
