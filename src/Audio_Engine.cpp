@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <atomic>
 #if defined(__SSE2__) || defined(_M_X64)
 #include <pmmintrin.h>
 #endif
@@ -1134,6 +1135,46 @@ static int g_trackVoiceIndex[8] = { 0 };
 static ma_uint32 g_tickSampleAccumulator = 0;
 static int g_currentTick = -1; // -1 allows step 0 to trigger instantly on play
 
+// Live MIDI note queues: producers (RtMidi / UI) never touch voices directly.
+MidiLiveQueue g_midiLiveQueueFromRt;
+MidiLiveQueue g_midiLiveQueueFromUi;
+
+static bool PushMidiLive(MidiLiveQueue& q, const MidiLiveEvent& ev) {
+    const uint32_t w = q.writeIdx.load(std::memory_order_relaxed);
+    const uint32_t r = q.readIdx.load(std::memory_order_acquire);
+    if ((w - r) >= (uint32_t)kMidiLiveQueueCap) {
+        g_midiLiveDrops.fetch_add(1u, std::memory_order_relaxed);
+        return false;
+    }
+    q.slots[w % (uint32_t)kMidiLiveQueueCap] = ev;
+    q.writeIdx.store(w + 1, std::memory_order_release);
+    return true;
+}
+
+static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity);
+static void ReleaseVoiceLiveImpl(int trackIdx, int midiNote);
+static void ApplyMidiLiveEvent(const MidiLiveEvent& ev);
+
+static void DrainMidiLiveQueue(MidiLiveQueue& q) {
+    uint32_t r = q.readIdx.load(std::memory_order_relaxed);
+    const uint32_t w = q.writeIdx.load(std::memory_order_acquire);
+    while (r != w) {
+        ApplyMidiLiveEvent(q.slots[r % (uint32_t)kMidiLiveQueueCap]);
+        ++r;
+    }
+    q.readIdx.store(r, std::memory_order_release);
+}
+
+static void DrainAllMidiLiveQueues() {
+    DrainMidiLiveQueue(g_midiLiveQueueFromRt);
+    DrainMidiLiveQueue(g_midiLiveQueueFromUi);
+}
+
+static uint64_t SteadyNowMs() {
+    using namespace std::chrono;
+    return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 // Keep track of bar loops per track to evaluate trigger conditions (e.g., 1:2)
 static int g_trackBarCount[8] = { 0 };
 
@@ -1287,6 +1328,35 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
     while (samplesProcessed < frameCount) {
         ma_uint32 chunkSize = (frameCount - samplesProcessed < 64) ? (frameCount - samplesProcessed) : 64;
 
+        // Live MIDI (Rt + UI) must mutate voices only here, before LFO/DSP work.
+        DrainAllMidiLiveQueues();
+
+        // UI requested leave-external: flush ticks and re-arm internal accumulator.
+        if (g_externalClockDisablePending.exchange(false, std::memory_order_acq_rel)) {
+            g_useExternalMidiClock.store(false, std::memory_order_relaxed);
+            g_externalMidiTicksQueued.store(0, std::memory_order_relaxed);
+            g_tickSampleAccumulator = 0;
+        }
+
+        // Soft recovery: if the F8 queue ballooned, keep at most one beat ahead.
+        if (g_useExternalMidiClock.load(std::memory_order_relaxed)) {
+            int queued = g_externalMidiTicksQueued.load(std::memory_order_relaxed);
+            if (queued > 24) {
+                g_externalMidiTicksQueued.store(24, std::memory_order_relaxed);
+                g_tickSampleAccumulator = 0;
+            }
+            // Silence fallback: no F8 for >500ms while playing → internal clock.
+            if (isPlaying) {
+                const uint64_t last = g_lastExternalClockMs.load(std::memory_order_relaxed);
+                const uint64_t now = SteadyNowMs();
+                if (last != 0 && now > last && (now - last) > 500ull) {
+                    g_useExternalMidiClock.store(false, std::memory_order_relaxed);
+                    g_externalMidiTicksQueued.store(0, std::memory_order_relaxed);
+                    g_tickSampleAccumulator = 0;
+                }
+            }
+        }
+
         UpdateGlobalLFOs();
         AccumulateTrackVoiceMods();
 
@@ -1420,13 +1490,11 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
         for (ma_uint32 i = 0; i < chunkSize; ++i) {
             ma_uint32 outIdx = samplesProcessed + i;
 
-            if (g_externalMidiStartTriggered) {
-                g_externalMidiStartTriggered = false;
+            if (g_externalMidiStartTriggered.exchange(false, std::memory_order_acq_rel)) {
                 g_currentTick = -1;
                 isPlaying = true;
             }
-            if (g_externalMidiStopTriggered) {
-                g_externalMidiStopTriggered = false;
+            if (g_externalMidiStopTriggered.exchange(false, std::memory_order_acq_rel)) {
                 isPlaying = false;
             }
 
@@ -1434,9 +1502,10 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                 bool tickTriggered = false;
                 int masterTicksLimit = (masterLength == 0) ? 192 : (masterLength * 6);
 
-                if (g_useExternalMidiClock) {
-                    if (g_externalMidiTicksQueued > 0) {
-                        g_externalMidiTicksQueued--;
+                if (g_useExternalMidiClock.load(std::memory_order_relaxed)) {
+                    int queued = g_externalMidiTicksQueued.load(std::memory_order_relaxed);
+                    if (queued > 0) {
+                        g_externalMidiTicksQueued.fetch_sub(1, std::memory_order_relaxed);
                         if (g_currentTick == -1) {
                             g_currentTick = 0;
                             g_tickSampleAccumulator = 0;
@@ -2146,6 +2215,24 @@ static bool OpenAudioDevice(bool duplex, int captureIdx) {
     return false;
 }
 
+static int g_audioPauseDepth = 0;
+
+void PauseSeqAudio() {
+    if (g_audioInitialized && g_audioPauseDepth++ == 0) {
+        ma_device_stop(&g_audioDevice);
+    }
+}
+
+void ResumeSeqAudio() {
+    if (g_audioPauseDepth > 0 && --g_audioPauseDepth == 0 && g_audioInitialized) {
+        ma_device_start(&g_audioDevice);
+    }
+}
+
+int GetSeqAudioPauseDepth() {
+    return g_audioPauseDepth;
+}
+
 static void CloseSeqAudioDevice() {
     if (g_audioInitialized) {
         ma_device_uninit(&g_audioDevice);
@@ -2153,6 +2240,9 @@ static void CloseSeqAudioDevice() {
     }
     g_usbDuplexActive = false;
     g_usbCaptureLive = false;
+    // Device is gone — drop any outstanding pause depth so Resume cannot
+    // start a destroyed handle after a USB reinit nested under a load.
+    g_audioPauseDepth = 0;
 }
 
 static double s_fxInitedRate = 0.0;
@@ -2257,6 +2347,9 @@ void ToggleTrack8Usb() {
 }
 
 void PollUsbAudioDevice() {
+    // Never reinit while a load owns a PauseSeqAudio window.
+    if (g_audioPauseDepth > 0) return;
+
     bool wantDuplex = (tracks[7].engineType == ENGINE_USB);
     int wantCap = g_usbCaptureRequested;
 
@@ -2289,36 +2382,21 @@ void PollUsbAudioDevice() {
     s_appliedListCount = listCount;
 }
 
-bool LoadSampleToPool(int slotIdx, const std::string& filename) {
-    if (slotIdx < 0 || slotIdx >= 16) {
-        menuFeedback = "DIAG: invalid slot index";
-        return false;
-    }
+static void ClearSampleAsset(SampleAsset& out) {
+    out.name = "Empty";
+    out.pcmData.clear();
+    out.visualPeaks = {};
+}
+
+bool LoadSampleIntoAsset(SampleAsset& out, const std::string& filename) {
+    ClearSampleAsset(out);
+
     if (filename.empty()) {
         menuFeedback = "DIAG: filename empty";
         return false;
     }
 
-    // RAII guard automatically stops the audio device and restarts it when this function exits,
-    // protecting against dangling references on any early error return paths.
-    struct AudioStopGuard {
-        bool stopped = false;
-        AudioStopGuard() {
-            if (g_audioInitialized) {
-                ma_device_stop(&g_audioDevice);
-                stopped = true;
-            }
-        }
-        ~AudioStopGuard() {
-            if (stopped && g_audioInitialized) {
-                ma_device_start(&g_audioDevice);
-            }
-        }
-    } guard;
-
-    // 1. Resolve file path BEFORE initializing the decoder to prevent double-init crash
-
-    // 1. Resolve file path BEFORE initializing the decoder to prevent double-init crash
+    // Resolve file path BEFORE initializing the decoder to prevent double-init crash
     std::string filepath = "samples/" + filename + ".wav";
     menuFeedback = "DIAG: checking .wav file path";
     if (!std::filesystem::exists(filepath)) {
@@ -2330,11 +2408,9 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         }
     }
 
-    // 2. Initialize the config
     ma_decoder_config config = ma_decoder_config_init(ma_format_s16, 1, 32000);
     ma_decoder decoder;
 
-    // 3. Call init_file EXACTLY once
     menuFeedback = "DIAG: calling init_file";
     ma_result result = ma_decoder_init_file(filepath.c_str(), &config, &decoder);
     if (result != MA_SUCCESS) {
@@ -2342,11 +2418,10 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         return false;
     }
 
-    // 4. Allocate temporary buffer on heap (16 seconds maximum)
     menuFeedback = "DIAG: allocating tempBuffer";
     ma_uint64 maxFrames = 16 * 32000;
     std::vector<int16_t> tempBuffer;
-    
+
     try {
         tempBuffer.resize(maxFrames, 0);
     } catch (...) {
@@ -2355,12 +2430,10 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         return false;
     }
 
-    // 5. Read PCM frames safely
     menuFeedback = "DIAG: calling read_pcm_frames";
     ma_uint64 framesRead = 0;
     ma_result readResult = ma_decoder_read_pcm_frames(&decoder, tempBuffer.data(), maxFrames, &framesRead);
-    
-    // 6. Uninitialize immediately to release resources
+
     menuFeedback = "DIAG: calling uninit";
     ma_decoder_uninit(&decoder);
 
@@ -2373,14 +2446,12 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         return false;
     }
 
-    // 7. Clamp and shrink to fit loaded frames
     menuFeedback = "DIAG: resizing buffer";
     if (framesRead > maxFrames) {
         framesRead = maxFrames;
     }
     tempBuffer.resize(framesRead);
 
-    // 8. Peak Amplitude Normalization (Normalizes file volume cleanly)
     menuFeedback = "DIAG: normalizing volume";
     int16_t peak = 0;
     for (size_t i = 0; i < tempBuffer.size(); ++i) {
@@ -2390,8 +2461,7 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         }
     }
     if (peak > 0) {
-        float scale = 32767.0f; // Scale factor base
-        scale /= peak;
+        float scale = 32767.0f / peak;
         for (size_t i = 0; i < tempBuffer.size(); ++i) {
             float scaledVal = tempBuffer[i] * scale;
             if (scaledVal > 32767.0f)  scaledVal = 32767.0f;
@@ -2400,35 +2470,61 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename) {
         }
     }
 
-        // 9b. Pre-calculate 97 peak values for the visual display cache
-        std::array<uint8_t, 97> peaks{};
-        if (!tempBuffer.empty()) {
-            for (int i = 0; i < 97; ++i) {
-                size_t startFrame = (i * tempBuffer.size()) / 97;
-                size_t endFrame = ((i + 1) * tempBuffer.size()) / 97;
-                if (endFrame > tempBuffer.size()) endFrame = tempBuffer.size();
-                if (startFrame >= endFrame) startFrame = (endFrame > 0) ? (endFrame - 1) : 0;
+    std::array<uint8_t, 97> peaks{};
+    if (!tempBuffer.empty()) {
+        for (int i = 0; i < 97; ++i) {
+            size_t startFrame = (i * tempBuffer.size()) / 97;
+            size_t endFrame = ((i + 1) * tempBuffer.size()) / 97;
+            if (endFrame > tempBuffer.size()) endFrame = tempBuffer.size();
+            if (startFrame >= endFrame) startFrame = (endFrame > 0) ? (endFrame - 1) : 0;
 
-                int16_t peak = 0;
-                for (size_t f = startFrame; f < endFrame; ++f) {
-                    int16_t absVal = std::abs(tempBuffer[f]);
-                    if (absVal > peak) peak = absVal;
-                }
-                // Scale the absolute peak (0 to 32767) to a vertical drawing radius (0 to 11 pixels)
-                peaks[i] = (uint8_t)((peak / 32768.0f) * 11.0f);
+            int16_t binPeak = 0;
+            for (size_t f = startFrame; f < endFrame; ++f) {
+                int16_t absVal = std::abs(tempBuffer[f]);
+                if (absVal > binPeak) binPeak = absVal;
             }
+            peaks[i] = (uint8_t)((binPeak / 32768.0f) * 11.0f);
         }
-
-        // 10. Swap loaded sample into RAM pool safely
-        g_samplePool[slotIdx].name = filename;
-        g_samplePool[slotIdx].pcmData = std::move(tempBuffer);
-        g_samplePool[slotIdx].visualPeaks = peaks;
-
-        menuFeedback = "SAMPLE CRUNCHED TO POOL!";
-        return true;
     }
 
-void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
+    out.name = filename;
+    out.pcmData = std::move(tempBuffer);
+    out.visualPeaks = peaks;
+    return true;
+}
+
+bool LoadSampleToPool(int slotIdx, const std::string& filename, bool pauseAudio) {
+    if (slotIdx < 0 || slotIdx >= 16) {
+        menuFeedback = "DIAG: invalid slot index";
+        return false;
+    }
+
+    // Nested-safe pause: menu sample loads pass pauseAudio=true; project/
+    // pattern loads that already called PauseSeqAudio pass false.
+    struct AudioPauseGuard {
+        bool owns = false;
+        explicit AudioPauseGuard(bool shouldPause) {
+            if (shouldPause) {
+                PauseSeqAudio();
+                owns = true;
+            }
+        }
+        ~AudioPauseGuard() {
+            if (owns) ResumeSeqAudio();
+        }
+    } guard(pauseAudio);
+
+    SampleAsset loaded;
+    if (!LoadSampleIntoAsset(loaded, filename)) {
+        return false;
+    }
+
+    g_samplePool[slotIdx] = std::move(loaded);
+    menuFeedback = "SAMPLE CRUNCHED TO POOL!";
+    return true;
+}
+
+static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity) {
     if (trackIdx < 0 || trackIdx >= 8) return;
     if (midiNote < 0 || midiNote > 127) return;
 
@@ -2468,7 +2564,7 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
     }
 }
 
-void ReleaseVoiceLive(int trackIdx, int midiNote) {
+static void ReleaseVoiceLiveImpl(int trackIdx, int midiNote) {
     if (trackIdx < 0 || trackIdx >= 8) return;
     
     float freq = 440.0f * powf(2.0f, (midiNote - 69.0f) / 12.0f);
@@ -2490,6 +2586,62 @@ void ReleaseVoiceLive(int trackIdx, int midiNote) {
             }
         }
     }
+}
+
+static void ApplyMidiLiveEvent(const MidiLiveEvent& ev) {
+    switch (ev.type) {
+        case ML_NOTE_ON:
+            TriggerVoiceLiveImpl((int)ev.track, (int)ev.note, (int)ev.velocity);
+            break;
+        case ML_NOTE_OFF:
+            ReleaseVoiceLiveImpl((int)ev.track, (int)ev.note);
+            break;
+        case ML_SEQ_STEP: {
+            const int t = (int)ev.track;
+            const int step = (int)ev.stepIndex;
+            if (t < 0 || t >= 8) break;
+            if (step < 0 || step >= tracks[t].stepLength) break;
+            tracks[t].steps[step].note = (int8_t)ev.note;
+            tracks[t].steps[step].velocity = (int)ev.velocity;
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
+    if (trackIdx < 0 || trackIdx >= 8) return;
+    if (midiNote < 0 || midiNote > 127) return;
+    MidiLiveEvent ev{};
+    ev.type = ML_NOTE_ON;
+    ev.track = (uint8_t)trackIdx;
+    ev.note = (uint8_t)midiNote;
+    ev.velocity = (uint8_t)std::clamp(velocity, 0, 255);
+    ev.stepIndex = 0;
+    PushMidiLive(g_midiLiveQueueFromUi, ev);
+}
+
+void ReleaseVoiceLive(int trackIdx, int midiNote) {
+    if (trackIdx < 0 || trackIdx >= 8) return;
+    if (midiNote < 0 || midiNote > 127) return;
+    MidiLiveEvent ev{};
+    ev.type = ML_NOTE_OFF;
+    ev.track = (uint8_t)trackIdx;
+    ev.note = (uint8_t)midiNote;
+    ev.velocity = 0;
+    ev.stepIndex = 0;
+    PushMidiLive(g_midiLiveQueueFromUi, ev);
+}
+
+void EnqueueMidiLiveFromRt(uint8_t type, uint8_t track, uint8_t note, uint8_t velocity, uint8_t stepIndex) {
+    MidiLiveEvent ev{};
+    ev.type = type;
+    ev.track = track;
+    ev.note = note;
+    ev.velocity = velocity;
+    ev.stepIndex = stepIndex;
+    PushMidiLive(g_midiLiveQueueFromRt, ev);
 }
 
 bool IsSynthVoiceActive(int trackIdx, int voiceIdx) {

@@ -1620,6 +1620,29 @@ int main() {
                     menuFeedback = "MIDI PORT NEXT";
                 }
             }
+            // Toggle internal ↔ external MIDI clock (UP or C)
+            if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_C)) {
+                const bool wasExt = g_useExternalMidiClock.load(std::memory_order_relaxed);
+                if (!wasExt) {
+                    // false → true: clear queued ticks, arm silence watchdog
+                    g_externalMidiTicksQueued.store(0, std::memory_order_relaxed);
+                    g_externalClockDisablePending.store(false, std::memory_order_relaxed);
+                    {
+                        using namespace std::chrono;
+                        const uint64_t nowMs = (uint64_t)duration_cast<milliseconds>(
+                            steady_clock::now().time_since_epoch()).count();
+                        g_lastExternalClockMs.store(nowMs, std::memory_order_relaxed);
+                    }
+                    g_useExternalMidiClock.store(true, std::memory_order_relaxed);
+                    menuFeedback = "CLK EXTERNAL";
+                } else {
+                    // true → false: pending disable so audio resets tick accumulator
+                    g_externalMidiTicksQueued.store(0, std::memory_order_relaxed);
+                    g_externalClockDisablePending.store(true, std::memory_order_release);
+                    g_useExternalMidiClock.store(false, std::memory_order_relaxed);
+                    menuFeedback = "CLK INTERNAL";
+                }
+            }
 
             CpuClearBackground(UI_BG);
             DrawHeaderRule();

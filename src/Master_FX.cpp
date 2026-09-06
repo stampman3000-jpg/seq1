@@ -18,11 +18,9 @@ void StereoDelay::init(float sampleRate) {
 }
 
 void StereoDelay::process(float inL, float inR, float& outL, float& outR, float timeNorm, float feedbackNorm, int pingPong, float mixNorm, float sampleRate) {
+    // Buffers are owned by EnsureFxRate()/init() — never allocate here.
     if (maxDelaySamples == 0 || bufferL.empty() || bufferR.empty()) {
-        init(sampleRate > 0.0f ? sampleRate : 44100.0f);
-        if (maxDelaySamples == 0 || bufferL.empty() || bufferR.empty()) {
-            outL = inL; outR = inR; return;
-        }
+        outL = inL; outR = inR; return;
     }
 
     if (mixNorm <= 0.0f) {
@@ -151,9 +149,9 @@ void StereoReverb::init(float sampleRate) {
 }
 
 void StereoReverb::process(float inL, float inR, float& outL, float& outR, float decayNorm, float sizeNorm, float predelayNorm, float mixNorm, float sampleRate) {
+    // Buffers are owned by EnsureFxRate()/init() — never allocate here.
     if (preDelayBufferL.empty()) {
-        init(sampleRate > 0.0f ? sampleRate : 44100.0f);
-        if (preDelayBufferL.empty()) { outL = inL; outR = inR; return; }
+        outL = inL; outR = inR; return;
     }
 
     if (mixNorm <= 0.0f) {
@@ -256,9 +254,9 @@ void TornadoEffect::init(float sampleRate) {
 }
 
 void TornadoEffect::process(float inL, float inR, float& outL, float& outR, float rateNorm, float feedbackNorm, float widthNorm, float mixNorm, float sampleRate) {
-    if (delayBufferL.empty()) {
-        init(sampleRate > 0.0f ? sampleRate : 44100.0f);
-        if (delayBufferL.empty()) { outL = inL; outR = inR; return; }
+    // Buffers are owned by EnsureFxRate()/init() — never allocate here.
+    if (delayBufferL.empty() || maxDelaySamples == 0) {
+        outL = inL; outR = inR; return;
     }
 
     if (mixNorm <= 0.0f) {

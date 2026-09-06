@@ -1,10 +1,24 @@
 #include "Globals.hpp"
 #include "Chaos.hpp"
+#include "Audio_Engine.hpp"
 #include <algorithm>
 #include <cmath>
+#include <cerrno>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <filesystem>
+#include <string>
 #include <vector>
+
+// Pauses the DAC for the lifetime of a load. Nested LoadSampleToPool calls
+// must pass pauseAudio=false so they do not stop/start on every sample.
+struct SeqAudioLoadGuard {
+    SeqAudioLoadGuard() { PauseSeqAudio(); }
+    ~SeqAudioLoadGuard() { ResumeSeqAudio(); }
+};
 
 // Optional trailing-field helper (track-level legacy only — step blocks use hard v2 reads)
 template <typename T>
@@ -98,11 +112,264 @@ static bool ReadStepParams(std::ifstream& file, StepParams& sp) {
     return true;
 }
 
+static bool SafeParseInt(const std::string& s, int& out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    long v = std::strtol(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE) return false;
+    if (v < (long)INT_MIN || v > (long)INT_MAX) return false;
+    out = (int)v;
+    return true;
+}
+
+static bool SafeParseUInt(const std::string& s, unsigned long& out) {
+    if (s.empty()) return false;
+    char* end = nullptr;
+    errno = 0;
+    unsigned long v = std::strtoul(s.c_str(), &end, 10);
+    if (end == s.c_str() || *end != '\0' || errno == ERANGE) return false;
+    out = v;
+    return true;
+}
+
+static int8_t SanitizeMidiNoteValue(int midi) {
+    if (midi < 0) return -1;
+    if (midi > 127) return 127;
+    return (int8_t)midi;
+}
+
+static void Clamp01_99(int& v) {
+    v = std::clamp(v, 0, 99);
+}
+
+static bool ValidateModSlots(ModSlot slots[3]) {
+    for (int i = 0; i < 3; ++i) {
+        if (slots[i].destType < 0 || slots[i].destType > 2) return false;
+        if (slots[i].destTrack < 0 || slots[i].destTrack > 7) return false;
+        if (slots[i].destParam < 0 || slots[i].destParam > (int)DEST_PAN_MIX) return false;
+        if (slots[i].depth < -99 || slots[i].depth > 99) return false;
+    }
+    return true;
+}
+
+static bool ValidateTrackFields(Track& trk) {
+    if (trk.sampleSlot < 0 || trk.sampleSlot > 15) return false;
+    if (trk.stepLength < 1 || trk.stepLength > 32) return false;
+
+    Clamp01_99(trk.morph);
+    Clamp01_99(trk.volume);
+    Clamp01_99(trk.attack);
+    Clamp01_99(trk.decay);
+    Clamp01_99(trk.sustain);
+    Clamp01_99(trk.release);
+    Clamp01_99(trk.morph2);
+    Clamp01_99(trk.volume2);
+    Clamp01_99(trk.attack2);
+    Clamp01_99(trk.decay2);
+    Clamp01_99(trk.sustain2);
+    Clamp01_99(trk.release2);
+    Clamp01_99(trk.fmFeedback);
+    Clamp01_99(trk.noiseVolume);
+    Clamp01_99(trk.noiseAttack);
+    Clamp01_99(trk.noiseHold);
+    Clamp01_99(trk.noiseDecay);
+    Clamp01_99(trk.filterCutoff);
+    Clamp01_99(trk.filterResonance);
+    Clamp01_99(trk.filterEnvDepth);
+    Clamp01_99(trk.filterAttack);
+    Clamp01_99(trk.filterDecay);
+    Clamp01_99(trk.filterSustain);
+    Clamp01_99(trk.filterRelease);
+    Clamp01_99(trk.lfo1Speed);
+    Clamp01_99(trk.lfo1Depth);
+    Clamp01_99(trk.lfo2Speed);
+    Clamp01_99(trk.lfo2Depth);
+    Clamp01_99(trk.reverbSend);
+    Clamp01_99(trk.delaySend);
+    Clamp01_99(trk.saturationSend);
+    Clamp01_99(trk.autoPanSend);
+    Clamp01_99(trk.masterVolume);
+    Clamp01_99(trk.sampleStart);
+    Clamp01_99(trk.grainSize);
+    Clamp01_99(trk.grainDensity);
+    Clamp01_99(trk.grainPosition);
+    Clamp01_99(trk.grainScatter);
+    Clamp01_99(trk.tapeMemory);
+    Clamp01_99(trk.tapeSpread);
+    Clamp01_99(trk.tapeSpeed);
+    Clamp01_99(trk.tapeTether);
+    Clamp01_99(trk.tapeDrift);
+    Clamp01_99(trk.tapeDriftRate);
+    Clamp01_99(trk.tapeFeedback);
+    Clamp01_99(trk.tapeFbSpread);
+    Clamp01_99(trk.tapeSmearRate);
+    Clamp01_99(trk.tapeSmearSize);
+    Clamp01_99(trk.tapeMix);
+
+    if (!ValidateModSlots(trk.lfo1Slots)) return false;
+    if (!ValidateModSlots(trk.lfo2Slots)) return false;
+
+    if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
+    if (trk.sampleLength < 1)   trk.sampleLength = 99;
+    if (trk.loopEnd < 1)        trk.loopEnd = 99;
+    return true;
+}
+
+static void ResetTrackRuntime(Track& trk) {
+    trk.localTick = -1;
+    trk.lfo1Phase = 0.0f;
+    trk.lfo2Phase = 0.0f;
+    trk.lfo1LastVal = 0.0f;
+    trk.lfo2LastVal = 0.0f;
+}
+
+static bool ReadStepFromFile(std::ifstream& file, Step& step, int /*ver*/) {
+    std::string tempNote;
+    if (!(file >> tempNote)) return false;
+    step.note = (tempNote == "-" || tempNote.empty())
+                    ? (int8_t)-1
+                    : SanitizeMidiNoteValue(NoteToMidi(tempNote));
+
+    if (!(file >> step.velocity)) return false;
+
+    std::string tempLegacyCondition;
+    if (!(file >> tempLegacyCondition)) return false;
+
+    if (!(file >> step.retrigger)) return false;
+    if (!(file >> step.microtiming)) return false;
+
+    // Popup fields: absent entirely (EOF) → legacy defaults. Present but
+    // incomplete or non-numeric → fail (do not mask as legacy).
+    std::string tempMask;
+    if (!(file >> tempMask)) {
+        file.clear();
+        step.condMask = 0xFFFF;
+        step.noteLength = 0;
+        step.chordType = 0;
+        step.chordNotes[0] = -1;
+        step.chordNotes[1] = -1;
+        step.chordNotes[2] = -1;
+    } else {
+        std::string tempLen, tempChord;
+        if (!(file >> tempLen >> tempChord)) return false;
+
+        unsigned long maskVal = 0;
+        int lenVal = 0;
+        int chordVal = 0;
+        if (!SafeParseUInt(tempMask, maskVal)) return false;
+        if (!SafeParseInt(tempLen, lenVal)) return false;
+        if (!SafeParseInt(tempChord, chordVal)) return false;
+        step.condMask = (uint16_t)maskVal;
+        step.noteLength = lenVal;
+        step.chordType = chordVal;
+
+        std::string n0, n1, n2;
+        if (!(file >> n0 >> n1 >> n2)) return false;
+        step.chordNotes[0] = (n0 == "-" || n0.empty())
+                                 ? (int8_t)-1
+                                 : SanitizeMidiNoteValue(NoteToMidi(n0));
+        step.chordNotes[1] = (n1 == "-" || n1.empty())
+                                 ? (int8_t)-1
+                                 : SanitizeMidiNoteValue(NoteToMidi(n1));
+        step.chordNotes[2] = (n2 == "-" || n2.empty())
+                                 ? (int8_t)-1
+                                 : SanitizeMidiNoteValue(NoteToMidi(n2));
+    }
+
+    step.velocity = std::clamp(step.velocity, 0, 3);
+    step.retrigger = std::clamp(step.retrigger, 0, 16);
+    step.microtiming = std::clamp(step.microtiming, -6, 6);
+
+    if (!ReadStepParams(file, step.params)) return false;
+    if (step.params.sampleSlot != -1) {
+        if (step.params.sampleSlot < 0 || step.params.sampleSlot > 15) return false;
+    }
+    return true;
+}
+
+static bool ReadTrackBlock(std::ifstream& file, Track& trk, int ver, int trackIdx,
+                           std::string& outSampleName) {
+    int engineVal = 0;
+    if (!(file >> engineVal)) return false;
+    trk.engineType = SanitizeEngineType(engineVal, trackIdx);
+
+    if (!(file >> trk.algorithm)) return false;
+    if (!(file >> trk.morph >> trk.coarse >> trk.fine >> trk.volume)) return false;
+    if (!(file >> trk.attack >> trk.decay >> trk.sustain >> trk.release)) return false;
+    if (!(file >> trk.morph2 >> trk.coarse2 >> trk.fine2 >> trk.volume2)) return false;
+    if (!(file >> trk.attack2 >> trk.decay2 >> trk.sustain2 >> trk.release2)) return false;
+    if (!(file >> trk.fmFeedback >> trk.noiseVolume)) return false;
+    if (!(file >> trk.noiseAttack >> trk.noiseHold >> trk.noiseDecay)) return false;
+    if (!(file >> trk.filterCutoff >> trk.filterResonance >> trk.filterType >> trk.filterEnvDepth)) return false;
+    if (!(file >> trk.filterAttack >> trk.filterDecay >> trk.filterSustain >> trk.filterRelease)) return false;
+    if (!(file >> trk.lfo1Wave >> trk.lfo1Speed >> trk.lfo1Depth >> trk.lfo1Trigger
+              >> trk.lfo1Sync >> trk.lfo1Dest)) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (!(file >> trk.lfo1Slots[i].destType
+                   >> trk.lfo1Slots[i].destTrack
+                   >> trk.lfo1Slots[i].destParam
+                   >> trk.lfo1Slots[i].depth)) return false;
+    }
+    if (!(file >> trk.lfo2Wave >> trk.lfo2Speed >> trk.lfo2Depth >> trk.lfo2Trigger
+              >> trk.lfo2Sync >> trk.lfo2Dest)) return false;
+    for (int i = 0; i < 3; ++i) {
+        if (!(file >> trk.lfo2Slots[i].destType
+                   >> trk.lfo2Slots[i].destTrack
+                   >> trk.lfo2Slots[i].destParam
+                   >> trk.lfo2Slots[i].depth)) return false;
+    }
+    if (!(file >> trk.reverbSend >> trk.delaySend >> trk.saturationSend >> trk.autoPanSend)) return false;
+    if (!(file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune)) return false;
+    if (!(file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions)) return false;
+    if (!(file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter)) return false;
+
+    SafeRead(file, trk.masterVolume, 99);
+    SafeRead(file, trk.tapeMemory, 50);
+    SafeRead(file, trk.tapeHeads, 1);
+    SafeRead(file, trk.tapeSpread, 0);
+    SafeRead(file, trk.tapeSpeed, 74);
+    SafeRead(file, trk.tapeTether, 99);
+    SafeRead(file, trk.tapeDrift, 10);
+    SafeRead(file, trk.tapeDriftRate, 20);
+    SafeRead(file, trk.tapeFeedback, 30);
+    SafeRead(file, trk.tapeFbSpread, 10);
+    SafeRead(file, trk.tapeFbSource, 0);
+    SafeRead(file, trk.tapeFreeze, 0);
+    SafeRead(file, trk.tapeSmearRate, 0);
+    SafeRead(file, trk.tapeSmearSize, 40);
+    SafeRead(file, trk.tapeMix, 0);
+    SafeRead(file, trk.polyMode, 1);
+
+    ReadTrackGroove(file, trk, ver);
+
+    for (int s = 0; s < 32; ++s) {
+        if (!ReadStepFromFile(file, trk.steps[s], ver)) return false;
+    }
+
+    SafeRead(file, trk.sampleSlot, 0);
+    SafeRead(file, outSampleName, std::string("Empty"));
+
+    if (!ValidateTrackFields(trk)) return false;
+    return true;
+}
+
+static void SetMissingSampleFeedback(int missingCount) {
+    if (missingCount <= 0) return;
+    static char buf[64];
+    std::snprintf(buf, sizeof(buf), "LOADED (%d SAMPLE MISSING)", missingCount);
+    menuFeedback = buf;
+}
+
 int selectedTrack = 0;
 std::atomic<bool> g_useExternalMidiClock(false);
 std::atomic<int> g_externalMidiTicksQueued(0);
 std::atomic<bool> g_externalMidiStartTriggered(false);
 std::atomic<bool> g_externalMidiStopTriggered(false);
+std::atomic<unsigned> g_midiTickDrops(0);
+std::atomic<unsigned> g_midiLiveDrops(0);
+std::atomic<bool> g_externalClockDisablePending(false);
+std::atomic<uint64_t> g_lastExternalClockMs(0);
 
 Screen currentScreen = SCREEN_SEQ_1_4;
 int cursorStep = 0;
@@ -848,72 +1115,148 @@ std::string GetSlotName(const std::string& directory, int slotNum, const std::st
     return "Empty";
 }
 
-// Scan directory and delete any file starting with our target slot prefix [2]
-void ClearSlotFile(const std::string& directory, int slotNum, const std::string& extension) {
+enum class SlotSaveVerify {
+    NonEmpty,   // .snd — no magic header
+    PatternV5,  // SOUNDBOY_PAT 5
+    ProjectV5   // SOUNDBOY_PRJ 5
+};
+
+static void RemovePathQuiet(const std::filesystem::path& path) {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+}
+
+// Delete other files for this slot, optionally keeping the file we just committed.
+static void ClearOtherSlotFiles(const std::string& directory, int slotNum,
+                                const std::string& extension,
+                                const std::string& keepPath) {
     if (!std::filesystem::exists(directory)) return;
-    
+
     std::string prefix = "slot_" + std::to_string(slotNum) + "_";
-    
+    const std::filesystem::path keep(keepPath);
+
     for (const auto& entry : std::filesystem::directory_iterator(directory)) {
         if (entry.is_regular_file() && entry.path().extension() == extension) {
+            if (!keepPath.empty() && entry.path() == keep) continue;
             std::string name = entry.path().stem().string();
             if (name.rfind(prefix, 0) == 0) {
-                std::filesystem::remove(entry.path()); // Delete old slot file [2]
+                std::filesystem::remove(entry.path());
             }
         }
     }
 }
 
+// Scan directory and delete any file starting with our target slot prefix [2]
+void ClearSlotFile(const std::string& directory, int slotNum, const std::string& extension) {
+    ClearOtherSlotFiles(directory, slotNum, extension, "");
+}
+
+static bool VerifySlotSaveFile(const std::string& path, SlotSaveVerify kind) {
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) return false;
+
+    if (kind == SlotSaveVerify::NonEmpty) {
+        return std::filesystem::file_size(path, ec) > 0 && !ec;
+    }
+
+    std::ifstream check(path);
+    if (!check.is_open()) return false;
+    std::string magic;
+    int ver = 0;
+    if (!(check >> magic >> ver)) return false;
+    if (kind == SlotSaveVerify::PatternV5)
+        return magic == "SOUNDBOY_PAT" && ver == 5;
+    if (kind == SlotSaveVerify::ProjectV5)
+        return magic == "SOUNDBOY_PRJ" && ver == 5;
+    return false;
+}
+
+// After writing finalPath+".tmp": flush/good checked by caller, then verify + rename.
+// On failure removes tmp and leaves any existing finalPath untouched.
+static bool CommitTmpSlotSave(const std::string& finalPath, SlotSaveVerify kind) {
+    const std::string tmpPath = finalPath + ".tmp";
+    if (!VerifySlotSaveFile(tmpPath, kind)) {
+        RemovePathQuiet(tmpPath);
+        return false;
+    }
+
+    std::error_code ec;
+    if (std::filesystem::exists(finalPath)) {
+        std::filesystem::remove(finalPath, ec);
+        if (ec) {
+            RemovePathQuiet(tmpPath);
+            return false;
+        }
+    }
+    std::filesystem::rename(tmpPath, finalPath, ec);
+    if (ec) {
+        RemovePathQuiet(tmpPath);
+        return false;
+    }
+    return true;
+}
+
 bool SaveSoundPreset(int trackIdx, int slot, const std::string& filename) {
-    ClearSlotFile("presets", slot, ".snd");
-
     std::string path = "presets/slot_" + std::to_string(slot) + "_" + filename + ".snd";
-    std::ofstream file(path);
-    if (!file.is_open()) return false;
+    const std::string tmpPath = path + ".tmp";
 
-    const Track& trk = tracks[trackIdx];
-    file << (int)trk.engineType << "\n" << trk.algorithm << "\n";
-    file << trk.morph << "\n" << trk.coarse << "\n" << trk.fine << "\n" << trk.volume << "\n";
-    file << trk.attack << "\n" << trk.decay << "\n" << trk.sustain << "\n" << trk.release << "\n";
-    file << trk.morph2 << "\n" << trk.coarse2 << "\n" << trk.fine2 << "\n" << trk.volume2 << "\n";
-    file << trk.attack2 << "\n" << trk.decay2 << "\n" << trk.sustain2 << "\n" << trk.release2 << "\n";
-    file << trk.fmFeedback << "\n" << trk.noiseVolume << "\n";
-    file << trk.noiseAttack << "\n" << trk.noiseHold << "\n" << trk.noiseDecay << "\n";
-    file << trk.filterCutoff << "\n" << trk.filterResonance << "\n" << trk.filterType << "\n" << trk.filterEnvDepth << "\n";
-    file << trk.filterAttack << "\n" << trk.filterDecay << "\n" << trk.filterSustain << "\n" << trk.filterRelease << "\n";
-    file << trk.lfo1Wave << "\n" << trk.lfo1Speed << "\n" << trk.lfo1Depth << "\n" << trk.lfo1Trigger << "\n" << trk.lfo1Sync << "\n" << trk.lfo1Dest << "\n";
-    for (int i = 0; i < 3; ++i) {
-        file << trk.lfo1Slots[i].destType << "\n"
-             << trk.lfo1Slots[i].destTrack << "\n"
-             << trk.lfo1Slots[i].destParam << "\n"
-             << trk.lfo1Slots[i].depth << "\n";
+    {
+        std::ofstream file(tmpPath);
+        if (!file.is_open()) return false;
+
+        const Track& trk = tracks[trackIdx];
+        file << (int)trk.engineType << "\n" << trk.algorithm << "\n";
+        file << trk.morph << "\n" << trk.coarse << "\n" << trk.fine << "\n" << trk.volume << "\n";
+        file << trk.attack << "\n" << trk.decay << "\n" << trk.sustain << "\n" << trk.release << "\n";
+        file << trk.morph2 << "\n" << trk.coarse2 << "\n" << trk.fine2 << "\n" << trk.volume2 << "\n";
+        file << trk.attack2 << "\n" << trk.decay2 << "\n" << trk.sustain2 << "\n" << trk.release2 << "\n";
+        file << trk.fmFeedback << "\n" << trk.noiseVolume << "\n";
+        file << trk.noiseAttack << "\n" << trk.noiseHold << "\n" << trk.noiseDecay << "\n";
+        file << trk.filterCutoff << "\n" << trk.filterResonance << "\n" << trk.filterType << "\n" << trk.filterEnvDepth << "\n";
+        file << trk.filterAttack << "\n" << trk.filterDecay << "\n" << trk.filterSustain << "\n" << trk.filterRelease << "\n";
+        file << trk.lfo1Wave << "\n" << trk.lfo1Speed << "\n" << trk.lfo1Depth << "\n" << trk.lfo1Trigger << "\n" << trk.lfo1Sync << "\n" << trk.lfo1Dest << "\n";
+        for (int i = 0; i < 3; ++i) {
+            file << trk.lfo1Slots[i].destType << "\n"
+                 << trk.lfo1Slots[i].destTrack << "\n"
+                 << trk.lfo1Slots[i].destParam << "\n"
+                 << trk.lfo1Slots[i].depth << "\n";
+        }
+        file << trk.lfo2Wave << "\n" << trk.lfo2Speed << "\n" << trk.lfo2Depth << "\n" << trk.lfo2Trigger << "\n" << trk.lfo2Sync << "\n" << trk.lfo2Dest << "\n";
+        for (int i = 0; i < 3; ++i) {
+            file << trk.lfo2Slots[i].destType << "\n"
+                 << trk.lfo2Slots[i].destTrack << "\n"
+                 << trk.lfo2Slots[i].destParam << "\n"
+                 << trk.lfo2Slots[i].depth << "\n";
+        }
+        file << trk.reverbSend << "\n" << trk.delaySend << "\n" << trk.saturationSend << "\n" << trk.autoPanSend << "\n";
+        file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
+        file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
+        file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
+        file << trk.masterVolume << "\n";
+
+        // Save Tape Buffer parameters
+        file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
+             << trk.tapeTether << "\n" << trk.tapeDrift << "\n" << trk.tapeDriftRate << "\n" << trk.tapeFeedback << "\n"
+             << trk.tapeFbSpread << "\n" << trk.tapeFbSource << "\n" << trk.tapeFreeze << "\n" << trk.tapeSmearRate << "\n"
+             << trk.tapeSmearSize << "\n" << trk.tapeMix << "\n";
+
+        // Save Poly/Mono Voice Mode
+        file << trk.polyMode << "\n";
+
+        // Save referenced Sample Slot and Name for automatic recall
+        file << trk.sampleSlot << "\n";
+        file << (g_samplePool[trk.sampleSlot].name.empty() ? "Empty" : g_samplePool[trk.sampleSlot].name) << "\n";
+
+        file.flush();
+        if (!file.good()) {
+            file.close();
+            RemovePathQuiet(tmpPath);
+            return false;
+        }
     }
-    file << trk.lfo2Wave << "\n" << trk.lfo2Speed << "\n" << trk.lfo2Depth << "\n" << trk.lfo2Trigger << "\n" << trk.lfo2Sync << "\n" << trk.lfo2Dest << "\n";
-    for (int i = 0; i < 3; ++i) {
-        file << trk.lfo2Slots[i].destType << "\n"
-             << trk.lfo2Slots[i].destTrack << "\n"
-             << trk.lfo2Slots[i].destParam << "\n"
-             << trk.lfo2Slots[i].depth << "\n";
-    }
-    file << trk.reverbSend << "\n" << trk.delaySend << "\n" << trk.saturationSend << "\n" << trk.autoPanSend << "\n";
-    file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
-    file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
-    file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
-    file << trk.masterVolume << "\n";
 
-    // Save Tape Buffer parameters
-    file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
-         << trk.tapeTether << "\n" << trk.tapeDrift << "\n" << trk.tapeDriftRate << "\n" << trk.tapeFeedback << "\n"
-         << trk.tapeFbSpread << "\n" << trk.tapeFbSource << "\n" << trk.tapeFreeze << "\n" << trk.tapeSmearRate << "\n"
-         << trk.tapeSmearSize << "\n" << trk.tapeMix << "\n";
-
-    // Save Poly/Mono Voice Mode
-    file << trk.polyMode << "\n";
-
-    // Save referenced Sample Slot and Name for automatic recall
-    file << trk.sampleSlot << "\n";
-    file << (g_samplePool[trk.sampleSlot].name.empty() ? "Empty" : g_samplePool[trk.sampleSlot].name) << "\n";
-
+    if (!CommitTmpSlotSave(path, SlotSaveVerify::NonEmpty)) return false;
+    ClearOtherSlotFiles("presets", slot, ".snd", path);
     return true;
 }
 
@@ -921,6 +1264,8 @@ bool LoadSoundPreset(int trackIdx, const std::string& filename) {
     std::string path = "presets/" + filename + ".snd";
     std::ifstream file(path);
     if (!file.is_open()) return false;
+
+    SeqAudioLoadGuard audioGuard;
 
     Track& trk = tracks[trackIdx];
     int engineTypeVal = 0;
@@ -981,7 +1326,7 @@ bool LoadSoundPreset(int trackIdx, const std::string& filename) {
     
     if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
         if (g_samplePool[trk.sampleSlot].name != sampleName) {
-            LoadSampleToPool(trk.sampleSlot, sampleName);
+            LoadSampleToPool(trk.sampleSlot, sampleName, false);
         }
     }
 
@@ -989,268 +1334,21 @@ bool LoadSoundPreset(int trackIdx, const std::string& filename) {
 }
 
 bool SavePattern(int patternIdx, int slot, const std::string& filename) {
-    ClearSlotFile("patterns", slot, ".pat");
-
     std::string path = "patterns/slot_" + std::to_string(slot) + "_" + filename + ".pat";
-    std::ofstream file(path);
-    if (!file.is_open()) return false;
+    const std::string tmpPath = path + ".tmp";
 
-    file << "SOUNDBOY_PAT 5\n";
-
-    // Temporarily dump global live tracks to RAM slot before writing
+    // Snapshot live edits locally — only commit into patterns[] after disk success.
+    Pattern pat = patterns[patternIdx];
     for (int t = 0; t < 8; ++t) {
-        patterns[patternIdx].tracks[t] = tracks[t];
+        pat.tracks[t] = tracks[t];
     }
 
-    const Pattern& pat = patterns[patternIdx];
-    for (int t = 0; t < 8; ++t) {
-        const Track& trk = pat.tracks[t];
-        file << (int)trk.engineType << "\n" << trk.algorithm << "\n";
-        file << trk.morph << "\n" << trk.coarse << "\n" << trk.fine << "\n" << trk.volume << "\n";
-        file << trk.attack << "\n" << trk.decay << "\n" << trk.sustain << "\n" << trk.release << "\n";
-        file << trk.morph2 << "\n" << trk.coarse2 << "\n" << trk.fine2 << "\n" << trk.volume2 << "\n";
-        file << trk.attack2 << "\n" << trk.decay2 << "\n" << trk.sustain2 << "\n" << trk.release2 << "\n";
-        file << trk.fmFeedback << "\n" << trk.noiseVolume << "\n";
-        file << trk.noiseAttack << "\n" << trk.noiseHold << "\n" << trk.noiseDecay << "\n";
-        file << trk.filterCutoff << "\n" << trk.filterResonance << "\n" << trk.filterType << "\n" << trk.filterEnvDepth << "\n";
-        file << trk.filterAttack << "\n" << trk.filterDecay << "\n" << trk.filterSustain << "\n" << trk.filterRelease << "\n";
-        file << trk.lfo1Wave << "\n" << trk.lfo1Speed << "\n" << trk.lfo1Depth << "\n" << trk.lfo1Trigger << "\n" << trk.lfo1Sync << "\n" << trk.lfo1Dest << "\n";
-        for (int i = 0; i < 3; ++i) {
-            file << trk.lfo1Slots[i].destType << "\n"
-                 << trk.lfo1Slots[i].destTrack << "\n"
-                 << trk.lfo1Slots[i].destParam << "\n"
-                 << trk.lfo1Slots[i].depth << "\n";
-        }
-        file << trk.lfo2Wave << "\n" << trk.lfo2Speed << "\n" << trk.lfo2Depth << "\n" << trk.lfo2Trigger << "\n" << trk.lfo2Sync << "\n" << trk.lfo2Dest << "\n";
-        for (int i = 0; i < 3; ++i) {
-            file << trk.lfo2Slots[i].destType << "\n"
-                 << trk.lfo2Slots[i].destTrack << "\n"
-                 << trk.lfo2Slots[i].destParam << "\n"
-                 << trk.lfo2Slots[i].depth << "\n";
-        }
-        file << trk.reverbSend << "\n" << trk.delaySend << "\n" << trk.saturationSend << "\n" << trk.autoPanSend << "\n";
-        file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
-        file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
-        file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
-        file << trk.masterVolume << "\n";
+    {
+        std::ofstream file(tmpPath);
+        if (!file.is_open()) return false;
 
-        // Save Tape Buffer track defaults
-        file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
-             << trk.tapeTether << "\n" << trk.tapeDrift << "\n" << trk.tapeDriftRate << "\n" << trk.tapeFeedback << "\n"
-             << trk.tapeFbSpread << "\n" << trk.tapeFbSource << "\n" << trk.tapeFreeze << "\n" << trk.tapeSmearRate << "\n"
-             << trk.tapeSmearSize << "\n" << trk.tapeMix << "\n";
+        file << "SOUNDBOY_PAT 5\n";
 
-        // Save Poly/Mono Voice Mode
-        file << trk.polyMode << "\n";
-        WriteTrackGroove(file, trk);
-
-        // Save 32 steps
-                for (int s = 0; s < 32; ++s) {
-                    const Step& step = trk.steps[s];
-                    // The pattern as programmed is what gets stored, so a file
-                    // saved with chaos running still reloads as the loop you
-                    // wrote rather than one bar of its mutations.
-                    const StepSource& src = trk.source[s];
-                    file << (src.note == -1 ? "-" : MidiToNote(src.note)) << "\n";
-                    file << (int)src.velocity << "\n";
-                    file << "-" << "\n"; // Write standard dummy dash to protect format layout
-                    file << (int)src.retrigger << "\n";
-                    file << (int)src.microtiming << "\n";
-
-                    // Popup details
-                    file << step.condMask << "\n";
-                    file << step.noteLength << "\n";
-                    file << step.chordType << "\n";
-                    file << (step.chordNotes[0] == -1 ? "-" : MidiToNote(step.chordNotes[0])) << "\n";
-                    file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
-                    file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
-                    
-            WriteStepParams(file, step.params);
-        }
-
-        // Save track-default Sample Slot and Name
-        file << trk.sampleSlot << "\n";
-        file << (g_samplePool[trk.sampleSlot].name.empty() ? "Empty" : g_samplePool[trk.sampleSlot].name) << "\n";
-    }
-    return true;
-}
-
-bool LoadPattern(int patternIdx, const std::string& filename) {
-    std::string path = "patterns/" + filename + ".pat";
-    std::ifstream file(path);
-    if (!file.is_open()) return false;
-
-    std::string magic;
-    int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver < 2 || ver > 5) return false;
-
-    Pattern& pat = patterns[patternIdx];
-    for (int t = 0; t < 8; ++t) {
-        Track& trk = pat.tracks[t];
-        int engineVal = 0;
-        file >> engineVal; trk.engineType = SanitizeEngineType(engineVal, t);
-        file >> trk.algorithm;
-        file >> trk.morph >> trk.coarse >> trk.fine >> trk.volume;
-        file >> trk.attack >> trk.decay >> trk.sustain >> trk.release;
-        file >> trk.morph2 >> trk.coarse2 >> trk.fine2 >> trk.volume2;
-        file >> trk.attack2 >> trk.decay2 >> trk.sustain2 >> trk.release2;
-        file >> trk.fmFeedback >> trk.noiseVolume;
-        file >> trk.noiseAttack >> trk.noiseHold >> trk.noiseDecay;
-        file >> trk.filterCutoff >> trk.filterResonance >> trk.filterType >> trk.filterEnvDepth;
-        file >> trk.filterAttack >> trk.filterDecay >> trk.filterSustain >> trk.filterRelease;
-        file >> trk.lfo1Wave >> trk.lfo1Speed >> trk.lfo1Depth >> trk.lfo1Trigger >> trk.lfo1Sync >> trk.lfo1Dest;
-        for (int i = 0; i < 3; ++i) {
-            file >> trk.lfo1Slots[i].destType
-                 >> trk.lfo1Slots[i].destTrack
-                 >> trk.lfo1Slots[i].destParam
-                 >> trk.lfo1Slots[i].depth;
-        }
-        file >> trk.lfo2Wave >> trk.lfo2Speed >> trk.lfo2Depth >> trk.lfo2Trigger >> trk.lfo2Sync >> trk.lfo2Dest;
-        for (int i = 0; i < 3; ++i) {
-            file >> trk.lfo2Slots[i].destType
-                 >> trk.lfo2Slots[i].destTrack
-                 >> trk.lfo2Slots[i].destParam
-                 >> trk.lfo2Slots[i].depth;
-        }
-        file >> trk.reverbSend >> trk.delaySend >> trk.saturationSend >> trk.autoPanSend;
-        file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
-        file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
-        file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-
-        // Safely load the Master Volume default
-        SafeRead(file, trk.masterVolume, 99);
-        
-        // Safely load all Tape Buffer track default settings
-        SafeRead(file, trk.tapeMemory, 50);
-        SafeRead(file, trk.tapeHeads, 1);
-        SafeRead(file, trk.tapeSpread, 0);
-        SafeRead(file, trk.tapeSpeed, 74);
-        SafeRead(file, trk.tapeTether, 99);
-        SafeRead(file, trk.tapeDrift, 10);
-        SafeRead(file, trk.tapeDriftRate, 20);
-        SafeRead(file, trk.tapeFeedback, 30);
-        SafeRead(file, trk.tapeFbSpread, 10);
-        SafeRead(file, trk.tapeFbSource, 0);
-        SafeRead(file, trk.tapeFreeze, 0);
-        SafeRead(file, trk.tapeSmearRate, 0);
-        SafeRead(file, trk.tapeSmearSize, 40);
-        SafeRead(file, trk.tapeMix, 0);
-
-        // Safely load Poly Mode default
-        SafeRead(file, trk.polyMode, 1);
-        ReadTrackGroove(file, trk, ver);
-
-        // Inside the track loop (t) of LoadPattern:
-        for (int s = 0; s < 32; ++s) {
-                    Step& step = trk.steps[s];
-                    
-                    std::string tempNote;
-                    file >> tempNote;
-                    step.note = (tempNote == "-" || tempNote.empty()) ? -1 : NoteToMidi(tempNote);
-                    
-                    file >> step.velocity;
-                    
-                    std::string tempLegacyCondition;
-                    file >> tempLegacyCondition; // Discards legacy condition strings safely
-                    
-                    file >> step.retrigger;
-                    file >> step.microtiming;
-
-                    std::string tempMask, tempLen, tempChord;
-                    if (file >> tempMask >> tempLen >> tempChord) {
-                        step.condMask = (uint16_t)std::stoul(tempMask);
-                        step.noteLength = std::stoi(tempLen);
-                        step.chordType = std::stoi(tempChord);
-
-                        std::string n0, n1, n2;
-                        file >> n0 >> n1 >> n2;
-                        step.chordNotes[0] = (n0 == "-" || n0.empty()) ? -1 : NoteToMidi(n0);
-                        step.chordNotes[1] = (n1 == "-" || n1.empty()) ? -1 : NoteToMidi(n1);
-                        step.chordNotes[2] = (n2 == "-" || n2.empty()) ? -1 : NoteToMidi(n2);
-                    } else {
-                        file.clear(); // Flush EOF errors
-                        step.condMask = 0xFFFF;
-                        step.noteLength = 0;
-                        step.chordType = 0;
-                        step.chordNotes[0] = -1;
-                        step.chordNotes[1] = -1;
-                        step.chordNotes[2] = -1;
-                    }
-
-            if (!ReadStepParams(file, step.params)) return false;
-        } // end of step loop
-
-        // Safely load default Sample Slot and Name
-        SafeRead(file, trk.sampleSlot, 0);
-        std::string sampleName;
-        SafeRead(file, sampleName, std::string("Empty"));
-
-        if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
-            if (g_samplePool[trk.sampleSlot].name != sampleName) {
-                LoadSampleToPool(trk.sampleSlot, sampleName);
-            }
-        }
-
-        // Sanitize missing/legacy variables
-        if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
-        if (trk.sampleLength < 1)   trk.sampleLength = 99;
-        if (trk.loopEnd < 1)        trk.loopEnd = 99;
-    } // end of track (t) loop
-
-    // Pattern files store the pattern as programmed, so what we just read is
-    // the chaos source. Seed it before anything gets a chance to render.
-    for (int t = 0; t < 8; ++t) {
-        ChaosCaptureInto(pat.tracks[t]);
-    }
-
-    // Force flush RAM tracks back to screen if we are loading into the currently active slot
-    if (patternIdx == activePattern) {
-        for (int t = 0; t < 8; ++t) {
-            tracks[t] = pat.tracks[t];
-        }
-    }
-    g_chaosDirty.store(true);
-
-    return true;
-}
-
-bool SaveProject(int slot, const std::string& filename) {
-    ClearSlotFile("projects", slot, ".prj");
-
-    std::string path = "projects/slot_" + std::to_string(slot) + "_" + filename + ".prj";
-    std::ofstream file(path);
-    if (!file.is_open()) return false;
-
-    file << "SOUNDBOY_PRJ 5\n";
-
-    // Sync live edits to current pattern slot
-    for (int t = 0; t < 8; ++t) {
-        patterns[activePattern].tracks[t] = tracks[t];
-    }
-
-    // Write the filenames of all 16 Sample Pool slots at the top of the project
-    for (int i = 0; i < 16; ++i) {
-        file << (g_samplePool[i].name.empty() ? "Empty" : g_samplePool[i].name) << "\n";
-    }
-
-    file << tempo << "\n";
-    file << activePattern << "\n";
-
-    // Save global master bus FX
-    file << globalFX.reverbDecay << "\n" << globalFX.reverbSize << "\n" << globalFX.reverbPredelay << "\n" << globalFX.reverbMix << "\n";
-    file << globalFX.satLevel << "\n" << globalFX.satSymmetry << "\n" << globalFX.satOverdrive << "\n" << globalFX.satMix << "\n";
-    file << globalFX.delayTime << "\n" << globalFX.delayFeedback << "\n" << globalFX.delayPingPong << "\n" << globalFX.delayMix << "\n";
-    file << globalFX.autoPanTime << "\n" << globalFX.autoPanFeedback << "\n" << globalFX.autoPanWidth << "\n" << globalFX.autoPanMix << "\n";
-    file << globalKeyRoot << "\n";
-    file << globalKeyLock << "\n";
-
-    // Generative chaos settings (format v5+)
-    file << g_chaos << "\n" << g_chaosLift << "\n" << g_chaosFill << "\n" << g_chaosSkip << "\n";
-    file << g_chaosRatchet << "\n" << g_chaosTime << "\n" << g_chaosRepeat << "\n" << g_chaosSeed << "\n";
-
-    // Save 8 patterns
-    for (int p = 0; p < 8; ++p) {
-        const Pattern& pat = patterns[p];
         for (int t = 0; t < 8; ++t) {
             const Track& trk = pat.tracks[t];
             file << (int)trk.engineType << "\n" << trk.algorithm << "\n";
@@ -1281,7 +1379,7 @@ bool SaveProject(int slot, const std::string& filename) {
             file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
             file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
             file << trk.masterVolume << "\n";
-            
+
             // Save Tape Buffer track defaults
             file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
                  << trk.tapeTether << "\n" << trk.tapeDrift << "\n" << trk.tapeDriftRate << "\n" << trk.tapeFeedback << "\n"
@@ -1292,25 +1390,27 @@ bool SaveProject(int slot, const std::string& filename) {
             file << trk.polyMode << "\n";
             WriteTrackGroove(file, trk);
 
-            for (int s = 0; s < 32; ++s) {
-                            const Step& step = trk.steps[s];
-                            // Store the pattern as programmed, not the bar of
-                            // chaos that happened to be on screen.
-                            const StepSource& src = trk.source[s];
-                            file << (src.note == -1 ? "-" : MidiToNote(src.note)) << "\n";
-                            file << (int)src.velocity << "\n";
-                            file << "-" << "\n"; // Write standard dummy dash to protect format layout
-                            file << (int)src.retrigger << "\n";
-                            file << (int)src.microtiming << "\n";
+            // Save 32 steps
+                    for (int s = 0; s < 32; ++s) {
+                        const Step& step = trk.steps[s];
+                        // The pattern as programmed is what gets stored, so a file
+                        // saved with chaos running still reloads as the loop you
+                        // wrote rather than one bar of its mutations.
+                        const StepSource& src = trk.source[s];
+                        file << (src.note == -1 ? "-" : MidiToNote(src.note)) << "\n";
+                        file << (int)src.velocity << "\n";
+                        file << "-" << "\n"; // Write standard dummy dash to protect format layout
+                        file << (int)src.retrigger << "\n";
+                        file << (int)src.microtiming << "\n";
 
-                            // Popup details
-                            file << step.condMask << "\n";
-                            file << step.noteLength << "\n";
-                            file << step.chordType << "\n";
-                            file << (step.chordNotes[0] == -1 ? "-" : MidiToNote(step.chordNotes[0])) << "\n";
-                            file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
-                            file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
-
+                        // Popup details
+                        file << step.condMask << "\n";
+                        file << step.noteLength << "\n";
+                        file << step.chordType << "\n";
+                        file << (step.chordNotes[0] == -1 ? "-" : MidiToNote(step.chordNotes[0])) << "\n";
+                        file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
+                        file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
+                        
                 WriteStepParams(file, step.params);
             }
 
@@ -1318,7 +1418,208 @@ bool SaveProject(int slot, const std::string& filename) {
             file << trk.sampleSlot << "\n";
             file << (g_samplePool[trk.sampleSlot].name.empty() ? "Empty" : g_samplePool[trk.sampleSlot].name) << "\n";
         }
+
+        file.flush();
+        if (!file.good()) {
+            file.close();
+            RemovePathQuiet(tmpPath);
+            return false;
+        }
     }
+
+    if (!CommitTmpSlotSave(path, SlotSaveVerify::PatternV5)) return false;
+    ClearOtherSlotFiles("patterns", slot, ".pat", path);
+    patterns[patternIdx] = pat;
+    return true;
+}
+
+bool LoadPattern(int patternIdx, const std::string& filename) {
+    if (patternIdx < 0 || patternIdx >= 8) return false;
+
+    std::string path = "patterns/" + filename + ".pat";
+    std::ifstream file(path);
+    if (!file.is_open()) return false;
+
+    std::string magic;
+    int ver = 0;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver < 2 || ver > 5) return false;
+
+    SeqAudioLoadGuard audioGuard;
+
+    Pattern staged;
+    struct StagedSlotLoad {
+        int slot = 0;
+        SampleAsset asset;
+        bool missing = false;
+    };
+    std::vector<StagedSlotLoad> stagedLoads;
+    int missingSamples = 0;
+
+    for (int t = 0; t < 8; ++t) {
+        std::string sampleName;
+        if (!ReadTrackBlock(file, staged.tracks[t], ver, t, sampleName)) return false;
+
+        Track& trk = staged.tracks[t];
+        if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
+            if (g_samplePool[trk.sampleSlot].name != sampleName) {
+                StagedSlotLoad entry;
+                entry.slot = trk.sampleSlot;
+                if (!LoadSampleIntoAsset(entry.asset, sampleName)) {
+                    entry.missing = true;
+                    missingSamples++;
+                }
+                stagedLoads.push_back(std::move(entry));
+            }
+        }
+    }
+
+    // Commit — live state untouched until here.
+    for (auto& entry : stagedLoads) {
+        if (entry.missing) {
+            g_samplePool[entry.slot].name = "Empty";
+            g_samplePool[entry.slot].pcmData.clear();
+            g_samplePool[entry.slot].visualPeaks = {};
+        } else {
+            g_samplePool[entry.slot] = std::move(entry.asset);
+        }
+    }
+
+    patterns[patternIdx] = staged;
+    for (int t = 0; t < 8; ++t) {
+        ResetTrackRuntime(patterns[patternIdx].tracks[t]);
+        ChaosCaptureInto(patterns[patternIdx].tracks[t]);
+    }
+
+    if (patternIdx == activePattern) {
+        for (int t = 0; t < 8; ++t) {
+            tracks[t] = patterns[patternIdx].tracks[t];
+        }
+    }
+    g_chaosDirty.store(true);
+    SetMissingSampleFeedback(missingSamples);
+    return true;
+}
+
+bool SaveProject(int slot, const std::string& filename) {
+    std::string path = "projects/slot_" + std::to_string(slot) + "_" + filename + ".prj";
+    const std::string tmpPath = path + ".tmp";
+
+    // Snapshot live edits into a local copy of the active pattern only.
+    // patterns[] is updated only after a successful commit.
+    Pattern activeSnap = patterns[activePattern];
+    for (int t = 0; t < 8; ++t) {
+        activeSnap.tracks[t] = tracks[t];
+    }
+
+    {
+        std::ofstream file(tmpPath);
+        if (!file.is_open()) return false;
+
+        file << "SOUNDBOY_PRJ 5\n";
+
+        // Write the filenames of all 16 Sample Pool slots at the top of the project
+        for (int i = 0; i < 16; ++i) {
+            file << (g_samplePool[i].name.empty() ? "Empty" : g_samplePool[i].name) << "\n";
+        }
+
+        file << tempo << "\n";
+        file << activePattern << "\n";
+
+        // Save global master bus FX
+        file << globalFX.reverbDecay << "\n" << globalFX.reverbSize << "\n" << globalFX.reverbPredelay << "\n" << globalFX.reverbMix << "\n";
+        file << globalFX.satLevel << "\n" << globalFX.satSymmetry << "\n" << globalFX.satOverdrive << "\n" << globalFX.satMix << "\n";
+        file << globalFX.delayTime << "\n" << globalFX.delayFeedback << "\n" << globalFX.delayPingPong << "\n" << globalFX.delayMix << "\n";
+        file << globalFX.autoPanTime << "\n" << globalFX.autoPanFeedback << "\n" << globalFX.autoPanWidth << "\n" << globalFX.autoPanMix << "\n";
+        file << globalKeyRoot << "\n";
+        file << globalKeyLock << "\n";
+
+        // Generative chaos settings (format v5+)
+        file << g_chaos << "\n" << g_chaosLift << "\n" << g_chaosFill << "\n" << g_chaosSkip << "\n";
+        file << g_chaosRatchet << "\n" << g_chaosTime << "\n" << g_chaosRepeat << "\n" << g_chaosSeed << "\n";
+
+        // Save 8 patterns
+        for (int p = 0; p < 8; ++p) {
+            const Pattern& pat = (p == activePattern) ? activeSnap : patterns[p];
+            for (int t = 0; t < 8; ++t) {
+                const Track& trk = pat.tracks[t];
+                file << (int)trk.engineType << "\n" << trk.algorithm << "\n";
+                file << trk.morph << "\n" << trk.coarse << "\n" << trk.fine << "\n" << trk.volume << "\n";
+                file << trk.attack << "\n" << trk.decay << "\n" << trk.sustain << "\n" << trk.release << "\n";
+                file << trk.morph2 << "\n" << trk.coarse2 << "\n" << trk.fine2 << "\n" << trk.volume2 << "\n";
+                file << trk.attack2 << "\n" << trk.decay2 << "\n" << trk.sustain2 << "\n" << trk.release2 << "\n";
+                file << trk.fmFeedback << "\n" << trk.noiseVolume << "\n";
+                file << trk.noiseAttack << "\n" << trk.noiseHold << "\n" << trk.noiseDecay << "\n";
+                file << trk.filterCutoff << "\n" << trk.filterResonance << "\n" << trk.filterType << "\n" << trk.filterEnvDepth << "\n";
+                file << trk.filterAttack << "\n" << trk.filterDecay << "\n" << trk.filterSustain << "\n" << trk.filterRelease << "\n";
+                file << trk.lfo1Wave << "\n" << trk.lfo1Speed << "\n" << trk.lfo1Depth << "\n" << trk.lfo1Trigger << "\n" << trk.lfo1Sync << "\n" << trk.lfo1Dest << "\n";
+                for (int i = 0; i < 3; ++i) {
+                    file << trk.lfo1Slots[i].destType << "\n"
+                         << trk.lfo1Slots[i].destTrack << "\n"
+                         << trk.lfo1Slots[i].destParam << "\n"
+                         << trk.lfo1Slots[i].depth << "\n";
+                }
+                file << trk.lfo2Wave << "\n" << trk.lfo2Speed << "\n" << trk.lfo2Depth << "\n" << trk.lfo2Trigger << "\n" << trk.lfo2Sync << "\n" << trk.lfo2Dest << "\n";
+                for (int i = 0; i < 3; ++i) {
+                    file << trk.lfo2Slots[i].destType << "\n"
+                         << trk.lfo2Slots[i].destTrack << "\n"
+                         << trk.lfo2Slots[i].destParam << "\n"
+                         << trk.lfo2Slots[i].depth << "\n";
+                }
+                file << trk.reverbSend << "\n" << trk.delaySend << "\n" << trk.saturationSend << "\n" << trk.autoPanSend << "\n";
+                file << trk.sampleStart << "\n" << trk.sampleLength << "\n" << trk.sampleLoop << "\n" << trk.sampleTune << "\n";
+                file << trk.loopStart << "\n" << trk.loopEnd << "\n" << trk.sliceDivisions << "\n";
+                file << trk.grainSize << "\n" << trk.grainDensity << "\n" << trk.grainPosition << "\n" << trk.grainScatter << "\n";
+                file << trk.masterVolume << "\n";
+                
+                // Save Tape Buffer track defaults
+                file << trk.tapeMemory << "\n" << trk.tapeHeads << "\n" << trk.tapeSpread << "\n" << trk.tapeSpeed << "\n"
+                     << trk.tapeTether << "\n" << trk.tapeDrift << "\n" << trk.tapeDriftRate << "\n" << trk.tapeFeedback << "\n"
+                     << trk.tapeFbSpread << "\n" << trk.tapeFbSource << "\n" << trk.tapeFreeze << "\n" << trk.tapeSmearRate << "\n"
+                     << trk.tapeSmearSize << "\n" << trk.tapeMix << "\n";
+
+                // Save Poly/Mono Voice Mode
+                file << trk.polyMode << "\n";
+                WriteTrackGroove(file, trk);
+
+                for (int s = 0; s < 32; ++s) {
+                                const Step& step = trk.steps[s];
+                                // Store the pattern as programmed, not the bar of
+                                // chaos that happened to be on screen.
+                                const StepSource& src = trk.source[s];
+                                file << (src.note == -1 ? "-" : MidiToNote(src.note)) << "\n";
+                                file << (int)src.velocity << "\n";
+                                file << "-" << "\n"; // Write standard dummy dash to protect format layout
+                                file << (int)src.retrigger << "\n";
+                                file << (int)src.microtiming << "\n";
+
+                                // Popup details
+                                file << step.condMask << "\n";
+                                file << step.noteLength << "\n";
+                                file << step.chordType << "\n";
+                                file << (step.chordNotes[0] == -1 ? "-" : MidiToNote(step.chordNotes[0])) << "\n";
+                                file << (step.chordNotes[1] == -1 ? "-" : MidiToNote(step.chordNotes[1])) << "\n";
+                                file << (step.chordNotes[2] == -1 ? "-" : MidiToNote(step.chordNotes[2])) << "\n";
+
+                    WriteStepParams(file, step.params);
+                }
+
+                // Save track-default Sample Slot and Name
+                file << trk.sampleSlot << "\n";
+                file << (g_samplePool[trk.sampleSlot].name.empty() ? "Empty" : g_samplePool[trk.sampleSlot].name) << "\n";
+            }
+        }
+
+        file.flush();
+        if (!file.good()) {
+            file.close();
+            RemovePathQuiet(tmpPath);
+            return false;
+        }
+    }
+
+    if (!CommitTmpSlotSave(path, SlotSaveVerify::ProjectV5)) return false;
+    ClearOtherSlotFiles("projects", slot, ".prj", path);
+    patterns[activePattern] = activeSnap;
     return true;
 }
 
@@ -1331,182 +1632,139 @@ bool LoadProject(const std::string& filename) {
     int ver = 0;
     if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || ver < 2 || ver > 5) return false;
 
-    // Load and automatically crunch the 16 Sample Pool slots in the background [2]
+    SeqAudioLoadGuard audioGuard;
+
+    SampleAsset stagedPool[16];
+    Pattern stagedPatterns[8];
+    double stagedTempo = 120.0;
+    int stagedActivePattern = 0;
+    GlobalFX stagedFX;
+    int stagedKeyRoot = 0;
+    int stagedKeyLock = 0;
+    int stagedChaos = 0;
+    int stagedChaosLift = 50;
+    int stagedChaosFill = 50;
+    int stagedChaosSkip = 50;
+    int stagedChaosRatchet = 30;
+    int stagedChaosTime = 30;
+    int stagedChaosRepeat = 0;
+    unsigned int stagedChaosSeed = 1;
+    int missingSamples = 0;
+
     for (int i = 0; i < 16; ++i) {
         std::string sampleName;
-        file >> sampleName;
+        if (!(file >> sampleName)) return false;
         if (sampleName != "Empty" && !sampleName.empty()) {
-            LoadSampleToPool(i, sampleName);
+            if (!LoadSampleIntoAsset(stagedPool[i], sampleName)) {
+                stagedPool[i].name = "Empty";
+                stagedPool[i].pcmData.clear();
+                stagedPool[i].visualPeaks = {};
+                missingSamples++;
+            }
         } else {
-            g_samplePool[i].name = "Empty";
-            g_samplePool[i].pcmData.clear();
+            stagedPool[i].name = "Empty";
+            stagedPool[i].pcmData.clear();
+            stagedPool[i].visualPeaks = {};
         }
     }
 
-    file >> tempo;
-    file >> activePattern;
+    if (!(file >> stagedTempo)) return false;
+    if (!(file >> stagedActivePattern)) return false;
+    if (stagedActivePattern < 0 || stagedActivePattern > 7) return false;
 
-    file >> globalFX.reverbDecay >> globalFX.reverbSize >> globalFX.reverbPredelay >> globalFX.reverbMix;
-    file >> globalFX.satLevel >> globalFX.satSymmetry >> globalFX.satOverdrive >> globalFX.satMix;
-    file >> globalFX.delayTime >> globalFX.delayFeedback >> globalFX.delayPingPong >> globalFX.delayMix;
-    file >> globalFX.autoPanTime >> globalFX.autoPanFeedback >> globalFX.autoPanWidth >> globalFX.autoPanMix;
+    if (!(file >> stagedFX.reverbDecay >> stagedFX.reverbSize >> stagedFX.reverbPredelay >> stagedFX.reverbMix)) return false;
+    if (!(file >> stagedFX.satLevel >> stagedFX.satSymmetry >> stagedFX.satOverdrive >> stagedFX.satMix)) return false;
+    if (!(file >> stagedFX.delayTime >> stagedFX.delayFeedback >> stagedFX.delayPingPong >> stagedFX.delayMix)) return false;
+    if (!(file >> stagedFX.autoPanTime >> stagedFX.autoPanFeedback >> stagedFX.autoPanWidth >> stagedFX.autoPanMix)) return false;
+
     if (ver >= 3) {
-        SafeRead(file, globalKeyRoot, 0);
-        globalKeyRoot = std::clamp(globalKeyRoot, 0, 11);
+        SafeRead(file, stagedKeyRoot, 0);
+        stagedKeyRoot = std::clamp(stagedKeyRoot, 0, 11);
         if (ver >= 4) {
-            SafeRead(file, globalKeyLock, 0);
-            globalKeyLock = std::clamp(globalKeyLock, 0, 1);
+            SafeRead(file, stagedKeyLock, 0);
+            stagedKeyLock = std::clamp(stagedKeyLock, 0, 1);
         } else {
-            globalKeyLock = 1; // v3 projects were always major
+            stagedKeyLock = 1; // v3 projects were always major
         }
     } else {
-        globalKeyRoot = 0;
-        globalKeyLock = 0;
+        stagedKeyRoot = 0;
+        stagedKeyLock = 0;
     }
 
     if (ver >= 5) {
-        SafeRead(file, g_chaos, 0);
-        SafeRead(file, g_chaosLift, 50);
-        SafeRead(file, g_chaosFill, 50);
-        SafeRead(file, g_chaosSkip, 50);
-        SafeRead(file, g_chaosRatchet, 30);
-        SafeRead(file, g_chaosTime, 30);
-        SafeRead(file, g_chaosRepeat, 0);
-        SafeRead(file, g_chaosSeed, 1u);
-        g_chaos        = std::clamp(g_chaos, 0, 99);
-        g_chaosLift    = std::clamp(g_chaosLift, 0, 99);
-        g_chaosFill    = std::clamp(g_chaosFill, 0, 99);
-        g_chaosSkip    = std::clamp(g_chaosSkip, 0, 99);
-        g_chaosRatchet = std::clamp(g_chaosRatchet, 0, 99);
-        g_chaosTime    = std::clamp(g_chaosTime, 0, 99);
-        g_chaosRepeat  = std::clamp(g_chaosRepeat, 0, 8);
+        SafeRead(file, stagedChaos, 0);
+        SafeRead(file, stagedChaosLift, 50);
+        SafeRead(file, stagedChaosFill, 50);
+        SafeRead(file, stagedChaosSkip, 50);
+        SafeRead(file, stagedChaosRatchet, 30);
+        SafeRead(file, stagedChaosTime, 30);
+        SafeRead(file, stagedChaosRepeat, 0);
+        SafeRead(file, stagedChaosSeed, 1u);
+        stagedChaos        = std::clamp(stagedChaos, 0, 99);
+        stagedChaosLift    = std::clamp(stagedChaosLift, 0, 99);
+        stagedChaosFill    = std::clamp(stagedChaosFill, 0, 99);
+        stagedChaosSkip    = std::clamp(stagedChaosSkip, 0, 99);
+        stagedChaosRatchet = std::clamp(stagedChaosRatchet, 0, 99);
+        stagedChaosTime    = std::clamp(stagedChaosTime, 0, 99);
+        stagedChaosRepeat  = std::clamp(stagedChaosRepeat, 0, 8);
     }
+
+    for (int p = 0; p < 8; ++p) {
+        for (int t = 0; t < 8; ++t) {
+            std::string sampleName;
+            Track& trk = stagedPatterns[p].tracks[t];
+            if (!ReadTrackBlock(file, trk, ver, t, sampleName)) return false;
+
+            if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
+                if (stagedPool[trk.sampleSlot].name != sampleName) {
+                    SampleAsset loaded;
+                    if (!LoadSampleIntoAsset(loaded, sampleName)) {
+                        stagedPool[trk.sampleSlot].name = "Empty";
+                        stagedPool[trk.sampleSlot].pcmData.clear();
+                        stagedPool[trk.sampleSlot].visualPeaks = {};
+                        missingSamples++;
+                    } else {
+                        stagedPool[trk.sampleSlot] = std::move(loaded);
+                    }
+                }
+            }
+        }
+    }
+
+    // Commit once — live state untouched until here.
+    for (int i = 0; i < 16; ++i) {
+        g_samplePool[i] = std::move(stagedPool[i]);
+    }
+
+    tempo = stagedTempo;
+    activePattern = stagedActivePattern;
+    globalFX = stagedFX;
+    globalKeyRoot = stagedKeyRoot;
+    globalKeyLock = stagedKeyLock;
+    g_chaos = stagedChaos;
+    g_chaosLift = stagedChaosLift;
+    g_chaosFill = stagedChaosFill;
+    g_chaosSkip = stagedChaosSkip;
+    g_chaosRatchet = stagedChaosRatchet;
+    g_chaosTime = stagedChaosTime;
+    g_chaosRepeat = stagedChaosRepeat;
+    g_chaosSeed = stagedChaosSeed;
     // Transposition is a performance gesture, not part of the saved pattern.
     g_globalTranspose = 0;
 
     for (int p = 0; p < 8; ++p) {
-        Pattern& pat = patterns[p];
+        patterns[p] = stagedPatterns[p];
         for (int t = 0; t < 8; ++t) {
-            Track& trk = pat.tracks[t];
-            int engineVal = 0;
-            file >> engineVal; trk.engineType = SanitizeEngineType(engineVal, t);
-            file >> trk.algorithm;
-            file >> trk.morph >> trk.coarse >> trk.fine >> trk.volume;
-            file >> trk.attack >> trk.decay >> trk.sustain >> trk.release;
-            file >> trk.morph2 >> trk.coarse2 >> trk.fine2 >> trk.volume2;
-            file >> trk.attack2 >> trk.decay2 >> trk.sustain2 >> trk.release2;
-            file >> trk.fmFeedback >> trk.noiseVolume;
-            file >> trk.noiseAttack >> trk.noiseHold >> trk.noiseDecay;
-            file >> trk.filterCutoff >> trk.filterResonance >> trk.filterType >> trk.filterEnvDepth;
-            file >> trk.filterAttack >> trk.filterDecay >> trk.filterSustain >> trk.filterRelease;
-            file >> trk.lfo1Wave >> trk.lfo1Speed >> trk.lfo1Depth >> trk.lfo1Trigger >> trk.lfo1Sync >> trk.lfo1Dest;
-            for (int i = 0; i < 3; ++i) {
-                file >> trk.lfo1Slots[i].destType
-                     >> trk.lfo1Slots[i].destTrack
-                     >> trk.lfo1Slots[i].destParam
-                     >> trk.lfo1Slots[i].depth;
-            }
-            file >> trk.lfo2Wave >> trk.lfo2Speed >> trk.lfo2Depth >> trk.lfo2Trigger >> trk.lfo2Sync >> trk.lfo2Dest;
-            for (int i = 0; i < 3; ++i) {
-                file >> trk.lfo2Slots[i].destType
-                     >> trk.lfo2Slots[i].destTrack
-                     >> trk.lfo2Slots[i].destParam
-                     >> trk.lfo2Slots[i].depth;
-            }
-            file >> trk.reverbSend >> trk.delaySend >> trk.saturationSend >> trk.autoPanSend;
-            file >> trk.sampleStart >> trk.sampleLength >> trk.sampleLoop >> trk.sampleTune;
-            file >> trk.loopStart >> trk.loopEnd >> trk.sliceDivisions;
-            file >> trk.grainSize >> trk.grainDensity >> trk.grainPosition >> trk.grainScatter;
-            
-            // Safely load the Master Volume default
-            SafeRead(file, trk.masterVolume, 99);
-            
-            // Safely load all Tape Buffer track default settings
-            SafeRead(file, trk.tapeMemory, 50);
-            SafeRead(file, trk.tapeHeads, 1);
-            SafeRead(file, trk.tapeSpread, 0);
-            SafeRead(file, trk.tapeSpeed, 74);
-            SafeRead(file, trk.tapeTether, 99);
-            SafeRead(file, trk.tapeDrift, 10);
-            SafeRead(file, trk.tapeDriftRate, 20);
-            SafeRead(file, trk.tapeFeedback, 30);
-            SafeRead(file, trk.tapeFbSpread, 10);
-            SafeRead(file, trk.tapeFbSource, 0);
-            SafeRead(file, trk.tapeFreeze, 0);
-            SafeRead(file, trk.tapeSmearRate, 0);
-            SafeRead(file, trk.tapeSmearSize, 40);
-            SafeRead(file, trk.tapeMix, 0);
+            ResetTrackRuntime(patterns[p].tracks[t]);
+            ChaosCaptureInto(patterns[p].tracks[t]);
+        }
+    }
 
-            // Safely load Poly Mode default
-            SafeRead(file, trk.polyMode, 1);
-            ReadTrackGroove(file, trk, ver);
-
-            for (int s = 0; s < 32; ++s) {
-                            Step& step = trk.steps[s];
-                            
-                            std::string tempNote;
-                            file >> tempNote;
-                            step.note = (tempNote == "-" || tempNote.empty()) ? -1 : NoteToMidi(tempNote);
-                            
-                            file >> step.velocity;
-                            
-                            std::string tempLegacyCondition;
-                            file >> tempLegacyCondition; // Discards legacy condition strings safely
-                            
-                            file >> step.retrigger;
-                            file >> step.microtiming;
-
-                            std::string tempMask, tempLen, tempChord;
-                            if (file >> tempMask >> tempLen >> tempChord) {
-                                step.condMask = (uint16_t)std::stoul(tempMask);
-                                step.noteLength = std::stoi(tempLen);
-                                step.chordType = std::stoi(tempChord);
-
-                                std::string n0, n1, n2;
-                                file >> n0 >> n1 >> n2;
-                                step.chordNotes[0] = (n0 == "-" || n0.empty()) ? -1 : NoteToMidi(n0);
-                                step.chordNotes[1] = (n1 == "-" || n1.empty()) ? -1 : NoteToMidi(n1);
-                                step.chordNotes[2] = (n2 == "-" || n2.empty()) ? -1 : NoteToMidi(n2);
-                            } else {
-                                file.clear(); // Flush EOF errors
-                                step.condMask = 0xFFFF;
-                                step.noteLength = 0;
-                                step.chordType = 0;
-                                step.chordNotes[0] = -1;
-                                step.chordNotes[1] = -1;
-                                step.chordNotes[2] = -1;
-                            }
-
-                if (!ReadStepParams(file, step.params)) return false;
-            } // end of step (s) loop
-
-            // Safely load default Sample Slot and Name
-            SafeRead(file, trk.sampleSlot, 0);
-            std::string sampleName;
-            SafeRead(file, sampleName, std::string("Empty"));
-
-            if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
-                if (g_samplePool[trk.sampleSlot].name != sampleName) {
-                    LoadSampleToPool(trk.sampleSlot, sampleName);
-                }
-            }
-
-            // Sanitize missing/legacy variables
-            if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
-            if (trk.sampleLength < 1)   trk.sampleLength = 99;
-            if (trk.loopEnd < 1)        trk.loopEnd = 99;
-            // What was just read is the pattern as programmed, so it is the
-            // chaos source.
-            ChaosCaptureInto(trk);
-        } // end of track (t) loop
-    } // end of pattern (p) loop
-
-    // Force load the active pattern data into global rendering array
     for (int t = 0; t < 8; ++t) {
         tracks[t] = patterns[activePattern].tracks[t];
     }
     g_chaosDirty.store(true);
-
+    SetMissingSampleFeedback(missingSamples);
     return true;
 }
 // Thread-safe memory swapper performs a pattern swap in RAM

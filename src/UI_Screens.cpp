@@ -1592,12 +1592,24 @@ void DrawDiagnosticsScreen(const UIState& state) {
     Draw3x5String(fpsBuf, 4, 30, UI_VALUE);
 
     char grnBuf[32];
-    snprintf(grnBuf, sizeof(grnBuf), "GRN: %d/128", g_globalActiveGrains);
+    {
+        unsigned tickDrops = g_midiTickDrops.load(std::memory_order_relaxed);
+        unsigned liveDrops = g_midiLiveDrops.load(std::memory_order_relaxed);
+        if (tickDrops > 0 || liveDrops > 0) {
+            snprintf(grnBuf, sizeof(grnBuf), "MD:%u/%u", tickDrops, liveDrops);
+        } else {
+            snprintf(grnBuf, sizeof(grnBuf), "GRN: %d/128", g_globalActiveGrains);
+        }
+    }
     Draw3x5String(grnBuf, 4, 39, UI_VALUE);
 
     char bpmBuf[32];
-    snprintf(bpmBuf, sizeof(bpmBuf), "BPM: %3d", (int)state.tempo);
+    snprintf(bpmBuf, sizeof(bpmBuf), "BPM:%3d", (int)state.tempo);
     Draw3x5String(bpmBuf, 4, 48, UI_VALUE);
+
+    // Clock source next to BPM (toggle via KEY_UP / KEY_C on this screen)
+    const bool extClk = g_useExternalMidiClock.load(std::memory_order_relaxed);
+    Draw3x5String(extClk ? "CLK:EXT" : "CLK:INT", 48, 48, UI_VALUE);
 
     // Connected MIDI device display
         char midiBuf[64];

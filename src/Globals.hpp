@@ -8,6 +8,10 @@ extern std::atomic<bool> g_useExternalMidiClock;
 extern std::atomic<int> g_externalMidiTicksQueued;
 extern std::atomic<bool> g_externalMidiStartTriggered;
 extern std::atomic<bool> g_externalMidiStopTriggered;
+extern std::atomic<unsigned> g_midiTickDrops;
+extern std::atomic<unsigned> g_midiLiveDrops;
+extern std::atomic<bool> g_externalClockDisablePending;
+extern std::atomic<uint64_t> g_lastExternalClockMs;
 extern int selectedTrack;
 extern Screen currentScreen;
 extern int cursorStep;
@@ -63,7 +67,8 @@ extern TapeBufferFX g_trackTapeFX[8];
 extern int synthMode;
 extern const char* menuFeedback;
 extern SampleAsset g_samplePool[16];
-bool LoadSampleToPool(int slotIdx, const std::string& filename);
+// pauseAudio=false when an outer PauseSeqAudio already owns the device.
+bool LoadSampleToPool(int slotIdx, const std::string& filename, bool pauseAudio = true);
 extern bool g_hardwareEncoderClicked;
 extern float g_audioCpuLoad;
 // Audio-thread health, written by the callback and read by the diagnostics screen.
