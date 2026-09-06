@@ -85,6 +85,33 @@ Run from the repository root:
 ./build/seq1
 ```
 
+### Pi applications menu / clean boot launch
+
+Direct `./build/seq1` needs a working `DISPLAY` and must be started from the
+repo root. Menu entries and some SSH sessions often miss one or both.
+
+Use the wrapper instead:
+
+```sh
+chmod +x ~/seq1/scripts/run-seq1.sh
+~/seq1/scripts/run-seq1.sh
+```
+
+Install a desktop menu entry (paths assume user `soundboy1` and clone at
+`~/seq1` — edit `scripts/soundboy.desktop` if yours differ):
+
+```sh
+mkdir -p ~/.local/share/applications
+cp ~/seq1/scripts/soundboy.desktop ~/.local/share/applications/
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
+```
+
+Then launch **Soundboy** from the applications menu. The wrapper sets
+`DISPLAY=:0` when unset and `cd`s to the repo root before exec.
+
+If `InitWindow` still fails, the app now exits with a log message instead of
+segfaulting.
+
 The Linux build applies `-march=native`, so build on the Pi—or on a machine
 targeting the same CPU—rather than copying an arbitrary Linux binary.
 

@@ -1437,6 +1437,11 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
 
 int main() {
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "8-Track Sequencer - Premium UI");
+    if (!IsWindowReady()) {
+        // Common on Pi when DISPLAY is unset (SSH / broken menu launcher).
+        TraceLog(LOG_FATAL, "InitWindow failed — is DISPLAY set? Use scripts/run-seq1.sh on the Pi.");
+        return 1;
+    }
     SetTargetFPS(60);
 
     RenderTexture2D oledScreen = LoadRenderTexture(OLED_WIDTH, OLED_HEIGHT);
