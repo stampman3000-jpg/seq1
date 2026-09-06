@@ -213,9 +213,6 @@ static bool ValidateTrackFields(Track& trk) {
     if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
     if (trk.sampleLength < 1)   trk.sampleLength = 99;
     if (trk.loopEnd < 1)        trk.loopEnd = 99;
-    // Names are UI chrome, not in the .pat/.prj format. Staging used to leave
-    // them empty and wipe the sequencer labels on commit.
-    trk.name = GetTrackName(trackIdx);
     return true;
 }
 
@@ -354,6 +351,9 @@ static bool ReadTrackBlock(std::ifstream& file, Track& trk, int ver, int trackId
     SafeRead(file, outSampleName, std::string("Empty"));
 
     if (!ValidateTrackFields(trk)) return false;
+    // Names are UI chrome, not in the .pat/.prj format. A staged Track defaults
+    // to empty name and would wipe TRK1–TRK8 labels on commit.
+    trk.name = GetTrackName(trackIdx);
     return true;
 }
 
