@@ -1437,6 +1437,10 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
 
 int main() {
     InitWindow(WINDOW_WIDTH, WINDOW_HEIGHT, "8-Track Sequencer - Premium UI");
+    if (!IsWindowReady()) {
+        fprintf(stderr, "Failed to open display window (DISPLAY unset or X not ready).\n");
+        return 1;
+    }
     SetTargetFPS(60);
 
     RenderTexture2D oledScreen = LoadRenderTexture(OLED_WIDTH, OLED_HEIGHT);

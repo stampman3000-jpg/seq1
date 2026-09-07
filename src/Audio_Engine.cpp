@@ -12,6 +12,7 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <cstdio>
 #include <atomic>
 #if defined(__SSE2__) || defined(_M_X64)
 #include <pmmintrin.h>
@@ -2140,6 +2141,15 @@ static void RefreshUsbCaptureDevicesInternal() {
         g_usbCaptureRequested = (int)g_usbCaptures.size() - 1;
 }
 
+static double s_fxInitedRate = 0.0;
+static void EnsureFxRate() {
+    if (s_fxInitedRate == g_sampleRate && s_fxInitedRate > 0.0) return;
+    s_fxInitedRate = g_sampleRate;
+    g_masterDelay.init((float)g_sampleRate);
+    g_masterReverb.init((float)g_sampleRate);
+    g_masterTornado.init((float)g_sampleRate);
+}
+
 static bool OpenAudioDeviceOnce(bool duplex, int captureIdx, ma_uint32 rate, ma_uint32 period,
                                 bool alsaNoMMap, bool alsaNoAutoResample) {
     ma_device_config deviceConfig = ma_device_config_init(duplex ? ma_device_type_duplex : ma_device_type_playback);
@@ -2170,6 +2180,15 @@ static bool OpenAudioDeviceOnce(bool duplex, int captureIdx, ma_uint32 rate, ma_
     ma_context* ctx = g_maContextInit ? &g_maContext : nullptr;
     if (ma_device_init(ctx, &deviceConfig, &g_audioDevice) != MA_SUCCESS)
         return false;
+
+    // Sample rate is known after init; allocate FX before the callback can run.
+    if (g_audioDevice.sampleRate != 0)
+        g_sampleRate = (double)g_audioDevice.sampleRate;
+    g_audioPeriodFrames = g_audioDevice.playback.internalPeriodSizeInFrames;
+    if (g_audioPeriodFrames == 0)
+        g_audioPeriodFrames = period;
+    EnsureFxRate();
+
     if (ma_device_start(&g_audioDevice) != MA_SUCCESS) {
         ma_device_uninit(&g_audioDevice);
         return false;
@@ -2178,11 +2197,6 @@ static bool OpenAudioDeviceOnce(bool duplex, int captureIdx, ma_uint32 rate, ma_
     g_usbDuplexActive = duplex;
     g_usbCaptureLive = duplex;
     if (duplex) g_usbCaptureIndex = captureIdx;
-    if (g_audioDevice.sampleRate != 0)
-        g_sampleRate = (double)g_audioDevice.sampleRate;
-    g_audioPeriodFrames = g_audioDevice.playback.internalPeriodSizeInFrames;
-    if (g_audioPeriodFrames == 0)
-        g_audioPeriodFrames = period;
     return true;
 }
 
@@ -2245,15 +2259,6 @@ static void CloseSeqAudioDevice() {
     g_audioPauseDepth = 0;
 }
 
-static double s_fxInitedRate = 0.0;
-static void EnsureFxRate() {
-    if (s_fxInitedRate == g_sampleRate && s_fxInitedRate > 0.0) return;
-    s_fxInitedRate = g_sampleRate;
-    g_masterDelay.init((float)g_sampleRate);
-    g_masterReverb.init((float)g_sampleRate);
-    g_masterTornado.init((float)g_sampleRate);
-}
-
 static void ReinitAudioDevice(bool duplex, int captureIdx) {
     CloseSeqAudioDevice();
     if (OpenAudioDevice(duplex, captureIdx)) {
@@ -2268,11 +2273,29 @@ static void ReinitAudioDevice(bool duplex, int captureIdx) {
 void InitAudioEngine() {
     InitVolumeCurve();
     InitSineLut();
+#if defined(__linux__)
+    // Prefer exclusive ALSA so Pi USB audio is not forced through PipeWire's
+    // Pulse path (small quantum + 44.1→48 resample). Mac/Windows keep defaults.
+    {
+        const ma_backend backends[] = { ma_backend_alsa };
+        if (ma_context_init(backends, 1, nullptr, &g_maContext) == MA_SUCCESS)
+            g_maContextInit = true;
+    }
+#else
     if (ma_context_init(nullptr, 0, nullptr, &g_maContext) == MA_SUCCESS)
         g_maContextInit = true;
+#endif
     RefreshUsbCaptureDevicesInternal();
 
-    OpenAudioDevice(false, g_usbCaptureRequested);
+    if (!OpenAudioDevice(false, g_usbCaptureRequested)) {
+        fprintf(stderr, "[AUDIO] Playback device failed to open; continuing silent.\n");
+    } else if (g_maContextInit) {
+        // Startup only — never log from the callback.
+        fprintf(stderr, "[AUDIO] backend=%s rate=%d period=%u\n",
+                ma_get_backend_name(g_maContext.backend),
+                (int)g_sampleRate,
+                (unsigned)g_audioPeriodFrames);
+    }
     EnsureFxRate();
 }
 
