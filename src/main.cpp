@@ -1323,9 +1323,9 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
                 else if (synthGridCol == 1) {
                     if (trk.algorithm == ALGO_CARRIER_MOD) {
                         int baseC2 = (isStepLock && sp.coarse2 != -1) ? sp.coarse2 : trk.coarse2;
-                        int newC2 = std::clamp(baseC2 + ((change > 0) ? 1 : ((change < 0) ? -1 : 0)), 1, 16);
+                        int newC2 = std::clamp(baseC2 + ((change > 0) ? 1 : ((change < 0) ? -1 : 0)), 0, 16);
                         if (isStepLock) sp.coarse2 = newC2;
-                        else            SetTrk(&Track::coarse2, (change > 0) ? 1 : ((change < 0) ? -1 : 0), 1, 16);
+                        else            SetTrk(&Track::coarse2, (change > 0) ? 1 : ((change < 0) ? -1 : 0), 0, 16);
                     } else {
                         if (isStepLock) EditParam(sp.coarse2, trk.coarse2, change, -24, 24);
                         else            SetTrk(&Track::coarse2, change, -24, 24);
@@ -1351,9 +1351,9 @@ static void HandleParameterEditingInput(int encoderTurn, bool encoderButton, boo
             else if (synthGridCol == 2) {
                 int baseT = (isStepLock && sp.filterType != -1) ? sp.filterType : trk.filterType;
                 int newT = baseT + change;
-                if (newT < 0) newT = 2; if (newT > 2) newT = 0;
+                if (newT < 0) newT = 4; if (newT > 4) newT = 0;
                 if (isStepLock) sp.filterType = newT;
-                else            WrapTrk(&Track::filterType, change, 0, 2);
+                else            WrapTrk(&Track::filterType, change, 0, 4);
             }
             else if (synthGridCol == 3) { if (isStepLock) EditParam(sp.filterEnvDepth, trk.filterEnvDepth, change, 0, 99); else SetTrk(&Track::filterEnvDepth, change, 0, 99); }
             else if (synthGridCol == 4) {
@@ -1995,7 +1995,7 @@ int main() {
                 } else {
                     if (tracks[selectedTrack].algorithm == ALGO_PARALLEL) {
                         tracks[selectedTrack].algorithm = ALGO_CARRIER_MOD;
-                        tracks[selectedTrack].coarse2 = std::clamp(tracks[selectedTrack].coarse2, 1, 16);
+                        tracks[selectedTrack].coarse2 = std::clamp(tracks[selectedTrack].coarse2, 0, 16);
                     } else {
                         tracks[selectedTrack].algorithm = ALGO_PARALLEL;
                     }

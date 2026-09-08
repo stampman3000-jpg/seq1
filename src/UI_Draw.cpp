@@ -842,10 +842,14 @@ void DrawFilterCurve(int cutoff, int resonance, int type, int x, int y, int w, i
 
     int prevY = baseline;
     int cutoffX = 2 + (int)(normCut * (w - 4));
+    // 24 dB (types 3/4) uses a shorter rolloff so the curve looks steeper
+    const bool is24 = (type == 3 || type == 4);
+    const float rollPx = is24 ? 4.0f : 8.0f;
+    const int mode = (type == 3) ? 0 : ((type == 4) ? 1 : type); // map 24→12 shape family
 
     for (int dx = 1; dx < w - 1; ++dx) {
         int py = baseline;
-        if (type == 0) {
+        if (mode == 0) {
             if (dx < cutoffX - 4) {
                 py = y + 3;
             } else if (dx < cutoffX) {
@@ -853,11 +857,11 @@ void DrawFilterCurve(int cutoff, int resonance, int type, int x, int y, int w, i
                 int peak = (int)(normRes * 6.0f);
                 py = y + 3 - (int)(t * peak);
             } else {
-                float t = std::min((dx - cutoffX) / 8.0f, 1.0f);
+                float t = std::min((dx - cutoffX) / rollPx, 1.0f);
                 int peak = (int)(normRes * 6.0f);
                 py = (y + 3 - peak) + (int)(t * (baseline - (y + 3 - peak)));
             }
-        } else if (type == 1) {
+        } else if (mode == 1) {
             if (dx > cutoffX + 4) {
                 py = y + 3;
             } else if (dx > cutoffX) {
@@ -865,7 +869,7 @@ void DrawFilterCurve(int cutoff, int resonance, int type, int x, int y, int w, i
                 int peak = (int)(normRes * 6.0f);
                 py = y + 3 - (int)(t * peak);
             } else {
-                float t = std::min((cutoffX - dx) / 8.0f, 1.0f);
+                float t = std::min((cutoffX - dx) / rollPx, 1.0f);
                 int peak = (int)(normRes * 6.0f);
                 py = (y + 3 - peak) + (int)(t * (baseline - (y + 3 - peak)));
             }

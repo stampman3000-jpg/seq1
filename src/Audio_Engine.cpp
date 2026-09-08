@@ -476,6 +476,7 @@ struct SynthVoice {
 
     // --- Filter & Filter Envelope States ---
     SvfFilter filter;
+    SvfFilter filter2; // Second 12 dB stage for opt-in 24 dB LP/HP
     float filterEnvLevel = 0.0f;
     enum FilterEnvStage { FLT_IDLE, FLT_ATTACK, FLT_DECAY, FLT_SUSTAIN, FLT_RELEASE } filterStage = FLT_IDLE;
     uint32_t filterUpdateCounter = 0;
@@ -493,6 +494,7 @@ struct SynthVoice {
 
     // Feedback buffer for Operator 2 (Modulator self-feedback)
     float lastModOutput = 0.0f;
+    float modFbHpState = 0.0f; // One-pole DC block on FM feedback
     
     // Envelope 1 (Carrier / Osc 1)
     float envLevel1 = 0.0f;
@@ -606,7 +608,13 @@ struct SynthVoice {
         // s1 and s2 hold the filter's stored energy. Clearing them on a voice
         // that is still ringing is the loudest click of the lot, especially
         // with resonance up.
-        if (!wasSounding) filter.reset();
+        if (!wasSounding) {
+            filter.reset();
+            filter2.reset();
+            osc1LPState = 0.0f;
+            osc2LPState = 0.0f;
+            modFbHpState = 0.0f;
+        }
 
         // Reset smooth state flags to trigger instant snapping on first process
         // frame. A sounding voice already has valid smoothed values, so let it
@@ -620,16 +628,10 @@ struct SynthVoice {
             smoothVol2 = -1.0f;
         }
 
-        // Reset analog emulation filters and drifts on note trigger
-        osc1Drift = 0.0f;
-        osc2Drift = 0.0f;
-        if (!wasSounding) {
-            osc1LPState = 0.0f;
-            osc2LPState = 0.0f;
-        }
-        
-        // Seed voice-local random generator uniquely based on trigger properties
-        randomSeed = 0x12345678u + (uint32_t)(targetFreq * 100.0f);
+        // Drift walks while the box is on — do not zero or re-seed from pitch.
+        // Fresh notes pick a random phase so poly voices do not click alike.
+        phase1 = FastRandFloat(randomSeed);
+        phase2 = FastRandFloat(randomSeed);
 
         // Reset mod offsets
         modCutoffOffset = 0.0f;
@@ -698,18 +700,26 @@ struct SynthVoice {
         return naiveSqr + 0.5f * blep(normPhase, dt) - 0.5f * blep(phaseSquare2, dt);
     }
 
+    static inline float WaveSawNaive(float normPhase) {
+        return 1.0f - (normPhase * 2.0f);
+    }
+
+    static inline float WaveSqrNaive(float normPhase) {
+        return (normPhase < 0.5f) ? 0.5f : -0.5f;
+    }
+
     // Process a single wave slice dynamically (expects normalized phase in [0, 1))
     // Only the two waveforms either side of the morph position are evaluated.
     // This runs twice per voice per sample, so computing all four and discarding
     // half of them was the largest avoidable cost in the engine: a sinf and up to
     // four blep calls thrown away on every single sample.
-    float ProcessWave(float normPhase, float dt, int morph) {
+    // naive=true skips BLEP (FM modulator): cheaper and less metallic under PM.
+    float ProcessWave(float normPhase, float dt, int morph, bool naive = false) {
         // Wrap normalized phase to [0.0, 1.0)
         while (normPhase >= 1.0f) normPhase -= 1.0f;
         while (normPhase < 0.0f)  normPhase += 1.0f;
 
         if (morph < 33) {
-            // Scale by 2*PI only at the moment of sine calculation
             float t = morph / 33.0f;
             float sineSample = FastSine(normPhase);
             if (t <= 0.0f) return sineSample;
@@ -718,12 +728,14 @@ struct SynthVoice {
             float t = (morph - 33) / 33.0f;
             float triSample = WaveTri(normPhase);
             if (t <= 0.0f) return triSample;
-            return (1.0f - t) * triSample + t * WaveSaw(normPhase, dt);
+            float saw = naive ? WaveSawNaive(normPhase) : WaveSaw(normPhase, dt);
+            return (1.0f - t) * triSample + t * saw;
         } else {
             float t = (morph - 66) / 33.0f;
-            float sawSample = WaveSaw(normPhase, dt);
-            if (t <= 0.0f) return sawSample;
-            return (1.0f - t) * sawSample + t * WaveSqr(normPhase, dt);
+            float saw = naive ? WaveSawNaive(normPhase) : WaveSaw(normPhase, dt);
+            if (t <= 0.0f) return saw;
+            float sqr = naive ? WaveSqrNaive(normPhase) : WaveSqr(normPhase, dt);
+            return (1.0f - t) * saw + t * sqr;
         }
     }
 
@@ -769,9 +781,11 @@ struct SynthVoice {
 
         int algo = GetParam(sp.algorithm, trk.algorithm);
 
-        // Resolve active Analog value contextually (Reuses fmFeedback parameter in Parallel mode)
+        // Dual-osc AN from fmFeedback; FM keeps only a whisper of grit so FB
+        // stays feedback and the core stays DX/TX-clean rather than crushed.
         int analogVal = GetParam(sp.fmFeedback, trk.fmFeedback);
-        float analogAmount = (algo == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.0f;
+        float analogAmount = (algo == ALGO_PARALLEL) ? (analogVal / 99.0f) : 0.08f;
+        const bool applyPitchSlop = (algo == ALGO_PARALLEL && analogAmount > 0.0f);
         
         // --- 0. PARAMETER SMOOTHING / GLIDE CALCULATIONS (Per-Sample) ---
         // Combine base parameters with LFO modulation offsets (clamped to safe ranges)
@@ -927,13 +941,13 @@ struct SynthVoice {
         filterUpdateCounter++;
         if (filterUpdateCounter >= 64) {
             filterUpdateCounter = 0;
-            // Update slow-moving pitch drift (slop)
-            if (analogAmount > 0.0f) {
+            // Update slow-moving pitch drift (slop) — dual-osc Analog only
+            if (applyPitchSlop) {
                 float rawNoise1 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
                 float rawNoise2 = FastRandFloat(randomSeed) * 2.0f - 1.0f;
                 osc1Drift = osc1Drift * 0.92f + rawNoise1 * 0.08f;
                 osc2Drift = osc2Drift * 0.92f + rawNoise2 * 0.08f;
-            } else {
+            } else if (algo == ALGO_PARALLEL) {
                 osc1Drift = 0.0f;
                 osc2Drift = 0.0f;
             }
@@ -990,8 +1004,10 @@ struct SynthVoice {
             float finalCutoffHz = 15.0f + (finalNormCut * finalNormCut * finalNormCut * finalNormCut) * 15985.0f;
             float resNorm = std::clamp(GetParam(sp.filterResonance, trk.filterResonance) + modResOffset, 0.0f, 99.0f) / 99.0f;
 
-            // Recalculate SVF coefficients
+            // Recalculate SVF coefficients (both stages share cutoff/Q; stage 2
+            // only runs when TYPE is 24 dB).
             filter.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
+            filter2.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
 
             // --- BLOCK-RATE PITCH RATIOS ---
             // These are pure interval ratios: coarse, fine and the pitch mod
@@ -1039,16 +1055,12 @@ struct SynthVoice {
             float freq1AnalogScale = 1.0f;
             float freq2AnalogScale = 1.0f;
 
-            if (analogAmount > 0.0f) {
-                // 1. Apply random pitch slop (drift)
-                freq1AnalogScale += osc1Drift * analogAmount * 0.0022f;
-                freq2AnalogScale += osc2Drift * analogAmount * 0.0022f;
-                
-                // 2. Apply static detune offset
-                freq2AnalogScale += analogAmount * 0.00042f;
-
-                // 3. Apply Differential Keyboard Tracking Error (Oscillator Divergence)
-                float trackingDivergence = trackingOctaves * analogAmount * 0.005f;
+            if (applyPitchSlop) {
+                // Louder Analog: ~6x previous slop so AN 99 is obviously beating
+                freq1AnalogScale += osc1Drift * analogAmount * 0.013f;
+                freq2AnalogScale += osc2Drift * analogAmount * 0.013f;
+                freq2AnalogScale += analogAmount * 0.0025f;
+                float trackingDivergence = trackingOctaves * analogAmount * 0.030f;
                 freq1AnalogScale += trackingDivergence;
                 freq2AnalogScale -= trackingDivergence;
             }
@@ -1087,7 +1099,10 @@ struct SynthVoice {
             // ALGORITHM B: 2-OP PHASE MODULATION FM (CARRIER / MODULATOR)
             // ==========================================
             float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFine2Offset, -99.0f, 99.0f);
-            float ratio = GetParam(sp.coarse2, trk.coarse2) + (fine2Mod / 100.0f);
+            int c2 = GetParam(sp.coarse2, trk.coarse2);
+            // RAT 0 = half-ratio (octave-down modulator); 1..16 integer ratios
+            float ratio = (c2 <= 0) ? 0.5f : (float)c2;
+            ratio += fine2Mod / 100.0f;
             if (ratio < 0.05f) ratio = 0.05f;
             float freq2 = freq1 * ratio;
 
@@ -1097,13 +1112,24 @@ struct SynthVoice {
             float feedbackScale = (GetParam(sp.fmFeedback, trk.fmFeedback) / 99.0f) * 0.5f;
             float feedbackPhase = phase2 + lastModOutput * feedbackScale;
 
+            // BLEP modulator (alias soft) + DC-blocked feedback. Keep FM clean;
+            // dual-osc Analog is where the louder grit lives.
             float modDry = ProcessWave(feedbackPhase, dt2, (int)smoothMorph2) * envLevel2;
-            lastModOutput = modDry;
+            constexpr float kFbHp = 0.995f;
+            modFbHpState = kFbHp * modFbHpState + (1.0f - kFbHp) * modDry;
+            lastModOutput = modDry - modFbHpState;
 
             float index = smoothVol2 * smoothVol2 * smoothVol2 * 1.2732395f;
 
-            float modulatedPhase1 = phase1 + modDry * index;
+            float modulatedPhase1 = phase1 + lastModOutput * index;
             float carrier = ProcessWave(modulatedPhase1, dt1, (int)smoothMorph1) * envLevel1 * smoothVol1;
+
+            // Very light carrier soften from the fixed FM whisper grit
+            if (analogAmount > 0.0f) {
+                float lpCoeff = 1.0f - (analogAmount * 0.4f);
+                osc1LPState += lpCoeff * (carrier - osc1LPState);
+                carrier = osc1LPState;
+            }
 
             finalSample = carrier;
 
@@ -1122,10 +1148,21 @@ struct SynthVoice {
         // Mix noise with synthesized waves BEFORE filter stage
         float combinedSignal = finalSample + scaledNoise;
         int fType = GetParam(sp.filterType, trk.filterType);
+        if (fType < 0) fType = 0;
+        if (fType > 4) fType = 4;
 
-        // --- 9. RUN THROUGH SILKY STATE-VARIABLE FILTER (SVF) ---
+        // --- 9. FILTER (12 dB, or 24 dB as two SVFs in series) ---
         float targetMasterVol = VolumeCurve(GetParam(sp.masterVolume, trk.masterVolume));
-        return filter.process(combinedSignal, fType, analogAmount) * velocityScale * chokeVolume * targetMasterVol;
+        float filtered = 0.0f;
+        if (fType <= 2) {
+            filtered = filter.process(combinedSignal, fType, analogAmount);
+        } else {
+            // 3 = LP24, 4 = HP24 — drive once into the first stage
+            int stageType = (fType == 3) ? 0 : 1;
+            float mid = filter.process(combinedSignal, stageType, analogAmount);
+            filtered = filter2.process(mid, stageType, 0.0f);
+        }
+        return filtered * velocityScale * chokeVolume * targetMasterVol;
     }
 };
 

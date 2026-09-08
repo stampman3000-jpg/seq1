@@ -90,7 +90,10 @@ void SamplerVoice::Trigger(const int16_t* buffer, uint32_t length, float pitchCo
     filterStage = FLT_ATTACK;
     filterEnvLevel = 0.0f;
     filterUpdateCounter = 9999; // Force instant coefficient calculation
-    if (!wasSounding) filter.reset();
+    if (!wasSounding) {
+        filter.reset();
+        filter2.reset();
+    }
 
     // Reset smooth state flags to trigger instant snapping on first process frame
     if (!wasSounding) {
@@ -348,8 +351,9 @@ float SamplerVoice::Process(int trackIdx) {
         float finalCutoffHz = 15.0f + (finalNormCut * finalNormCut * finalNormCut * finalNormCut) * 15985.0f;
         float resNorm = std::clamp(GetParam(sp.filterResonance, trk.filterResonance) + modResOffset, 0.0f, 99.0f) / 99.0f;
 
-        // Recalculate coefficients
+        // Recalculate coefficients (both stages; stage 2 only runs for TYPE 24 dB)
         filter.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
+        filter2.calculateCoefficients(finalCutoffHz, resNorm, (float)g_sampleRate);
 
         float fine2Mod = std::clamp(GetParam(sp.fine2, trk.fine2) + modFineOffset, -99.0f, 99.0f);
         float semitoneOffset = notePitchOffset + GetParam(sp.sampleTune, trk.sampleTune) + (fine2Mod / 100.0f) + modPitchOffset;
@@ -384,7 +388,16 @@ float SamplerVoice::Process(int trackIdx) {
     float saturated = driven - (driven * driven * driven) / 3.0f;
 
     int fType = GetParam(sp.filterType, trk.filterType);
-    float filtered = filter.process(saturated, fType);
+    if (fType < 0) fType = 0;
+    if (fType > 4) fType = 4;
+    float filtered = 0.0f;
+    if (fType <= 2) {
+        filtered = filter.process(saturated, fType);
+    } else {
+        int stageType = (fType == 3) ? 0 : 1;
+        float mid = filter.process(saturated, stageType);
+        filtered = filter2.process(mid, stageType);
+    }
 
     // 7. Apply the smoothed volume fader, velocity scaling, and choke after non-linear processing.
     // We apply a standard 2.0f level-matching scalar to balance with the virtual analog synths.

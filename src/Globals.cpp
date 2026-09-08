@@ -176,6 +176,7 @@ static bool ValidateTrackFields(Track& trk) {
     Clamp01_99(trk.noiseDecay);
     Clamp01_99(trk.filterCutoff);
     Clamp01_99(trk.filterResonance);
+    trk.filterType = std::clamp(trk.filterType, 0, 4);
     Clamp01_99(trk.filterEnvDepth);
     Clamp01_99(trk.filterAttack);
     Clamp01_99(trk.filterDecay);

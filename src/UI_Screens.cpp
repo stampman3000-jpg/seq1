@@ -747,7 +747,18 @@ void DrawSynthScreen(const UIState& state) {
         DrawSourceWaveform(effMorph2, 2, row2Y + 3, 23, 14, (state.synthGridRow == 2 && state.synthGridCol == 0), UI_VALUE);
         
         if (tracks[state.selectedTrack].algorithm == ALGO_CARRIER_MOD) {
-            DrawSlider(effCrs2, 1, 16, 31, row2Y + 9, 21, (state.synthGridRow == 2 && state.synthGridCol == 1), true, UI_VALUE);
+            // RAT 0 = half-ratio; slider range 0..16, label shows 0.5 at zero
+            bool ratSel = (state.synthGridRow == 2 && state.synthGridCol == 1);
+            DrawSlider(effCrs2, 0, 16, 31, row2Y + 9, 21, ratSel, false, UI_VALUE);
+            const char* ratTxt = (effCrs2 == 0) ? "0.5" : nullptr;
+            char ratBuf[8];
+            if (!ratTxt) {
+                snprintf(ratBuf, sizeof(ratBuf), "%d", effCrs2);
+                ratTxt = ratBuf;
+            }
+            int valX = 31 + 21 / 2 - MeasureText5x5(ratTxt) / 2;
+            Draw5x5String(ratTxt, valX, row2Y + 9 - 6, UI_VALUE);
+            if (ratSel) UiCaptureFocusText("RAT", ratTxt);
         } else {
             DrawSlider(effCrs2, -24, 24, 31, row2Y + 9, 21, (state.synthGridRow == 2 && state.synthGridCol == 1), true, UI_VALUE);
         }
@@ -877,15 +888,20 @@ void DrawFilterLfoPage(const UIState& state) {
 
     bool lType = false;
     int effType = GetEffectiveVal(sp.filterType, trk.filterType, 60, 27, lType);
+    if (effType < 0) effType = 0;
+    if (effType > 4) effType = 4;
 
-    std::string typeStr = (effType == 0) ? "LPF" : ((effType == 1) ? "HPF" : "BPF");
+    // Labels stay LPF/HPF/BPF; 24 dB reuses LPF/HPF (steeper curve distinguishes).
+    const char* typeStr = "BPF";
+    if (effType == 0 || effType == 3) typeStr = "LPF";
+    else if (effType == 1 || effType == 4) typeStr = "HPF";
 
     // Track & Pattern Header (x=2)
     std::string headerTrack = "TRACK " + std::to_string(state.selectedTrack + 1) + " " + GetPatternHeaderString();
     Draw5x5String(headerTrack.c_str(), 2, 1, UI_VALUE);
 
     // Active Filter Type (x=76)
-    std::string filterTypeStr = "TYPE: " + typeStr;
+    std::string filterTypeStr = std::string("TYPE: ") + typeStr;
     Draw5x5String(filterTypeStr.c_str(), 76, 1, UI_VALUE);
 
     // Dynamic Step Counter (x=168)
@@ -922,7 +938,15 @@ void DrawFilterLfoPage(const UIState& state) {
 
     DrawLeftLabel("CUT", 4, 26, (state.synthGridRow == 1 && state.synthGridCol == 0), 19);
     DrawLeftLabel("RES", 32, 26, (state.synthGridRow == 1 && state.synthGridCol == 1), 19);
-    DrawLeftLabel("TYP", 60, 26, (state.synthGridRow == 1 && state.synthGridCol == 2), 19);
+    {
+        bool typSel = (state.synthGridRow == 1 && state.synthGridCol == 2);
+        DrawLeftLabel("TYP", 60, 26, typSel, 19);
+        if (typSel) {
+            // Overlay shows 12 vs 24 so the two LPF/HPF slots are distinguishable
+            const char* slope = (effType >= 3) ? "24" : "12";
+            UiCaptureFocusText("TYP", slope);
+        }
+    }
     DrawLeftLabel("DPT", 94, 26, (state.synthGridRow == 1 && state.synthGridCol == 3), 19);
 
     bool lFDpt = false;

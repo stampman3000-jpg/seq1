@@ -78,6 +78,7 @@ struct SamplerVoice {
 
     // Filter & Filter Envelope States
     SvfFilter filter;
+    SvfFilter filter2; // Second 12 dB stage for opt-in 24 dB LP/HP
     float filterEnvLevel = 0.0f;
     enum FilterEnvStage { FLT_IDLE, FLT_ATTACK, FLT_DECAY, FLT_SUSTAIN, FLT_RELEASE } filterStage = FLT_IDLE;
     uint32_t filterUpdateCounter = 0;

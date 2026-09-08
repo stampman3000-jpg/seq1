@@ -88,6 +88,12 @@ enum SamplerAlgo {
     ALGO_GRANULAR
 };
 // --- STATE-VARIABLE FILTER (Andrew Simper / Cytomic SVF via Trapezoidal Integration) ---
+static inline float ApplySoftClip(float x) {
+    if (x > 1.0f)  x = 1.0f;
+    if (x < -1.0f) x = -1.0f;
+    return x - (x * x * x) / 3.0f;
+}
+
 struct SvfFilter {
     float g = 0.0f;   // Pre-warped cutoff
     float k = 0.0f;   // Damping (1/Q)
@@ -100,10 +106,18 @@ struct SvfFilter {
         s2 = 0.0f;
     }
 
-    // Process a single sample and return the chosen filter type (LPF/HPF/BPF) output
+    // Process a single sample and return the chosen filter type (LPF/HPF/BPF) output.
+    // When analog > 0, the input is soft-driven into the SVF (filter grit), then
+    // state variables are cubic-clipped inside the loop (transistor-ish sat).
         inline float process(float x, int type, float analog = 0.0f) {
+            float driven = x;
+            if (analog > 0.0f) {
+                // Pre-filter drive: Analog (or fixed FM grit) pushes into the SVF
+                float drive = 1.0f + analog * 2.5f;
+                driven = ApplySoftClip(x * drive);
+            }
             // Apply clean, linear bass compensation to the input signal to prevent bass drop-off
-            float input = x * bassComp;
+            float input = driven * bassComp;
 
             // Pristine, linear Trapezoidal integration loop solver
             float v3 = input - s2;
@@ -280,7 +294,7 @@ struct StepParams {
     // Filter & LFO Parameters (Page 4)
     int filterCutoff = -1;
     int filterResonance = -1;
-    int filterType = -1; // 0=LPF, 1=HPF, 2=BPF
+    int filterType = -1; // 0=LP12, 1=HP12, 2=BP12, 3=LP24, 4=HP24
     int filterEnvDepth = -1;
     int filterAttack = -1;
     int filterDecay = -1;
@@ -395,7 +409,7 @@ struct Track {
 
     // Synth Parameters (Page 3 Source - Wave 2 / Modulator)
     int morph2 = 50;
-    int coarse2 = 12; // Serves as RATIO (1..16) in FM algorithm
+    int coarse2 = 12; // Dual-osc: semitones. FM: RAT 0=0.5, 1..16 integer ratio
     int fine2 = 15;
     int volume2 = 70; // Serves as INDEX/MOD DEPTH in FM algorithm
     int attack2 = 20;
@@ -437,7 +451,7 @@ struct Track {
     // --- NEW FILTER & FX SEND PARAMETERS (Page 4) ---
     int filterCutoff = 80;     // CUT (0..99)
     int filterResonance = 20;  // RES (0..99)
-    int filterType = 0;         // TYPE (0 = LPF, 1 = HPF, 2 = BPF)
+    int filterType = 0;         // TYPE: 0=LP12, 1=HP12, 2=BP12, 3=LP24, 4=HP24
     int filterEnvDepth = 30;    // DPT (0..99)
 
     // Filter Envelope ADSR
