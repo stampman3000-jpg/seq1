@@ -1152,7 +1152,7 @@ static bool PushMidiLive(MidiLiveQueue& q, const MidiLiveEvent& ev) {
     return true;
 }
 
-static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity);
+static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity, bool gated);
 static void ReleaseVoiceLiveImpl(int trackIdx, int midiNote);
 static void ApplyMidiLiveEvent(const MidiLiveEvent& ev);
 
@@ -1634,8 +1634,14 @@ void ma_audio_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma
                                                 }
                                             } else {
                                                 for (int k = 0; k < 3 && noteCount < 4; ++k) {
-                                                    if (step.chordNotes[k] >= 0) { // Read standard chord integers directly
-                                                        midiNotesToTrigger[noteCount++] = step.chordNotes[k];
+                                                    if (step.chordNotes[k] >= 0) {
+                                                        int chordMidi = step.chordNotes[k];
+                                                        // Same global transpose as the root so custom
+                                                        // chords move with the melodic parts.
+                                                        if (tracks[t].keyScope == 0 && g_globalTranspose != 0) {
+                                                            chordMidi = std::clamp(chordMidi + g_globalTranspose, 0, 127);
+                                                        }
+                                                        midiNotesToTrigger[noteCount++] = chordMidi;
                                                     }
                                                 }
                                             }
@@ -2547,7 +2553,7 @@ bool LoadSampleToPool(int slotIdx, const std::string& filename, bool pauseAudio)
     return true;
 }
 
-static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity) {
+static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity, bool gated) {
     if (trackIdx < 0 || trackIdx >= 8) return;
     if (midiNote < 0 || midiNote > 127) return;
 
@@ -2556,7 +2562,8 @@ static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity) {
     const Track& trk = tracks[trackIdx];
     int depth = trk.pitchSweepDepth;
     int time = trk.pitchSweepTime;
-    int glide = trk.glideTime; // Resolve Glide Time
+    // Gated taps skip glide so a chord-slot audition cannot legato-hold.
+    int glide = gated ? 0 : trk.glideTime;
 
     int finalPolyMode = trk.polyMode;
     if (finalPolyMode < 1) finalPolyMode = 1;
@@ -2568,7 +2575,7 @@ static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity) {
         if (g_trackVoices[trackIdx][targetIdx].active) {
             g_trackVoices[trackIdx][targetIdx].Choke();
         }
-        g_trackVoices[trackIdx][targetIdx].Trigger(freq, depth, time, velocity, false, 0, glide); // Pass Glide Time
+        g_trackVoices[trackIdx][targetIdx].Trigger(freq, depth, time, velocity, gated, 0, glide);
         g_trackVoiceIndex[trackIdx] = (targetIdx + 1) % finalPolyMode;
     } else if (trk.engineType == ENGINE_SAMPLER) {
         int slot = trk.sampleSlot;
@@ -2582,7 +2589,7 @@ static void TriggerVoiceLiveImpl(int trackIdx, int midiNote, int velocity) {
         if (g_samplerVoices[trackIdx][targetIdx].active) {
             g_samplerVoices[trackIdx][targetIdx].Choke();
         }
-        g_samplerVoices[trackIdx][targetIdx].Trigger(buffer, length, noteOffset, (float)trk.fine2, depth, time, velocity, false, 0, sliceIdx);
+        g_samplerVoices[trackIdx][targetIdx].Trigger(buffer, length, noteOffset, (float)trk.fine2, depth, time, velocity, gated, 0, sliceIdx);
         g_samplerVoiceIndex[trackIdx] = (targetIdx + 1) % finalPolyMode;
     }
 }
@@ -2614,7 +2621,10 @@ static void ReleaseVoiceLiveImpl(int trackIdx, int midiNote) {
 static void ApplyMidiLiveEvent(const MidiLiveEvent& ev) {
     switch (ev.type) {
         case ML_NOTE_ON:
-            TriggerVoiceLiveImpl((int)ev.track, (int)ev.note, (int)ev.velocity);
+            TriggerVoiceLiveImpl((int)ev.track, (int)ev.note, (int)ev.velocity, false);
+            break;
+        case ML_NOTE_AUDITION:
+            TriggerVoiceLiveImpl((int)ev.track, (int)ev.note, (int)ev.velocity, true);
             break;
         case ML_NOTE_OFF:
             ReleaseVoiceLiveImpl((int)ev.track, (int)ev.note);
@@ -2638,6 +2648,18 @@ void TriggerVoiceLive(int trackIdx, int midiNote, int velocity) {
     if (midiNote < 0 || midiNote > 127) return;
     MidiLiveEvent ev{};
     ev.type = ML_NOTE_ON;
+    ev.track = (uint8_t)trackIdx;
+    ev.note = (uint8_t)midiNote;
+    ev.velocity = (uint8_t)std::clamp(velocity, 0, 255);
+    ev.stepIndex = 0;
+    PushMidiLive(g_midiLiveQueueFromUi, ev);
+}
+
+void AuditionVoiceLive(int trackIdx, int midiNote, int velocity) {
+    if (trackIdx < 0 || trackIdx >= 8) return;
+    if (midiNote < 0 || midiNote > 127) return;
+    MidiLiveEvent ev{};
+    ev.type = ML_NOTE_AUDITION;
     ev.track = (uint8_t)trackIdx;
     ev.note = (uint8_t)midiNote;
     ev.velocity = (uint8_t)std::clamp(velocity, 0, 255);

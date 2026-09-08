@@ -4,7 +4,7 @@
 #include <cstdint>
 
 // Fixed-size SPSC live MIDI queues: RtMidi / UI enqueue; audio callback drains.
-enum MidiLiveEventType : uint8_t { ML_NOTE_ON = 1, ML_NOTE_OFF = 2, ML_SEQ_STEP = 3 };
+enum MidiLiveEventType : uint8_t { ML_NOTE_ON = 1, ML_NOTE_OFF = 2, ML_SEQ_STEP = 3, ML_NOTE_AUDITION = 4 };
 struct MidiLiveEvent {
     uint8_t type;
     uint8_t track;
@@ -44,6 +44,7 @@ bool LoadSampleIntoAsset(SampleAsset& out, const std::string& filename);
 
 // UI thread: enqueue live note on/off (audio drains and mutates voices).
 void TriggerVoiceLive(int trackIdx, int midiNote, int velocity);
+void AuditionVoiceLive(int trackIdx, int midiNote, int velocity);
 void ReleaseVoiceLive(int trackIdx, int midiNote);
 // RtMidi thread: enqueue note on/off or seq-step write.
 void EnqueueMidiLiveFromRt(uint8_t type, uint8_t track, uint8_t note, uint8_t velocity, uint8_t stepIndex = 0);

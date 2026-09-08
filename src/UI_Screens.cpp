@@ -1801,9 +1801,35 @@ static void DrawStepPopup(const UIState& state) {
     bool chordSelected = (bodyFocused && stepPopupFocusX == 1 && stepPopupFocusY == 0);
     DrawSelectableLabel3x5("CHORD", rightX + 4, rightY + 3, chordSelected, UI_LABEL);
 
-    const char* chordNames[] = { "NONE", "MAJOR", "MINOR", "SUS4", "DOM7", "MAJ7", "MIN7" };
+    // Legacy preset formulas keep their name until the first custom edit.
+    // Custom chords (chordType 0) show four compact note slots with no gaps.
     int ct = std::clamp(step.chordType, 0, 6);
-    Draw3x5String(chordNames[ct], rightX + 36, rightY + 3, chordSelected ? UI_VALUE : UI_CHROME);
+    if (ct >= 1 && ct <= 6) {
+        const char* chordNames[] = { "NONE", "MAJOR", "MINOR", "SUS4", "DOM7", "MAJ7", "MIN7" };
+        Draw3x5String(chordNames[ct], rightX + 36, rightY + 3, chordSelected ? UI_VALUE : UI_CHROME);
+    } else {
+        int slotX = rightX + 36;
+        const int slotY = rightY + 3;
+        for (int i = 0; i < 4; ++i) {
+            int midi = (i == 0) ? step.note : step.chordNotes[i - 1];
+            char buf[8];
+            if (midi < 0) {
+                snprintf(buf, sizeof(buf), "--");
+            } else {
+                std::string n = MidiToNote(midi);
+                snprintf(buf, sizeof(buf), "%s", n.empty() ? "--" : n.c_str());
+            }
+            int w = MeasureText3x5(buf);
+            bool sel = chordSelected && (stepPopupChordSlot == i);
+            if (sel) {
+                DrawRectangle(slotX - 1, slotY - 1, w + 2, 7, UI_ACTIVE);
+                Draw3x5String(buf, slotX, slotY, UI_BG);
+            } else {
+                Draw3x5String(buf, slotX, slotY, chordSelected ? UI_VALUE : UI_CHROME);
+            }
+            slotX += w;
+        }
+    }
 
     bool mtSelected = (bodyFocused && stepPopupFocusX == 1 && stepPopupFocusY == 1);
     int mtY = rightY + 16;

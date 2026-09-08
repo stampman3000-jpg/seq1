@@ -45,7 +45,7 @@ constexpr int ALGO_COLS = 5;
 extern int stepPopupFocusX;   // 0 = Left column, 1 = Right column (chord / microtiming)
 extern int stepPopupFocusY;   // Left: 0 Retrig, 1 Condit, 2 Length. Right: 0 Chord, 1 Microtiming
 extern int stepPopupCondCol;  // 0..15 focused condition bit
-extern int stepPopupChordKey; // 0..12 hovered piano key index
+extern int stepPopupChordSlot; // 0..3 selected chord note slot (0 = root, 1..3 = chordNotes)
 extern float g_audioCpuLoad;
 extern bool showDiagnostics;
 // Global Arrays and Tables

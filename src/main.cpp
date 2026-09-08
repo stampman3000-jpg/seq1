@@ -637,6 +637,39 @@ static void HandleLfoPopupInputs(int encoderTurn, bool encoderButton, bool isShi
     }
 }
 
+/// First custom chord edit of a legacy formula: keep the root, drop the formula,
+/// and clear any leftover extras so old offsets cannot linger as ghost notes.
+static void BeginCustomChordEdit(Step& step) {
+    if (step.chordType == 0) return;
+    step.chordType = 0;
+    step.chordNotes[0] = -1;
+    step.chordNotes[1] = -1;
+    step.chordNotes[2] = -1;
+}
+
+static void WriteChordSlot(Step& step, int trackIdx, int slot, int midiNote) {
+    BeginCustomChordEdit(step);
+    if (slot <= 0) {
+        bool wasInactive = (step.note < 0 || step.velocity <= 0);
+        step.note = (int8_t)midiNote;
+        if (wasInactive) step.velocity = 3;
+        ChaosSyncSource(trackIdx, cursorStep);
+    } else {
+        step.chordNotes[slot - 1] = (int8_t)midiNote;
+    }
+}
+
+static void ClearChordSlot(Step& step, int trackIdx, int slot) {
+    BeginCustomChordEdit(step);
+    if (slot <= 0) {
+        step.note = -1;
+        step.velocity = 0;
+        ChaosSyncSource(trackIdx, cursorStep);
+    } else {
+        step.chordNotes[slot - 1] = -1;
+    }
+}
+
 /// Handles input events inside the STEP hub tab
 static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isShiftDown) {
     int activeTrackIdx = (currentScreen == SCREEN_SEQ_5_8) ? cursorTrack + 4 : cursorTrack;
@@ -750,10 +783,49 @@ static void HandleStepPopupInputs(int encoderTurn, bool encoderButton, bool isSh
     }
     else if (stepPopupFocusX == 1) {
         if (stepPopupFocusY == 0) {
-            if (popupEditChange != 0) {
-                step.chordType += popupEditChange;
-                if (step.chordType < 0) step.chordType = 6;
-                if (step.chordType > 6) step.chordType = 0;
+            // Four note slots: encoder or Shift+Left/Right pick the slot;
+            // piano keys write it; comma/period set entry octave; Backspace clears.
+            int slotDelta = 0;
+            if (encoderTurn != 0) {
+                slotDelta = (encoderTurn > 0) ? 1 : -1;
+            } else if (isShiftDown) {
+                if (IsKeyPressed(KEY_RIGHT)) slotDelta = 1;
+                if (IsKeyPressed(KEY_LEFT))  slotDelta = -1;
+            }
+            if (slotDelta != 0) {
+                stepPopupChordSlot = (stepPopupChordSlot + slotDelta + 4) % 4;
+            }
+
+            if (!isShiftDown) {
+                if (IsKeyPressed(KEY_COMMA)) {
+                    currentOctave--;
+                    if (currentOctave < 0) currentOctave = 0;
+                }
+                if (IsKeyPressed(KEY_PERIOD)) {
+                    currentOctave++;
+                    if (currentOctave > 8) currentOctave = 8;
+                }
+                if (IsKeyPressed(KEY_BACKSPACE)) {
+                    ClearChordSlot(step, activeTrackIdx, stepPopupChordSlot);
+                }
+
+                for (int i = 0; i < NUM_NOTES; ++i) {
+                    if (!IsKeyPressed(keyboardPiano[i].key)) continue;
+                    std::string noteName = keyboardPiano[i].noteName;
+                    int octaveToUse = currentOctave;
+                    if (noteName == "C+") {
+                        noteName = "C";
+                        octaveToUse = currentOctave + 1;
+                        if (octaveToUse > 8) octaveToUse = 8;
+                    }
+                    int midiNote = MaybeSnapMidi(
+                        NoteToMidi(noteName + std::to_string(octaveToUse)),
+                        activeTrackIdx);
+                    WriteChordSlot(step, activeTrackIdx, stepPopupChordSlot, midiNote);
+                    AuditionVoiceLive(activeTrackIdx, midiNote, 3);
+                    if (stepPopupChordSlot < 3) stepPopupChordSlot++;
+                    break;
+                }
             }
         } else if (stepPopupFocusY == 1) {
             if (popupEditChange != 0) {
@@ -1946,6 +2018,10 @@ int main() {
                                         // Removed step.condition = ""; // Deleted legacy string
                                         step.retrigger = 0;
                                         step.microtiming = 0;
+                                        step.chordType = 0;
+                                        step.chordNotes[0] = -1;
+                                        step.chordNotes[1] = -1;
+                                        step.chordNotes[2] = -1;
                                         step.params.reset();
                                         ChaosSyncSource(selectedTrack, s);
                                     }

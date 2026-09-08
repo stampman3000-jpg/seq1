@@ -437,7 +437,7 @@ int algoCol = 0;
 int stepPopupFocusX = 0;
 int stepPopupFocusY = 0;
 int stepPopupCondCol = 0;
-int stepPopupChordKey = 0;
+int stepPopupChordSlot = 0;
 
 
 // Instantiate Modulation Matrix Popup variables
