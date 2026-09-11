@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iterator>
 #include <cmath>
+#include <cctype>
 #include "boot_animation.h"
 #include "Common.hpp"
 #include "Globals.hpp"
@@ -311,6 +312,46 @@ static void HandlePianoKeysInput(int octaveValue) {
 }
 
 // Handles inputs and directory scanning while inside the Modal System Menu
+// Leading alphanumeric (case-insensitive) for sorted letter-group jumps.
+// Subfolder paths like "drums/kick" count as 'd'.
+static char FileListGroupKey(const std::string& name) {
+    for (unsigned char uc : name) {
+        if (std::isalnum(uc)) return (char)std::tolower(uc);
+    }
+    if (name.empty()) return '\0';
+    return (char)std::tolower((unsigned char)name[0]);
+}
+
+// dir > 0: first item of the next letter group (wrap to start).
+// dir < 0: first item of the previous letter group (wrap to last group).
+static int JumpFileListLetterGroup(int cursor, int dir) {
+    const int n = (int)g_fileList.size();
+    if (n <= 1) return 0;
+    if (cursor < 0) cursor = 0;
+    if (cursor >= n) cursor = n - 1;
+
+    const char curKey = FileListGroupKey(g_fileList[cursor]);
+
+    if (dir > 0) {
+        for (int i = cursor + 1; i < n; ++i) {
+            if (FileListGroupKey(g_fileList[i]) != curKey) return i;
+        }
+        return 0;
+    }
+
+    int i = cursor - 1;
+    while (i >= 0 && FileListGroupKey(g_fileList[i]) == curKey) --i;
+    if (i < 0) {
+        i = n - 1;
+        const char lastKey = FileListGroupKey(g_fileList[i]);
+        while (i > 0 && FileListGroupKey(g_fileList[i - 1]) == lastKey) --i;
+        return i;
+    }
+    const char prevKey = FileListGroupKey(g_fileList[i]);
+    while (i > 0 && FileListGroupKey(g_fileList[i - 1]) == prevKey) --i;
+    return i;
+}
+
 static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
     if (systemMenuState == 0) {
         // ==========================================
@@ -358,12 +399,22 @@ static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
         // SUBMENU 1: FILE BROWSER (Loading named files)
         // ==========================================
         if (!g_fileList.empty()) {
-            if (menuDir == -1) {
-                fileBrowserCursor--;
-                if (fileBrowserCursor < 0) fileBrowserCursor = (int)g_fileList.size() - 1;
+            const bool isShiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+            int step = 0;
+            if (menuDir != 0) {
+                // Shift+Up/Down leaps letter groups; unshifted is one row.
+                if (isShiftDown) {
+                    fileBrowserCursor = JumpFileListLetterGroup(fileBrowserCursor, menuDir);
+                } else {
+                    step = menuDir;
+                }
+            } else if (encoderTurn != 0) {
+                // Encoder stays one-step so it never fights letter jumps.
+                step = (encoderTurn > 0) ? 1 : -1;
             }
-            if (menuDir == 1) {
-                fileBrowserCursor++;
+            if (step != 0) {
+                fileBrowserCursor += step;
+                if (fileBrowserCursor < 0) fileBrowserCursor = (int)g_fileList.size() - 1;
                 if (fileBrowserCursor >= (int)g_fileList.size()) fileBrowserCursor = 0;
             }
             if (IsActionKeyPressed()) {
@@ -373,15 +424,22 @@ static void HandleSystemMenuInputs(int menuDir, int encoderTurn) {
                     fileBrowserCursor = 0;
                 } else {
                     std::string selectedFile = g_fileList[fileBrowserCursor];
+                    const char* prevFeedback = menuFeedback;
                     bool success = false;
-                    
+
                     if (systemMenuCursor == 1)      success = LoadProject(selectedFile);
                     else if (systemMenuCursor == 3) success = LoadPattern(activePattern, selectedFile);
                     else if (systemMenuCursor == 5) success = LoadSoundPreset(selectedTrack, selectedFile);
 
-                    if (success) menuFeedback = "LOADED SUCCESSFULLY!";
-                    else         menuFeedback = "LOAD FAILED!";
-                    
+                    // Prefer toast set by the loader (missing samples / BAD FILE).
+                    if (success) {
+                        if (menuFeedback == prevFeedback || menuFeedback == nullptr || menuFeedback[0] == '\0')
+                            menuFeedback = "LOADED SUCCESSFULLY!";
+                    } else {
+                        if (menuFeedback == prevFeedback || menuFeedback == nullptr || menuFeedback[0] == '\0')
+                            menuFeedback = "LOAD FAILED!";
+                    }
+
                     systemMenuState = 0;
                 }
             }

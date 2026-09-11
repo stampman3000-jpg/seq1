@@ -1302,16 +1302,8 @@ void DrawPlaceholderPage(const UIState& state) {
                 Draw5x5String(dirTitle.c_str(), mx + 10, my + 4, UI_VALUE);
                 DrawPixelLine(mx + 4, my + 11, mx + mw - 5, my + 11, UI_VALUE);
 
-                // Scan directories cleanly mapped to your menu items
-                std::string targetDir = "projects";
-                std::string targetExt = ".prj";
-
-                if (state.systemMenuCursor == 1)      { targetDir = "projects"; targetExt = ".prj"; }
-                else if (state.systemMenuCursor == 3) { targetDir = "patterns"; targetExt = ".pat"; }
-                else if (state.systemMenuCursor == 5) { targetDir = "presets";  targetExt = ".snd"; }
-                else if (state.systemMenuCursor == 6) { targetDir = "samples";  targetExt = ".wav"; }
-
-                std::vector<std::string> fileList = GetFileList(targetDir, targetExt);
+                // Use the list captured when the menu opened — do not rescan disk.
+                const std::vector<std::string>& fileList = g_fileList;
 
                 if (fileList.empty()) {
                     Draw3x5String("NO FILES FOUND", mx + 38, my + 22, UI_LABEL);

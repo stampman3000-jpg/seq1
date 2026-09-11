@@ -133,6 +133,14 @@ static bool SafeParseUInt(const std::string& s, unsigned long& out) {
     return true;
 }
 
+// One trimmed line for sample/pool names so spaces cannot desync the stream.
+static bool ReadNameLine(std::ifstream& file, std::string& out) {
+    if (!std::getline(file >> std::ws, out)) return false;
+    while (!out.empty() && (out.back() == '\r' || out.back() == ' ' || out.back() == '\t'))
+        out.pop_back();
+    return true;
+}
+
 static int8_t SanitizeMidiNoteValue(int midi) {
     if (midi < 0) return -1;
     if (midi > 127) return 127;
@@ -143,19 +151,19 @@ static void Clamp01_99(int& v) {
     v = std::clamp(v, 0, 99);
 }
 
-static bool ValidateModSlots(ModSlot slots[3]) {
+// Out-of-range mod routes used to abort the whole project; clamp and continue.
+static void ClampModSlots(ModSlot slots[3]) {
     for (int i = 0; i < 3; ++i) {
-        if (slots[i].destType < 0 || slots[i].destType > 2) return false;
-        if (slots[i].destTrack < 0 || slots[i].destTrack > 7) return false;
-        if (slots[i].destParam < 0 || slots[i].destParam > (int)DEST_PAN_MIX) return false;
-        if (slots[i].depth < -99 || slots[i].depth > 99) return false;
+        slots[i].destType = std::clamp(slots[i].destType, 0, 2);
+        slots[i].destTrack = std::clamp(slots[i].destTrack, 0, 7);
+        slots[i].destParam = std::clamp(slots[i].destParam, 0, (int)DEST_PAN_MIX);
+        slots[i].depth = std::clamp(slots[i].depth, -99, 99);
     }
-    return true;
 }
 
 static bool ValidateTrackFields(Track& trk) {
-    if (trk.sampleSlot < 0 || trk.sampleSlot > 15) return false;
-    if (trk.stepLength < 1 || trk.stepLength > 32) return false;
+    trk.sampleSlot = std::clamp(trk.sampleSlot, 0, 15);
+    trk.stepLength = std::clamp(trk.stepLength, 1, 32);
 
     Clamp01_99(trk.morph);
     Clamp01_99(trk.volume);
@@ -208,8 +216,8 @@ static bool ValidateTrackFields(Track& trk) {
     Clamp01_99(trk.tapeSmearSize);
     Clamp01_99(trk.tapeMix);
 
-    if (!ValidateModSlots(trk.lfo1Slots)) return false;
-    if (!ValidateModSlots(trk.lfo2Slots)) return false;
+    ClampModSlots(trk.lfo1Slots);
+    ClampModSlots(trk.lfo2Slots);
 
     if (trk.sliceDivisions < 1) trk.sliceDivisions = 8;
     if (trk.sampleLength < 1)   trk.sampleLength = 99;
@@ -349,7 +357,15 @@ static bool ReadTrackBlock(std::ifstream& file, Track& trk, int ver, int trackId
     }
 
     SafeRead(file, trk.sampleSlot, 0);
-    SafeRead(file, outSampleName, std::string("Empty"));
+    {
+        std::string nameLine;
+        if (ReadNameLine(file, nameLine)) {
+            outSampleName = nameLine.empty() ? "Empty" : nameLine;
+        } else {
+            file.clear();
+            outSampleName = "Empty";
+        }
+    }
 
     if (!ValidateTrackFields(trk)) return false;
     // Names are UI chrome, not in the .pat/.prj format. A staged Track defaults
@@ -1442,11 +1458,17 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
 
     std::string path = "patterns/" + filename + ".pat";
     std::ifstream file(path);
-    if (!file.is_open()) return false;
+    if (!file.is_open()) {
+        menuFeedback = "NO FILE";
+        return false;
+    }
 
     std::string magic;
     int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver < 2 || ver > 5) return false;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PAT" || ver < 2 || ver > 5) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
 
     SeqAudioLoadGuard audioGuard;
 
@@ -1461,7 +1483,10 @@ bool LoadPattern(int patternIdx, const std::string& filename) {
 
     for (int t = 0; t < 8; ++t) {
         std::string sampleName;
-        if (!ReadTrackBlock(file, staged.tracks[t], ver, t, sampleName)) return false;
+        if (!ReadTrackBlock(file, staged.tracks[t], ver, t, sampleName)) {
+            menuFeedback = "BAD FILE";
+            return false;
+        }
 
         Track& trk = staged.tracks[t];
         if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
@@ -1630,11 +1655,17 @@ bool SaveProject(int slot, const std::string& filename) {
 bool LoadProject(const std::string& filename) {
     std::string path = "projects/" + filename + ".prj";
     std::ifstream file(path);
-    if (!file.is_open()) return false;
+    if (!file.is_open()) {
+        menuFeedback = "NO FILE";
+        return false;
+    }
 
     std::string magic;
     int ver = 0;
-    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || ver < 2 || ver > 5) return false;
+    if (!(file >> magic >> ver) || magic != "SOUNDBOY_PRJ" || ver < 2 || ver > 5) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
 
     SeqAudioLoadGuard audioGuard;
 
@@ -1657,7 +1688,10 @@ bool LoadProject(const std::string& filename) {
 
     for (int i = 0; i < 16; ++i) {
         std::string sampleName;
-        if (!(file >> sampleName)) return false;
+        if (!ReadNameLine(file, sampleName)) {
+            menuFeedback = "BAD FILE";
+            return false;
+        }
         if (sampleName != "Empty" && !sampleName.empty()) {
             if (!LoadSampleIntoAsset(stagedPool[i], sampleName)) {
                 stagedPool[i].name = "Empty";
@@ -1672,14 +1706,35 @@ bool LoadProject(const std::string& filename) {
         }
     }
 
-    if (!(file >> stagedTempo)) return false;
-    if (!(file >> stagedActivePattern)) return false;
-    if (stagedActivePattern < 0 || stagedActivePattern > 7) return false;
+    if (!(file >> stagedTempo)) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
+    if (!(file >> stagedActivePattern)) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
+    if (stagedActivePattern < 0 || stagedActivePattern > 7) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
 
-    if (!(file >> stagedFX.reverbDecay >> stagedFX.reverbSize >> stagedFX.reverbPredelay >> stagedFX.reverbMix)) return false;
-    if (!(file >> stagedFX.satLevel >> stagedFX.satSymmetry >> stagedFX.satOverdrive >> stagedFX.satMix)) return false;
-    if (!(file >> stagedFX.delayTime >> stagedFX.delayFeedback >> stagedFX.delayPingPong >> stagedFX.delayMix)) return false;
-    if (!(file >> stagedFX.autoPanTime >> stagedFX.autoPanFeedback >> stagedFX.autoPanWidth >> stagedFX.autoPanMix)) return false;
+    if (!(file >> stagedFX.reverbDecay >> stagedFX.reverbSize >> stagedFX.reverbPredelay >> stagedFX.reverbMix)) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
+    if (!(file >> stagedFX.satLevel >> stagedFX.satSymmetry >> stagedFX.satOverdrive >> stagedFX.satMix)) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
+    if (!(file >> stagedFX.delayTime >> stagedFX.delayFeedback >> stagedFX.delayPingPong >> stagedFX.delayMix)) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
+    if (!(file >> stagedFX.autoPanTime >> stagedFX.autoPanFeedback >> stagedFX.autoPanWidth >> stagedFX.autoPanMix)) {
+        menuFeedback = "BAD FILE";
+        return false;
+    }
 
     if (ver >= 3) {
         SafeRead(file, stagedKeyRoot, 0);
@@ -1717,7 +1772,10 @@ bool LoadProject(const std::string& filename) {
         for (int t = 0; t < 8; ++t) {
             std::string sampleName;
             Track& trk = stagedPatterns[p].tracks[t];
-            if (!ReadTrackBlock(file, trk, ver, t, sampleName)) return false;
+            if (!ReadTrackBlock(file, trk, ver, t, sampleName)) {
+                menuFeedback = "BAD FILE";
+                return false;
+            }
 
             if (trk.engineType == ENGINE_SAMPLER && sampleName != "Empty" && !sampleName.empty()) {
                 if (stagedPool[trk.sampleSlot].name != sampleName) {
