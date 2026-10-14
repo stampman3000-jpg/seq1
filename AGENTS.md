@@ -9,7 +9,7 @@ This is a public repository.
 - Commit as `Stampman3000 <stampman3000@gmail.com>`.
 - Leave history as it is. Do not force-push, rebase commits that are already on the remote, or amend a commit that has been pushed.
 - Do not commit build output, compiled binaries, or `.DS_Store`. That includes `build/`, `bin/`, `obj/`, object files, executables, libraries, WASM, and editor junk. `.gitignore` already names `build/`, `bin/`, `obj/`, `.vscode/`, and `.DS_Store`. A file that is already tracked stays tracked; the ignore file does not remove it. `src/.DS_Store` is one of those already-tracked files. Leave it unless the owner asks for a cleanup.
-- Do not add a home address, the personal johnny.barter email address, or private files (keys, photos, notes, machine-local paths that identify a home). Third-party copyright lines that already ship inside vendored libraries stay as they are.
+- Do not add a home address, a personal email address, or private files (keys, photos, notes, machine-local paths that identify a home). Third-party copyright lines that already ship inside vendored libraries stay as they are.
 - Do not add `.cursor` rules or skills into this repository.
 
 ## What the program is
