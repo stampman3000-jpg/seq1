@@ -221,8 +221,10 @@ physical OLED or audio engine, and the address will not suit most networks.
 
 ## Current limitations
 
-- External MIDI note input works, but external MIDI clock is not exposed or
-  enabled as a user feature.
+- External MIDI notes work. External MIDI clock can be switched on from the
+  diagnostics page (system menu, or Ctrl+Shift+9). It is still experimental:
+  if clock messages stop for more than half a second while the transport is
+  running, playback falls back to the internal clock.
 - Projects, patterns, presets and samples use working-directory-relative paths.
 - SPI, sysfs GPIO, `/dev/gpiomem` and `pinctrl` paths are Pi/Linux-specific.
 - Track 8 USB duplex input is experimental.

@@ -1,110 +1,85 @@
 # Soundboy
 
-Soundboy is my working, one-off Raspberry Pi 4 groovebox and embedded-audio
-platform. I built it as a personal instrument for exploring sequencing,
-synthesis, sampling, DSP and purpose-built hardware rather than as a commercial
-product.
+Soundboy is a one-off groovebox: an eight-track sequencer and sampler I use as a personal instrument. The program is C++. On the desk it runs on a Raspberry Pi 4, with a small grayscale screen and a keypad. The same program opens in a window on a Mac, which is where most of the day-to-day building happens.
 
 [![Watch the demo](https://img.youtube.com/vi/UfSV9runVow/maxresdefault.jpg)](https://www.youtube.com/watch?v=UfSV9runVow)
 
-## At a glance
+## What it does
 
-- **Eight tracks:** each can use the FM synth or sample engine; the sampler also
-  supports granular playback.
-- **Sequencing:** parameter locks, independent track lengths/polymeter, retrigs
-  and trigger conditions.
-- **Performance variation:** the Chaos layer changes playback non-destructively,
-  leaving the underlying pattern intact.
-- **Effects:** tape-style processing per track, then master reverb, delay,
-  compression/saturation and chorus/auto-pan.
-- **Modulation:** two LFOs per track with routable voice, tape-effect and master
-  effect destinations.
-- **Storage:** project, pattern and sound-preset saving, plus a 16-slot sample
-  pool.
-- **Input:** the built-in playing surface and transport controls arrive through
-  an RP2040 USB HID keyboard; a Pi GPIO rotary encoder handles focused editing.
-  External MIDI note input is also supported through RtMidi.
-- **Experimental:** Track 8 can become a stereo USB audio input. Device support
-  and stable duplex operation remain hardware-dependent.
+- **Eight tracks.** Each track is an FM synth or a sampler. The sampler can play a sample straight, as slices, or as grains.
+- **A step sequencer.** Patterns are 32 steps, shown as two pages of 16. Tracks can have their own lengths, so they can drift against each other. Steps can lock parameters, retrigger, and follow trigger conditions.
+- **Chaos.** A separate layer can lift notes, fill gaps, skip hits, add retrigs, and nudge timing. Your original pattern stays underneath. Turn the chaos knob back to zero and the pattern you wrote is still there.
+- **Tape, then the master.** Each track has a tape-style delay and texture effect. After the tracks mix, a master chain adds reverb, delay, compression with saturation, and a stereo chorus.
+- **Modulation.** Two LFOs per track can move voice settings, tape settings, or master mixes.
+- **Saving.** Whole projects, single patterns, and sound presets go to disk. There is a 16-slot sample pool. Drop WAV files in `samples/` and load them from the system menu. Imports are read as mono and kept to 16 seconds.
+- **How you play it.** The Pi keypad is an RP2040 board that shows up as a normal USB keyboard, so the program has no custom driver. A rotary encoder on the Pi GPIO is the focused edit knob. A computer keyboard does the same jobs on a Mac. External MIDI notes arrive through RtMidi: channels 1–8 land on tracks 1–8, and channel 16 follows whichever track is selected.
+- **Track 8 USB input.** Track 8 can switch to a stereo USB audio input. That path is experimental and depends on the interface and the driver.
 
-External MIDI clock handling exists inside the code, but is not currently
-exposed or enabled as a user feature. It should not yet be treated as working
-sync support.
+External MIDI clock can be turned on from the diagnostics page. Treat it as experimental. If the clock goes quiet for more than half a second while the transport is running, playback falls back to the internal clock.
 
-## Architecture
+## A short tour of the keys
 
-Soundboy is a C++17 application built with CMake, raylib, miniaudio and RtMidi.
-The audio callback owns sequencing and voice rendering; work is divided into
-64-frame DSP chunks so modulation, mixing and effects remain independent of the
-audio device's callback size.
+The RP2040 firmware lives in a different project. On a Mac, a normal keyboard is enough, and Command does the same job as Ctrl:
 
-```text
-Sequencer / live keys / external MIDI notes
-                    |
-           per-track voice engine
-              /             \
-         FM synth       sample/granular
-              \             /
-            per-track tape FX
-                    |
-                track sum
-                    |
- reverb + delay + compression/saturation + chorus/auto-pan
-                    |
-          miniaudio stereo output
+| Keys | What they do |
+| --- | --- |
+| Space or Enter | Start and stop, when a menu is closed |
+| A S D F G H J K | Piano keys, C through the C above. Comma and period change octave |
+| Shift + A S D F G H J K | Select tracks 1–8 |
+| Ctrl + left / right | Move between the sequencer, the engine, filter and LFOs, tape, and the master effects |
+| Ctrl + A S D F G H J K | Queue one of the eight patterns |
+| M | Mute the selected track |
+| Tab | A short press opens the system menu. On the Pi, holding Tab for three seconds shuts the machine down |
+| Ctrl + Shift + 9 | Diagnostics: audio load, missed deadlines, level, limiter, voices. Up or C switches the clock |
+
+## Build and run
+
+You need a C++17 compiler and CMake 3.15 or newer. Raylib is used for the window. CMake uses a raylib already installed on the machine, and otherwise downloads raylib 5.0. The audio library (miniaudio) and MIDI library (RtMidi) are already in this repository.
+
+Always start the program from the repository root. Projects, patterns, presets, and samples are saved in the folder you launched from. The first launch tries to create `projects/`, `patterns/`, `presets/`, and `samples/` there.
+
+Hardware wiring, permissions, audio device fallbacks, and a longer troubleshooting list are in [docs/BUILD.md](docs/BUILD.md).
+
+### Mac
+
+```sh
+xcode-select --install
+brew install cmake raylib
+cmake -S . -B build
+cmake --build build --parallel
+./build/seq1
 ```
 
-Normal playback first requests **44.1 kHz with a 512-frame period**, with a
-48 kHz fallback if required by the device. Experimental Track 8 USB duplex mode
-first requests **48 kHz with a 256-frame period**, then tries progressively more
-compatible fallbacks. The diagnostics view exposes audio CPU load, recent peak
-load, callback deadline misses, output level, limiter activity and active
-voices.
+The Mac build uses CoreAudio and CoreMIDI. The physical screen driver does nothing there. You see the same 256×64 picture, scaled up, in the window.
 
-Sequencer timing and DSP run independently of the 60 fps display loop. The
-intent is an instrument that can be iterated visually on macOS, then run
-against the Pi's real audio and control hardware without maintaining a separate
-UI implementation.
+### Raspberry Pi and other Linux
 
-## Hardware and display
+On Debian or Raspberry Pi OS this set is a reasonable start. Package names can differ by release. If CMake asks for another X11 or OpenGL package, install that one and configure again.
 
-The current instrument combines:
+```sh
+sudo apt update
+sudo apt install build-essential cmake git libasound2-dev \
+  libx11-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev \
+  libgl1-mesa-dev libglu1-mesa-dev
+cmake -S . -B build
+cmake --build build --parallel
+./build/seq1
+```
 
-- Raspberry Pi 4
-- SSD1322 256×64 grayscale OLED
-- RP2040-based MX switch keyboard/control surface
-- Pi-connected rotary encoder
+Linux audio goes through ALSA. The Linux compile also turns on `-march=native`, so build on the Pi itself (or on a machine with the same kind of CPU). A binary built on a desktop PC will not be the right one to copy over.
 
-The UI draws to a CPU-side 256×64 framebuffer and scales the same image for a
-raylib desktop preview. On Linux, two 4-bit pixels are packed per byte and sent
-to the SSD1322 over SPI mode 0 at **8 MHz**. The interface deliberately uses
-five grayscale levels—**0, 3, 7, 11 and 15**—for background, structure, labels,
-values and active focus.
+On the Pi the program also talks to the SSD1322 screen over SPI and reads the encoder from GPIO. Those details, including the permissions the process needs, are in [docs/BUILD.md](docs/BUILD.md).
 
-The RP2040 enumerates as an ordinary USB keyboard, so this application needs no
-custom driver or serial protocol. Its firmware is a separate hardware project
-and is not included in this repository.
+### Windows
 
-## Build and project status
+Windows is not a working build of this instrument. The `.bat` files in the root still call `premake5`, and that tool is not part of this repository. The CMake setup that actually builds Soundboy has no Windows audio or MIDI backend. Use a Mac or the Pi.
 
-macOS is useful for building, UI work and audio development. Raspberry Pi/Linux
-adds the physical OLED, GPIO encoder and ALSA paths. The repository currently
-assumes it is launched from its own root because projects, patterns, presets and
-samples use working-directory-relative paths.
+## Where the project stands
 
-See **[docs/BUILD.md](docs/BUILD.md)** for dependencies, build commands,
-hardware/runtime assumptions, verification and current limitations.
+The sequencer, both sound engines, the effects, the screen path, the hardware controls, and save/load are in regular use. USB audio input, a fully repeatable Pi install, and external clock sync still need more hardening. There is no frozen Pi operating-system image yet.
 
-Soundboy remains an evolving personal instrument. The core sequencer, sound
-engines, effects, display path, hardware controls and save/load workflow are in
-use; USB input, deployment reproducibility and external sync still need further
-hardening.
+If you are changing the code, read [AGENTS.md](AGENTS.md) first. It maps the files, the build, and the parts that are easy to break.
 
 ## A note on process
 
-I developed the implementation with substantial LLM assistance, especially for
-writing and revising C++ and DSP plumbing. I created the instrument concept and
-architecture, designed and built the physical hardware, brought up and
-debugged the electronics, tested the system by playing it, and made the final
-technical and musical decisions. I kept generated work only after hands-on
-inspection, measurement and iteration on the real instrument.
+I developed the implementation with substantial LLM assistance, especially for writing and revising C++ and DSP plumbing. I created the instrument concept and architecture, designed and built the physical hardware, brought up and debugged the electronics, tested the system by playing it, and made the final technical and musical decisions. I kept generated work only after hands-on inspection, measurement, and iteration on the real instrument.
